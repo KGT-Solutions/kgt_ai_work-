@@ -1,0 +1,15 @@
+---
+description: Next.js admin-web conventions for building and super admin
+globs: apps/admin-web/**
+alwaysApply: false
+---
+
+# Admin web (Next.js)
+
+- Pages Router (not App Router)
+- Building Admin under `pages/dashboard/[buildingId]/...`
+- Super Admin for onboarding / buildings list (not post-onboard module toggle UI unless built)
+- Use `AdminLayout` / `SuperAdminLayout` and `lib/api.js`
+- Always pass building context on API calls
+- Dense admin workflows — reuse existing UI primitives in `components/`
+- Prefer CSS classes in `styles/globals.css` over new inline style objects for shell UI

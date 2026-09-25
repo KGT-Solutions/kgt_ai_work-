@@ -1,0 +1,37 @@
+{
+  "expo": {
+    "name": "FLATBRIZ",
+    "slug": "society-management-app",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/brand/app-icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "backgroundColor": "#F5F7F7"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "com.societyapp.mobile"
+    },
+    "web": {
+      "bundler": "metro",
+      "name": "FLATBRIZ",
+      "shortName": "FLATBRIZ",
+      "description": "Your building, in one app.",
+      "themeColor": "#059669",
+      "backgroundColor": "#effdf5",
+      "favicon": "./assets/brand/favicon.png",
+      "display": "standalone",
+      "orientation": "portrait",
+      "startUrl": "/"
+    },
+    "plugins": [
+      "expo-font"
+    ]
+  }
+}

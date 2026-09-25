@@ -1,0 +1,14 @@
+---
+description: Prisma schema and data-model conventions for FLATBRIZ
+globs: apps/api/prisma/**
+alwaysApply: false
+---
+
+# Prisma / data
+
+- Schema is source of truth; don’t invent fields in clients first
+- New domain tables: include `buildingId` + relation to `Building`
+- Use migrations; don’t hand-edit SQLite casually
+- Membership = User ↔ Building ↔ Role (+ optional Flat); status `pending` | `approved`
+- Money models already exist (`Bill`, `Payment`, etc.) — extend before duplicating
+- Feature entitlements use `Feature` + `BuildingFeature`

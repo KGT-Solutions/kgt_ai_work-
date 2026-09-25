@@ -1,0 +1,14 @@
+---
+description: Multi-tenancy and RBAC safety invariants for FLATBRIZ
+alwaysApply: true
+---
+
+# Tenancy & RBAC
+
+- Tenant = `Building`; almost all domain data needs `buildingId`
+- Scope requests via `X-Building-Id` / `buildingId` param; optional `X-Membership-Id` when pinning membership
+- Use `authenticate` + `requireRole(...)` / `requireSuperAdmin`; never skip for domain routes
+- Only **approved** memberships grant access; pending stays gated
+- Super admin bypasses per-building RBAC but must not leak cross-tenant data
+- Respect `BuildingFeature` flags when adding or exposing modules
+- Reference: `apps/api/src/middleware/auth.js`, `apps/api/src/middleware/rbac.js`

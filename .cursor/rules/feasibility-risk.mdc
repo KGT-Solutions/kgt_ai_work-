@@ -1,0 +1,28 @@
+---
+description: Feasibility and risk mitigation before implementing features
+alwaysApply: true
+---
+
+# Feasibility & risks
+
+**Always produce this section** when planning or adding a feature — even if the user did not ask for "feasibility" and even for short prompts. Pair it with Impact analysis before any implementation.
+
+Every feature plan must include **Feasibility & risks**.
+
+**Feasibility checks**
+- Fits Express / Prisma / Expo / Next Pages without unjustified new architecture
+- Tenant-scoped with existing middleware?
+- Schema exists or needs migration?
+- Which clients? Depends on mock payments / no push — acceptable?
+- Env/secrets needed? Seed / OTP bypass / building codes still work?
+
+**Risk register** — every Medium/High risk needs a concrete mitigation:
+
+| Risk | Likelihood | Impact | Mitigation | Residual |
+|---|---|---|---|---|
+| Cross-tenant leak | | | Always filter `buildingId` | |
+| Pending users gaining access | | | Enforce approved membership | |
+| Breaking clients | | | Additive API | |
+| Migration risk | | | Expand-contract / backfill | |
+
+**Verdict:** Go | Go with conditions | No-go / needs decision

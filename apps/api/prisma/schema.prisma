@@ -1,0 +1,568 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Building {
+  id               String   @id @default(uuid())
+  name             String
+  address          String?
+  city             String?
+  buildingCode     String   @unique
+  subscriptionTier String   @default("basic")
+  createdAt        DateTime @default(now())
+
+  wings              Wing[]
+  memberships        Membership[]
+  features           BuildingFeature[]
+  bills              Bill[]
+  payments           Payment[]
+  societyExpenses    SocietyExpense[]
+  maintenanceConfig  MaintenanceConfig?
+  complaints         Complaint[]
+  visitorLogs        VisitorLog[]
+  facilities         Facility[]
+  announcements      Announcement[]
+  votes              Vote[]
+  marketplace        MarketplaceListing[]
+  emergencyContacts  EmergencyContact[]
+  notifications      Notification[]
+  vehicles           Vehicle[]
+  bugReports         BugReport[]
+}
+
+model Wing {
+  id         String @id @default(uuid())
+  name       String
+  building   Building @relation(fields: [buildingId], references: [id])
+  buildingId String
+  flats      Flat[]
+}
+
+model Flat {
+  id          String @id @default(uuid())
+  number      String
+  floor       Int?
+  bhkType     String? // 1bhk | 2bhk | 3bhk
+  wing        Wing @relation(fields: [wingId], references: [id])
+  wingId      String
+  memberships Membership[]
+  bills       Bill[]
+  payments    Payment[]
+  visitorLogs VisitorLog[]
+  vehicles    Vehicle[]
+}
+
+model User {
+  id                  String   @id @default(uuid())
+  name                String
+  phone               String   @unique
+  email               String?
+  passwordHash        String?
+  isSuperAdmin        Boolean  @default(false)
+  createdAt           DateTime @default(now())
+  memberships         Membership[]
+  complaints          Complaint[]
+  bookings            FacilityBooking[]
+  voteResponses       VoteResponse[]
+  marketplaceListings MarketplaceListing[]
+  vehicles            Vehicle[]
+  familyMemberProfile FamilyMember?
+  bugReports          BugReport[]
+}
+
+model Role {
+  id          String @id @default(uuid())
+  key         String @unique
+  name        String
+  memberships Membership[]
+}
+
+model Membership {
+  id         String @id @default(uuid())
+  user       User @relation(fields: [userId], references: [id])
+  userId     String
+  building   Building @relation(fields: [buildingId], references: [id])
+  buildingId String
+  flat       Flat? @relation(fields: [flatId], references: [id])
+  flatId     String?
+  role       Role @relation(fields: [roleId], references: [id])
+  roleId     String
+  status     String @default("pending")
+  isFlatMaster Boolean @default(false)
+  familyMembers FamilyMember[]
+
+  // One membership per role+flat (null flatId for guards/admins — one per building role)
+  @@unique([userId, buildingId, roleId, flatId])
+}
+
+model FamilyMember {
+  id           String     @id @default(uuid())
+  membership   Membership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+  membershipId String
+  user         User?      @relation(fields: [userId], references: [id])
+  userId       String?    @unique
+  name         String
+  relation     String
+  phone        String
+  passwordHash String
+  status       String     @default("pending")
+  createdAt    DateTime   @default(now())
+
+  @@index([membershipId])
+  @@index([status])
+}
+
+model Feature {
+  id               String @id @default(uuid())
+  key              String @unique
+  name             String
+  category         String
+  buildingFeatures BuildingFeature[]
+}
+
+model BuildingFeature {
+  id         String @id @default(uuid())
+  building   Building @relation(fields: [buildingId], references: [id])
+  buildingId String
+  feature    Feature @relation(fields: [featureId], references: [id])
+  featureId  String
+  isEnabled  Boolean @default(true)
+
+  @@unique([buildingId, featureId])
+}
+
+model Bill {
+  id              String   @id @default(uuid())
+  building        Building @relation(fields: [buildingId], references: [id])
+  buildingId      String
+  flat            Flat     @relation(fields: [flatId], references: [id])
+  flatId          String
+  month           String
+  amount          Float
+  amountPaid      Float    @default(0)
+  dueDate         DateTime
+  status          String   @default("due") // due | partial | paid
+  type            String   @default("maintenance") // maintenance | misc_split | adjustment
+  title           String?
+  breakdown       String?
+  sourceExpense   SocietyExpense? @relation(fields: [sourceExpenseId], references: [id])
+  sourceExpenseId String?
+  payments        Payment[]
+  allocations     PaymentAllocation[]
+
+  @@index([buildingId, flatId, month, type])
+}
+
+model Payment {
+  id               String   @id @default(uuid())
+  building         Building @relation(fields: [buildingId], references: [id])
+  buildingId       String
+  flat             Flat     @relation(fields: [flatId], references: [id])
+  flatId           String
+  bill             Bill?    @relation(fields: [billId], references: [id])
+  billId           String?
+  amount           Float
+  method           String   @default("admin") // cash | upi | admin | mock
+  gateway          String?
+  txnId            String?
+  note             String?
+  receiptUrl       String?
+  status           String   @default("approved") // pending_review | approved | rejected
+  reviewedAt       DateTime?
+  reviewedByUserId String?
+  paidAt           DateTime @default(now())
+  receivedByUserId String?
+  allocations      PaymentAllocation[]
+
+  @@index([buildingId, flatId])
+  @@index([buildingId, status])
+}
+
+model PaymentAllocation {
+  id        String  @id @default(uuid())
+  payment   Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  paymentId String
+  bill      Bill    @relation(fields: [billId], references: [id], onDelete: Cascade)
+  billId    String
+  amount    Float
+
+  @@index([paymentId])
+  @@index([billId])
+}
+
+model MaintenanceConfig {
+  id             String   @id @default(uuid())
+  building       Building @relation(fields: [buildingId], references: [id])
+  buildingId     String   @unique
+  amount         Float    // default / uncategorized flats
+  amount1Bhk     Float?
+  amount2Bhk     Float?
+  amount3Bhk     Float?
+  billingDay     Int      @default(1) // 1–28
+  active         Boolean  @default(true)
+  startMonth     String?  // YYYY-MM
+  openingBalance Float    @default(0)
+  qrImageUrl     String?  // society UPI / QR screenshot for residents
+  updatedAt      DateTime @updatedAt
+}
+
+model SocietyExpense {
+  id          String   @id @default(uuid())
+  building    Building @relation(fields: [buildingId], references: [id])
+  buildingId  String
+  category    String
+  vendor      String?
+  description String?
+  invoiceNo   String?
+  amount      Float
+  paidAt      DateTime @default(now())
+  mode        String   // fund | recoverable
+  splitScope  String?  // all_occupied | wing | selected_flats
+  wingId      String?
+  remarks     String?
+  imageUrl    String?  // invoice / payment proof screenshot
+  createdAt   DateTime @default(now())
+  bills       Bill[]
+
+  @@index([buildingId])
+}
+
+model VisitorLog {
+  id            String    @id @default(uuid())
+  building      Building  @relation(fields: [buildingId], references: [id])
+  buildingId    String
+  flat          Flat?     @relation(fields: [flatId], references: [id])
+  flatId        String?
+  visitorName   String
+  purpose       String
+  vehicleNumber String?
+  photoUrl      String?
+  entryTime     DateTime  @default(now())
+  exitTime      DateTime?
+  status        String    @default("pending")
+}
+
+model Complaint {
+  id          String   @id @default(uuid())
+  building    Building @relation(fields: [buildingId], references: [id])
+  buildingId  String
+  user        User @relation(fields: [userId], references: [id])
+  userId      String
+  category    String
+  title       String
+  description String?
+  imageUrl    String?
+  status      String   @default("submitted")
+  createdAt   DateTime @default(now())
+}
+
+model Facility {
+  id           String @id @default(uuid())
+  building     Building @relation(fields: [buildingId], references: [id])
+  buildingId   String
+  name         String
+  icon         String?
+  description  String?
+  capacity     Int?
+  pricePerHour Float?
+  active       Boolean  @default(true)
+  bookings     FacilityBooking[]
+}
+
+model FacilityBooking {
+  id         String   @id @default(uuid())
+  facility   Facility @relation(fields: [facilityId], references: [id])
+  facilityId String
+  user       User @relation(fields: [userId], references: [id])
+  userId     String
+  startTime  DateTime
+  endTime    DateTime
+  status     String   @default("pending")
+  createdAt  DateTime @default(now())
+}
+
+model Announcement {
+  id         String   @id @default(uuid())
+  building   Building @relation(fields: [buildingId], references: [id])
+  buildingId String
+  title      String
+  body       String
+  category   String   @default("general")
+  postedAt   DateTime @default(now())
+  pinned     Boolean  @default(false)
+}
+
+model Vote {
+  id         String   @id @default(uuid())
+  building   Building @relation(fields: [buildingId], references: [id])
+  buildingId String
+  question   String
+  closesAt   DateTime
+  options    VoteOption[]
+}
+
+model VoteOption {
+  id        String @id @default(uuid())
+  vote      Vote @relation(fields: [voteId], references: [id])
+  voteId    String
+  label     String
+  responses VoteResponse[]
+}
+
+model VoteResponse {
+  id           String @id @default(uuid())
+  voteOption   VoteOption @relation(fields: [voteOptionId], references: [id])
+  voteOptionId String
+  user         User @relation(fields: [userId], references: [id])
+  userId       String
+
+  @@unique([voteOptionId, userId])
+}
+
+model MarketplaceListing {
+  id         String   @id @default(uuid())
+  building   Building @relation(fields: [buildingId], references: [id])
+  buildingId String
+  user       User @relation(fields: [userId], references: [id])
+  userId     String
+  type       String
+  title      String
+  price      Float?
+  createdAt  DateTime @default(now())
+}
+
+model EmergencyContact {
+  id         String @id @default(uuid())
+  building   Building @relation(fields: [buildingId], references: [id])
+  buildingId String
+  name       String
+  phone      String
+  category   String
+}
+
+model Notification {
+  id         String   @id @default(uuid())
+  building   Building @relation(fields: [buildingId], references: [id])
+  buildingId String
+  userId     String?
+  title      String
+  body       String
+  category   String
+  read       Boolean  @default(false)
+  createdAt  DateTime @default(now())
+}
+
+model OtpSession {
+  id        String   @id @default(uuid())
+  phone     String
+  codeHash  String
+  expiresAt DateTime
+  attempts  Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@index([phone])
+}
+
+model Vehicle {
+  id                 String   @id @default(uuid())
+  building           Building @relation(fields: [buildingId], references: [id])
+  buildingId         String
+  user               User @relation(fields: [userId], references: [id])
+  userId             String
+  flat               Flat @relation(fields: [flatId], references: [id])
+  flatId             String
+  category           String
+  makeModel          String
+  registrationNumber String
+  color              String?
+  gatePassStatus     String   @default("submitted")
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@index([buildingId])
+  @@index([flatId])
+  @@index([userId])
+}
+
+model BugReport {
+  id         String   @id @default(uuid())
+  building   Building @relation(fields: [buildingId], references: [id])
+  buildingId String
+  user       User     @relation(fields: [userId], references: [id])
+  userId     String
+  roleKey    String
+  source     String
+  category   String   @default("Other")
+  message    String
+  status     String   @default("open")
+  reference  String
+  flatNumber String?
+  imageUrl   String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([buildingId])
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model SalesLead {
+  id          String   @id @default(uuid())
+  clientType  String
+  query       String
+  answer      String
+  intentScore Int
+  signals     String[]
+  alerted     Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  @@index([clientType])
+  @@index([intentScore])
+  @@index([createdAt])
+}
+
+// ── Multi-tenant chat engine (resold/white-label customers) ──────────────
+// FLATBRIZ's own Support/Sales bots stay on the existing Building-scoped
+// path (src/domains/flatbriz*.profile.js) and are untouched by this. This is
+// the additive path for other companies — any industry — running the same
+// engine (src/engine/chatEngine.js) against their own data.
+
+model Tenant {
+  id                String   @id @default(uuid())
+  slug              String   @unique
+  name              String
+  industryLabel     String   // e.g. "Retail Customer Support", "IT Helpdesk" — shown to the model as its role
+  persona           String?  // optional extra tone/rules text layered onto the generic template
+  outOfScopeMessage String   @default("I don't have this info yet. Let me connect you with support.")
+  minConfidence     Float    @default(0.30)
+  active            Boolean  @default(true)
+  signupEmail       String?  // set when provisioned via the public self-serve wizard; null for an admin-created tenant
+  createdAt         DateTime @default(now())
+
+  documents    TenantDocument[]
+  apiKeys      TenantApiKey[]
+  consents     TenantConsent[]
+  chatSessions ChatSession[]
+  tickets      SupportTicket[]
+  usageLogs    UsageLog[]
+}
+
+// Widget/API credentials. Only a SHA-256 hash of each key is stored — the
+// plaintext is shown once when issued (utils/tenantApiKeys.js) and can't be
+// recovered, only rotated. Several keys per tenant, so a key can be replaced
+// without downtime: issue the new one, update the embed, then revoke the old.
+model TenantApiKey {
+  id         String    @id @default(uuid())
+  tenant     Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantId   String
+  keyHash    String    @unique // sha256 hex of the full plaintext key
+  keyPrefix  String    // first chars of the key, e.g. "tk_3f9a1c" — lets admins tell keys apart
+  label      String    @default("Default")
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime? // updated at most every few minutes, not on every request
+  revokedAt  DateTime? // non-null = rejected; kept for the audit trail rather than deleted
+
+  @@index([tenantId])
+}
+
+enum ConsentKind {
+  WEBSITE_CRAWL // visitor certified they may authorize crawling this domain
+}
+
+// Audit record of an authorization the visitor gave during self-serve signup.
+// statement is the server's copy of the text at statementVersion, not whatever
+// the client sent, so the record reflects what we actually asked people to agree to.
+model TenantConsent {
+  id               String      @id @default(uuid())
+  tenant           Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantId         String
+  kind             ConsentKind
+  domain           String?     // the crawled host, for WEBSITE_CRAWL
+  statement        String
+  statementVersion String
+  email            String      // who gave it (the signup email)
+  ipAddress        String?
+  userAgent        String?
+  createdAt        DateTime    @default(now())
+
+  @@index([tenantId])
+}
+
+// Universal 3-tier knowledge taxonomy (sector-neutral). Mirrored as string
+// constants in src/services/shared/documentCategory.js — keep in sync.
+enum DocumentCategory {
+  CORE_OVERVIEW // who the company is, what it offers, positioning
+  FAQ           // question/answer content, troubleshooting
+  CUSTOM_POLICY // pricing, policies, terms, manuals, spec sheets
+}
+
+model TenantDocument {
+  id         String           @id @default(uuid())
+  tenant     Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantId   String
+  title      String
+  content    String           // plain markdown/text — parsed into chunks the same way docs/*.md files are
+  category   DocumentCategory @default(CORE_OVERVIEW) // drives per-bot retrieval weighting (domains/tenantProfile.js)
+  sourceUrl  String?          // set when this document came from the auto-scraper; null for a hand-authored one
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+
+  @@index([tenantId])
+  @@index([tenantId, category])
+}
+
+model ChatSession {
+  id             String   @id @default(uuid())
+  tenant         Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantId       String
+  externalUserId String?  // identity from whatever host app is embedding the widget — opaque to us
+  startedAt      DateTime @default(now())
+  messages       ChatMessage[]
+
+  @@index([tenantId])
+}
+
+model ChatMessage {
+  id         String      @id @default(uuid())
+  session    ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  sessionId  String
+  role       String      // user | assistant
+  content    String
+  confidence Float?      // the gate score behind this assistant reply, if applicable
+  createdAt  DateTime    @default(now())
+
+  @@index([sessionId])
+}
+
+model SupportTicket {
+  id         String   @id @default(uuid())
+  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantId   String
+  query      String
+  transcript Json     // recent turns, for whoever picks this up
+  confidence Float    // the score that failed the gate
+  status     String   @default("open")
+  createdAt  DateTime @default(now())
+
+  @@index([tenantId, status])
+}
+
+model UsageLog {
+  id               String   @id @default(uuid())
+  tenant           Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantId         String
+  provider         String   // groq | openai | anthropic
+  model            String
+  promptTokens     Int
+  completionTokens Int
+  estimatedCostUsd Float    @default(0)
+  createdAt        DateTime @default(now())
+
+  @@index([tenantId, createdAt])
+}

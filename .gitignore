@@ -1,0 +1,84 @@
+# Dependencies (largest folders — never commit)
+node_modules/
+.pnp
+.pnp.js
+
+# Build outputs
+.next/
+out/
+dist/
+build/
+.expo/
+.expo-shared/
+web-build/
+
+# Local databases & runtime data
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+apps/api/prisma/dev.db
+apps/api/uploads/*
+!apps/api/uploads/.gitkeep
+
+# Environment & secrets (commit *.example only)
+.env
+.env.*
+!.env.example
+!.env.*.example
+.env.local
+.env.docker
+apps/api/.env
+apps/mobile/.env
+apps/admin-web/.env.local
+
+# Logs & debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+logs/
+
+# OS & editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.code-workspace
+
+# Test & coverage
+coverage/
+.nyc_output/
+
+# TypeScript / cache
+*.tsbuildinfo
+.turbo/
+.cache/
+.parcel-cache/
+
+# Docker (local overrides; keep compose + example env)
+docker-compose.override.yml
+
+# Misc binaries & large media (prevent accidental commits)
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+*.dmg
+*.iso
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.psd
+*.ai
+
+# Uploaded user content
+uploads/
+!uploads/.gitkeep

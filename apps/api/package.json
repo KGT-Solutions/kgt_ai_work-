@@ -1,0 +1,30 @@
+{
+  "name": "society-app-api",
+  "version": "1.0.0",
+  "private": true,
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "node src/server.js",
+    "test": "node --test test/",
+    "seed": "node prisma/seed.js",
+    "prisma:migrate": "prisma migrate dev --name init",
+    "prisma:generate": "prisma generate",
+    "prisma:studio": "prisma studio"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.14.0",
+    "cheerio": "^1.2.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^2.4.0",
+    "pdfjs-dist": "4.2.67",
+    "porter-stemmer": "^0.9.1",
+    "puppeteer-core": "22.15.0",
+    "resend": "^6.18.0"
+  },
+  "devDependencies": {
+    "prisma": "^5.14.0"
+  }
+}

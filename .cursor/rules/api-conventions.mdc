@@ -1,0 +1,16 @@
+---
+description: Express API route, RBAC, and tenant-scoping conventions
+globs: apps/api/**/*.js
+alwaysApply: false
+---
+
+# API conventions
+
+- Mount new domains in `apps/api/src/app.js` behind `authenticate`
+- One route file per domain under `apps/api/src/routes/`
+- Every Prisma query for tenant data must filter by `buildingId` (except true platform routes)
+- Return `{ error: '...' }` JSON; match existing status codes
+- Side effects: in-app `Notification` rows / email helpers — not device push
+- Payments stay mock unless the task is gateway integration
+- Prefer CommonJS (`require` / `module.exports`) to match the API today
+- Use `requireRole(...)` / `requireSuperAdmin` from existing RBAC middleware
