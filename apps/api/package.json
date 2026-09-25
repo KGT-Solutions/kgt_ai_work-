@@ -1,5 +1,5 @@
 {
-  "name": "society-app-api",
+  "name": "kgt-ai-hub-api",
   "version": "1.0.0",
   "private": true,
   "main": "src/server.js",
@@ -7,7 +7,7 @@
     "dev": "node src/server.js",
     "test": "node --test test/",
     "seed": "node prisma/seed.js",
-    "prisma:migrate": "prisma migrate dev --name init",
+    "prisma:migrate": "prisma migrate dev",
     "prisma:generate": "prisma generate",
     "prisma:studio": "prisma studio"
   },
@@ -21,10 +21,10 @@
     "multer": "^2.4.0",
     "pdfjs-dist": "4.2.67",
     "porter-stemmer": "^0.9.1",
-    "puppeteer-core": "22.15.0",
-    "resend": "^6.18.0"
+    "puppeteer-core": "22.15.0"
   },
   "devDependencies": {
     "prisma": "^5.14.0"
-  }
+  },
+  "description": "KGT AI Hub: multi-tenant Support + Sales chatbot platform API"
 }

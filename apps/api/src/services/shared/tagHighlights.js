@@ -1,5 +1,4 @@
-// Generic, tenant-agnostic version of FLATBRIZ's own hand-tuned
-// extractKeyBenefits (services/salesbot/benefits.js): pulls any
+// Tenant-agnostic benefit highlighting for the Sales Bot: pulls any
 // "${tagPrefix}:*" tag off the chunks actually retrieved for an answer and
 // turns the slug into a human label by title-casing it — no hardcoded
 // lookup table, so it works for any tenant's own tags with zero per-tenant

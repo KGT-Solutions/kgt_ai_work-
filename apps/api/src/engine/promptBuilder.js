@@ -2,7 +2,7 @@
 // every domain — formatting retrieved excerpts, appending the question) vs.
 // what's persona/policy (owned entirely by the domain profile — Requirement
 // 1: config-driven system prompts). The core engine never contains a single
-// word of FLATBRIZ-specific (or any other domain's) copy.
+// word of any one tenant's copy — that comes from domains/tenantProfile.js.
 
 const { CATEGORY_PROMPT_LABELS } = require('../services/shared/documentCategory');
 

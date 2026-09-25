@@ -2,7 +2,7 @@ const { rankItems } = require('../services/shared/lexicalSearch');
 
 // Thin, domain-agnostic wrapper over the shared lexical scorer. Every domain
 // profile's knowledge chunks flow through the same ranking code — nothing
-// here knows about buildings, bylaws, or sales objections.
+// here knows about any one tenant or industry.
 
 /**
  * @param {string} query

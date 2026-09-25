@@ -1,14 +1,13 @@
-// The one core chat controller every domain (FLATBRIZ support, FLATBRIZ
-// sales, or a resold tenant in any industry) runs through. It knows nothing
-// about buildings, bylaws, pricing objections, or a specific tenant's
+// The one core chat controller every tenant's Support and Sales bot runs
+// through. It knows nothing
+// about pricing objections, return policies, or a specific tenant's
 // business — everything domain-specific arrives via the DomainProfile
 // passed in (see domainProfile.js) and the action registry.
 //
 // Confidence gating, HITL ticketing, and usage tracking (engine/confidence.js,
 // ticketing.js, usageTracking.js) are opt-in per profile — a profile that
 // doesn't set minConfidence/ticketing/usageTracking behaves exactly as
-// before. Today only the tenant profile (domains/tenantProfile.js) opts in;
-// FLATBRIZ's own two profiles are untouched by this.
+// before. The tenant profiles (domains/tenantProfile.js) opt in to all three.
 
 const { loadKnowledgeBase } = require('./knowledgeLoader');
 const { retrieve } = require('./retriever');
@@ -41,8 +40,8 @@ async function getEngineAnswer({ profile, query, ctx = {} }) {
   }
 
   // 2. Retrieval, scoped to this domain's own knowledge base. A profile
-  //    supplies either a static knowledgeBasePath (filesystem, FLATBRIZ's
-  //    manuals) or a resolveKnowledge(ctx) function (DB-backed, per-tenant
+  //    supplies either a static knowledgeBasePath (a directory of .md
+  //    files) or a resolveKnowledge(ctx) function (DB-backed, per-tenant
   //    documents) — the engine doesn't care which.
   const allChunks = profile.resolveKnowledge
     ? await profile.resolveKnowledge(ctx)

@@ -1,5 +1,5 @@
-// Dependency-free* lexical scoring shared by every bot's retriever
-// (FLATBRIZ support/sales and every multi-tenant customer). Deliberately
+// Dependency-free* lexical scoring shared by every tenant's Support and
+// Sales bots. Deliberately
 // simple (weighted term-overlap, not embeddings) — good enough for a small,
 // curated set of manual/knowledge-base chunks.
 // (*one exception: Porter-stemming, see below — without it "return" and
@@ -99,7 +99,7 @@ function isAdjacentSwap(a, b) {
   return diff.length === 2 && diff[1] === diff[0] + 1 && a[diff[0]] === b[diff[1]] && a[diff[1]] === b[diff[0]];
 }
 
-// Vocabulary per item array — the tenant/FLATBRIZ chunk caches hand back the
+// Vocabulary per item array — the tenant knowledge cache hands back the
 // same array object until invalidated, so this is built once per cache
 // generation, not once per query.
 const vocabularyCache = new WeakMap();

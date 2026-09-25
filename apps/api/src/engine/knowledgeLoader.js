@@ -14,8 +14,7 @@ const TAGS_COMMENT = /^<!--\s*tags:\s*(.+?)\s*-->$/;
 
 /**
  * @typedef {{ id: string, title: string, content: string, sourceFile: string, tags: string[], category?: string }} KnowledgeChunk
- * category is only set for DB-backed tenant documents (TenantDocument.category);
- * filesystem manuals leave it undefined.
+ * category comes from TenantDocument.category; filesystem knowledge bases leave it undefined.
  */
 
 function parseIntoChunks(filename, raw) {

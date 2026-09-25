@@ -8,7 +8,7 @@
 // container runs as root, where Chrome refuses to start sandboxed), so a
 // renderer exploit on a hostile page would land in the API process's
 // container. crawlSite only enables this tier when the caller passes
-// browserFallback: true, and only the super-admin /tenants/:id/scrape route
+// browserFallback: true, and only the operator /tenants/:id/scrape route
 // does — the public, unauthenticated /register/analyze route never renders.
 //
 // SSRF: Tier 1's checks cover the one URL it fetches, but a rendered page
@@ -249,7 +249,7 @@ function realisticUserAgent(browserUa) {
   // A real Chrome UA (sites serve their normal page to it, where
   // "HeadlessChrome" is often blocked outright), still honestly tagged with
   // our bot token so a site operator can identify and rate-limit us.
-  return `${browserUa.replace(/HeadlessChrome/g, 'Chrome')} FlatbrizTenantOnboardingBot/1.0`;
+  return `${browserUa.replace(/HeadlessChrome/g, 'Chrome')} KGTAIHubBot/1.0`;
 }
 
 /**

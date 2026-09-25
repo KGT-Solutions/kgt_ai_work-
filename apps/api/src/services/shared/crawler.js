@@ -27,7 +27,7 @@ const TOTAL_BUDGET_MS = 30000;
 const CONCURRENCY = 3;
 const MAX_REDIRECTS = 3;
 const MIN_WORDS_PER_PAGE = 30; // below this, treat as a stub/redirect page, not real content
-const USER_AGENT = 'FlatbrizTenantOnboardingBot/1.0 (+https://flatbriz.example/bot)';
+const USER_AGENT = 'KGTAIHubBot/1.0';
 
 // Same-domain links whose href/anchor text mention these are crawled before
 // any other discovered link — the pages the prospect's admin actually wants
@@ -114,7 +114,7 @@ class CrawlerError extends Error {
 }
 
 // ---------------------------------------------------------------------
-// SSRF safety. This endpoint is super-admin-only, but it's still a server
+// SSRF safety. This endpoint is operator-only, but it's still a server
 // making requests to a URL an admin typed in — the same category of risk as
 // any "fetch this URL for me" feature. Block loopback/private/link-local
 // targets (including the 169.254.169.254 cloud-metadata address) and
@@ -390,7 +390,7 @@ function siteKey(hostname) {
  *   renderer?: (url: string, opts: { checkHost: Function, timeoutMs: number }) => Promise<{ html: string, finalUrl: URL } | null>
  * }} [opts]
  *   browserFallback: enable Tier 2. OFF by default — see crawlerBrowser.js
- *     for why only the super-admin scrape route turns it on.
+ *     for why only the operator scrape route turns it on.
  *   renderer: override Tier 2's renderer (tests); defaults to crawlerBrowser.renderPage.
  * @returns {Promise<{
  *   pages: Array<{ title: string, markdown: string, url: string, rendered: boolean }>,

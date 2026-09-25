@@ -15,7 +15,7 @@ describe('labelFromSlug — generic, no lookup table', () => {
   });
 });
 
-describe('extractTaggedHighlights — generalized version of the FLATBRIZ-specific extractKeyBenefits', () => {
+describe('extractTaggedHighlights — tag-based benefit badges for the Sales Bot', () => {
   test('extracts a label for any tag under the given prefix, with no hardcoded vocabulary', () => {
     const labels = extractTaggedHighlights([chunkWithTags(['benefit:same_day_shipping'])], 'benefit');
     assert.deepEqual(labels, ['Same Day Shipping']);

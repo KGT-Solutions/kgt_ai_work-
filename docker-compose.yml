@@ -1,15 +1,23 @@
+# KGT AI Hub — multi-tenant Support + Sales chatbot platform.
+# Own database, container names and ports, so it runs alongside Flatbriz
+# (society-*) on the same host without sharing anything.
+#
+# Deploy with:  docker compose --env-file .env.docker up -d --build
+# (build args below need compose to see the env file.) The API container
+# reads its own settings from HUB_ENV_FILE, default .env.docker.
+
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: society-postgres
+    container_name: kgt-ai-hub-postgres
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-society}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-society}
-      POSTGRES_DB: ${POSTGRES_DB:-society}
+      POSTGRES_USER: ${POSTGRES_USER:-kgthub}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kgthub}
+      POSTGRES_DB: ${POSTGRES_DB:-kgthub}
     ports:
-      - "${POSTGRES_PORT:-5434}:5432"
+      - "${POSTGRES_PORT:-5440}:5432"
     volumes:
-      - society_pg_data:/var/lib/postgresql/data
+      - kgt_ai_hub_pg_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
@@ -21,49 +29,24 @@ services:
   api:
     build:
       context: ./apps/api
-    container_name: society-api
-    env_file: .env.docker
+    container_name: kgt-ai-hub-api
+    env_file: ${HUB_ENV_FILE:-.env.docker}
     # PID 1 must reap zombie processes: `exec node` makes Node PID 1, which
     # doesn't — every Chromium helper process the crawler's browser tier
     # spawns would otherwise linger as a zombie after it exits.
     init: true
-    # Chromium tabs are memory-hungry; /dev/shm is bypassed via
-    # --disable-dev-shm-usage, so no shm_size bump is needed.
     ports:
-      - "${API_PORT:-4000}:4000"
+      - "${API_PORT:-4100}:4000"
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-society}:${POSTGRES_PASSWORD:-society}@postgres:5432/${POSTGRES_DB:-society}?schema=public
+      DATABASE_URL: postgresql://${POSTGRES_USER:-kgthub}:${POSTGRES_PASSWORD:-kgthub}@postgres:5432/${POSTGRES_DB:-kgthub}?schema=public
       PGHOST: postgres
-      POSTGRES_USER: ${POSTGRES_USER:-society}
-      POSTGRES_DB: ${POSTGRES_DB:-society}
-      RUN_SEED: ${RUN_SEED:-false}
-      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      POSTGRES_USER: ${POSTGRES_USER:-kgthub}
+      POSTGRES_DB: ${POSTGRES_DB:-kgthub}
       PORT: 4000
-      DEV_BYPASS_AUTH: ${DEV_BYPASS_AUTH:-true}
-      DEV_BYPASS_CODE: ${DEV_BYPASS_CODE:-123456}
-      OTP_DELIVERY: ${OTP_DELIVERY:-email}
-      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-resend}
-      RESEND_API_KEY: ${RESEND_API_KEY:-}
-      EMAIL_FROM: ${EMAIL_FROM:-Society App <onboarding@resend.dev>}
-      ADMIN_WEB_URL: ${ADMIN_WEB_URL:-}
-      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
-      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
-      TWILIO_VERIFY_SERVICE_SID: ${TWILIO_VERIFY_SERVICE_SID:-}
-      TWILIO_VERIFY_CHANNEL: ${TWILIO_VERIFY_CHANNEL:-whatsapp}
-      # LLM_PRIMARY / LLM_FALLBACK / *_API_KEY / *_MODEL / CHAT_TEMPERATURE /
-      # LLM_TIMEOUT_MS deliberately come ONLY from env_file (.env.docker).
+      # Secrets (JWT_SECRET, HUB_ADMIN_*, LLM keys) come ONLY from env_file.
       # Listing them here as ${VAR:-} would override env_file with whatever
-      # the shell had at `compose up` time — an empty key whenever compose
-      # was run without --env-file — silently disabling every chatbot.
-      CHAT_RATE_LIMIT_MAX: ${CHAT_RATE_LIMIT_MAX:-20}
-      CHAT_RATE_LIMIT_WINDOW_MIN: ${CHAT_RATE_LIMIT_WINDOW_MIN:-10}
-      SALES_EMAIL: ${SALES_EMAIL:-}
-      CHAT_ALERT_EMAIL: ${CHAT_ALERT_EMAIL:-}
-      INTENT_SCORE_THRESHOLD: ${INTENT_SCORE_THRESHOLD:-40}
-      SALES_CHAT_RATE_LIMIT_MAX: ${SALES_CHAT_RATE_LIMIT_MAX:-20}
-      SALES_CHAT_RATE_LIMIT_WINDOW_MIN: ${SALES_CHAT_RATE_LIMIT_WINDOW_MIN:-10}
-    volumes:
-      - ./apps/api/uploads:/app/uploads
+      # the shell had at `compose up` time — an empty value whenever compose
+      # runs without --env-file.
     depends_on:
       postgres:
         condition: service_healthy
@@ -75,37 +58,18 @@ services:
       retries: 12
       start_period: 60s
 
-  # IMPORTANT: build args need compose env vars. Always deploy with:
-  #   docker compose --env-file .env.docker up -d --build
-  admin-web:
+  web:
     build:
-      context: ./apps/admin-web
+      context: ./apps/web
       args:
-        NEXT_PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:4000}
-    container_name: society-admin
-    env_file: .env.docker
+        NEXT_PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:4100}
+    container_name: kgt-ai-hub-web
     ports:
-      - "${ADMIN_PORT:-3005}:3001"
-    depends_on:
-      api:
-        condition: service_healthy
-    restart: unless-stopped
-
-  mobile:
-    build:
-      context: ./apps/mobile
-      args:
-        EXPO_PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:4000}
-    container_name: society-mobile
-    env_file: .env.docker
-    environment:
-      EXPO_PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:4000}
-    ports:
-      - "${MOBILE_PORT:-8081}:8081"
+      - "${WEB_PORT:-3100}:3001"
     depends_on:
       api:
         condition: service_healthy
     restart: unless-stopped
 
 volumes:
-  society_pg_data:
+  kgt_ai_hub_pg_data:

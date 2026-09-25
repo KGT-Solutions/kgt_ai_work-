@@ -1,10 +1,10 @@
 // Requirement 3: modular action handlers. An "action" is a piece of
 // domain-specific logic (a live data lookup, a side effect) that can answer
-// a query directly, bypassing retrieval + the LLM entirely — e.g. "what do
-// I owe this month" doesn't need RAG over a static manual, it needs a live
-// Bill query. The core engine (chatEngine.js) never imports an action
+// a query directly, bypassing retrieval + the LLM entirely — e.g. an order-status
+// lookup needs live data, not retrieval. No tenant profile registers actions
+// yet (their `actions` lists are empty); the registry is the extension point. The core engine (chatEngine.js) never imports an action
 // implementation directly; it only knows the registry and the list of
-// action ids a domain profile enables. Actions live in src/actions/.
+// action ids a domain profile enables. Register actions with registerAction() at startup.
 
 const registry = new Map(); // actionId -> { match(query, ctx), run(query, ctx) }
 

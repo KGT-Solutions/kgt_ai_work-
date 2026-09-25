@@ -1,155 +1,108 @@
-# Society Management App — Starter Codebase
+# KGT AI Hub — Support & Sales Bots for Any Company
 
-A real, running starting point for the app we designed: a multi-tenant
-society/building management platform with a mobile app (Expo/React Native),
-an admin web app (Next.js), and a backend API (Express + Prisma) that
-implements the role model and multi-tenancy from the architecture doc.
+A multi-tenant SaaS platform: each customer company (a **tenant**) signs up,
+trains two chatbots on its own content, and embeds them on its website.
 
-This matches the mockups you generated: colors, layout, and the screens for
-Login/OTP, Resident Dashboard, Bills, Complaints, Visitor logging, Voting,
-Emergency/SOS, Marketplace, Notifications, Profile, plus the Super Admin
-"Onboard a new society" screen and the Building Admin dashboard.
+- **Support Bot** answers strictly from the tenant's documents. A 30% confidence
+  gate hands anything it can't ground to a human (a support ticket) instead of
+  guessing.
+- **Sales Bot** is persuasive but grounded: it highlights tagged benefits,
+  handles pricing, competitor and returns objections, and never invents facts.
 
-## Structure
+Both bots share one knowledge base per tenant, split into three categories —
+**Company overview**, **FAQs**, and **Policies / pricing / manuals** — which
+each bot weights differently.
+
+## Repository layout
 
 ```
 apps/
-  api/           Express + Prisma backend (SQLite locally, swap to Postgres for prod)
-  mobile/        Expo React Native app - Resident and Guard experiences
-  admin-web/     Next.js app - Super Admin and Building Admin dashboards
+  api/   Express + Prisma API (Postgres)
+         - /api/v1/public/register   self-serve signup: crawl a website or parse PDFs, then train
+         - /api/v1/tenant-chat/:slug Support + Sales chat (per-tenant API key)
+         - /api/v1/tenants           tenant, document, API-key management (operators)
+         - /api/v1/operator          operator console sign-in
+         - /widgets/tenant-chat-widget.js  embeddable chat widget
+  web/   Next.js
+         - /register                 public onboarding wizard for companies
+         - /login, /tenants          operator console: tenants, documents, API keys,
+                                     live bot testing, tickets, usage
 ```
 
-## Prerequisites
-- Node.js 18+
-- npm
-- For the mobile app: the free "Expo Go" app on your phone (easiest), or
-  Xcode/Android Studio if you want a simulator instead
-
-## 1. Run the backend
+## Run it (Docker)
 
 ```bash
-cd apps/api
-npm install
-cp .env.example .env
-npx prisma migrate dev --name init
-npm run seed
-npm run dev
+cp .env.docker.example .env.docker
+# edit .env.docker: at least one LLM key (GROQ_API_KEY / OPENAI_API_KEY /
+# ANTHROPIC_API_KEY), HUB_ADMIN_EMAIL / HUB_ADMIN_PASSWORD, and JWT_SECRET
+docker compose --env-file .env.docker up -d --build
 ```
 
-The API starts at `http://localhost:4000`. The seed script prints demo login
-phone numbers to the console - keep it open for reference.
-
-**Demo accounts (OTP is always `123456` in dev):**
-
-| Role | Phone |
+| Service | URL |
 |---|---|
-| Super Admin (Sanyam) | `+919837722599` |
-| Building Admin (Green Meadows Society) | `+919876500002` |
-| Resident - Asha Rao, Wing B / Flat 402 | `+919876500001` |
-| Guard | `+919876500003` |
+| Onboarding wizard | http://localhost:3100/register |
+| Operator console | http://localhost:3100/login |
+| API | http://localhost:4100 (health: `/health`) |
+| Postgres | localhost:5440 |
 
-Building Code for Green Meadows Society: `GRM4821` (use this to test the
-"New society? Enter your Building Code" signup flow with a fresh phone number).
+On first start the API applies migrations and runs the seed:
 
-## 2. Run the mobile app
+- creates the operator account from `HUB_ADMIN_EMAIL` / `HUB_ADMIN_PASSWORD`;
+- creates the showcase **Tenant #1, FLATBRIZ** (`slug: flatbriz`) with six
+  documents from `apps/api/prisma/seed-data/flatbriz/`: resident and admin
+  guides (FAQs), value propositions, client playbooks and competitor
+  comparison (Core Overview), and billing rules (Policies). Documents are
+  written only on first creation; edits made in the console are kept.
+- gives Flatbriz its API key: the one in `FLATBRIZ_TENANT_API_KEY` if set
+  (stable across redeploys), otherwise a random key printed once:
+  `docker logs kgt-ai-hub-api | grep "API key"`.
 
-```bash
-cd apps/mobile
-npm install
-npx expo start
-```
+Set `SEED_FLATBRIZ_TENANT=false` for a platform with no pre-installed tenant.
 
-Scan the QR code with the Expo Go app on your phone. This is far lighter than
-running a full emulator for day-to-day development.
+Everything uses its own container names (`kgt-ai-hub-*`), volume and ports, so
+it runs alongside other stacks on the same host.
 
-**Important:** if you're testing on a physical phone, `localhost` refers to
-the *phone*, not your computer. Find your computer's LAN IP (e.g.
-`192.168.1.42`) and set it before starting Expo:
+## Try the bots
 
-```bash
-EXPO_PUBLIC_API_URL=http://192.168.1.42:4000 npx expo start
-```
-
-If you'd rather test in a browser tab (no phone/emulator needed) for pure UI
-work, `npx expo start --web` works too, though camera/native-only features
-won't be testable there.
-
-## 3. Run the admin web app
+In the console, open a tenant → **API keys** → issue a key → **Test bots**.
+Or call the API directly:
 
 ```bash
-cd apps/admin-web
-npm install
-cp .env.local.example .env.local
-npm run dev
+curl -s -X POST http://localhost:4100/api/v1/tenant-chat/flatbriz/chat \
+  -H "x-tenant-api-key: tk_..." -H 'Content-Type: application/json' \
+  -d '{"query":"How do I pay my maintenance bill?","botType":"support"}'
 ```
 
-Open `http://localhost:3001/login`. Log in as the Super Admin phone number
-above to reach the "Onboard a new society" screen, or as the Building Admin
-phone number to land on the dashboard.
+`botType` is `support` (default) or `sales`. Pass the returned `sessionId` back
+to continue a conversation.
 
-## How the role model works
+To embed on a customer site:
 
-- Every building/society is a tenant. Nearly every table carries a
-  `buildingId`.
-- A user can hold multiple **memberships** (one per building + role), so the
-  same phone number could be a resident in one society and a committee
-  member in another.
-- `X-Building-Id` header (or `?buildingId=` query param) tells the API which
-  tenant a request is scoped to. Middleware (`apps/api/src/middleware/rbac.js`)
-  checks the caller has an *approved* membership with an allowed role for
-  that building before running the route.
-- Super Admins bypass the per-building check entirely - they aren't scoped
-  to one society.
-- Feature entitlements live in `BuildingFeature` (building × feature × on/off).
-  This is what lets the Super Admin's "Enable modules for this society" panel
-  add or remove features per building without a code change.
+```html
+<script src="https://YOUR-API-HOST/widgets/tenant-chat-widget.js"
+        data-tenant-id="flatbriz" data-api-key="tk_..." defer></script>
+```
 
-## What's included vs. what's next
+## Security model
 
-**Included and working:**
-- Full Prisma schema covering every entity from the ER diagram
-- OTP-based auth (mocked - logs the code to the console instead of sending
-  a real SMS), building-code signup with pending-approval workflow
-- RBAC middleware enforcing role + tenant scoping on every route
-- All 11 backend route groups: auth, buildings (super admin + admin
-  dashboard), bills, complaints, visitors, facilities, votes, announcements,
-  emergency contacts, marketplace, notifications
-- Full Resident mobile experience (9 screens) and Guard mobile experience
-  (visitor logging, notifications, emergency directory)
-- Two Super Admin / Building Admin web screens matching your mockups
+- **API keys** are stored only as SHA-256 hashes; the plaintext is shown once.
+  Rotate by issuing a new key, updating the embed, then revoking the old one.
+- **Crawling consent**: the public wizard can't crawl without the visitor's
+  authorization, and it's stored as a `TenantConsent` record.
+- **SSRF**: every crawl target and redirect hop must resolve to a public
+  address. The headless-browser tier (Chromium) routes all traffic through a
+  loopback egress proxy with the same check, and runs only on the operator
+  route, never the public one.
+- **Rate limits**: public signup endpoints per IP, chat per tenant, operator
+  sign-in per IP.
+- Set `DEPLOY_ENV=production` in production: the API then refuses to start
+  with the placeholder `JWT_SECRET`.
 
-**Deliberately mocked or left for a follow-up pass:**
-- Payments are mocked (`payBill` just flips status to paid) - wire in
-  Razorpay/Paytm/ICICI when you're ready for real transactions
-- OTP delivery is mocked - swap in an SMS provider (e.g. MSG91, Twilio) in
-  `auth.routes.js`
-- Push notifications aren't implemented - the `Notification` table exists,
-  but nothing sends a device push yet
-- The admin web app only covers the two screens you mocked up (onboarding +
-  dashboard). Residents list, bills management, complaints management, and
-  facility/vote/announcement authoring for admins are all API-ready
-  (the routes already support admin roles) but don't have web UI yet
-- No automated tests yet
-- PostgreSQL is required in Docker and production (`society-postgres`). Compose sets `DATABASE_URL` to Postgres; do not use SQLite on the server.
+## Develop without Docker
 
-None of this was run inside the sandbox this was generated in (no display
-available to test a phone screen), so please run through the steps above and
-tell me what breaks - that's the fastest way to get this to "no mistakes."
-
-
-Role	Phone	OTP
-Super Admin (Sanyam)
-+919837722599
-123456
-
-Building Admin
-+919876500002
-123456
-
-Resident (Asha Rao, B-402)
-+919876500001
-123456
-
-Guard
-+919876500003
-123456
+```bash
+docker compose --env-file .env.docker up -d postgres
+cd apps/api && cp .env.example .env && npm install && npx prisma migrate deploy && node prisma/seed.js && npm run dev
+cd apps/web && cp .env.local.example .env.local && npm install && npm run dev   # http://localhost:3001
+npm test   # in apps/api
+```

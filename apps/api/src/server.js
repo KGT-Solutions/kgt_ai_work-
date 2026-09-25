@@ -1,5 +1,4 @@
 const app = require('./app');
-const { startMaintenanceScheduler } = require('./utils/maintenanceJob');
 const { assertProdSafety } = require('./utils/assertProdSafety');
 const { describeLlmConfig } = require('./engine/llmClient');
 
@@ -28,6 +27,5 @@ process.on('unhandledRejection', (err) => {
 
 const port = process.env.PORT || 4000;
 app.listen(port, () => {
-  console.log(`API running at http://localhost:${port}`);
-  startMaintenanceScheduler();
+  console.log(`KGT AI Hub API running at http://localhost:${port}`);
 });

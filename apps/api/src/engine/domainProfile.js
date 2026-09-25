@@ -2,7 +2,7 @@
 // in one place so src/domains/*.js and chatEngine.js agree on the contract.
 //
 // @typedef {object} DomainProfile
-// @property {string} id                                    - e.g. "flatbriz-support"
+// @property {string} id                                    - e.g. "tenant:acme:support"
 // @property {string} knowledgeBasePath                      - absolute dir of .md files (Requirement 2)
 // @property {string[]} [actions]                            - action ids to try before RAG (Requirement 3)
 // @property {number} [topK]                                 - retrieval candidates to keep (default 3)

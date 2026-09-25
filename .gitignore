@@ -82,3 +82,7 @@ docker-compose.override.yml
 # Uploaded user content
 uploads/
 !uploads/.gitkeep
+
+# Database dumps contain personal data — never commit them.
+backup_*.sql
+*.dump

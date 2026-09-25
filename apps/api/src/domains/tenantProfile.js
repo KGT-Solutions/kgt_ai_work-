@@ -7,8 +7,7 @@ const { CATEGORIES, DEFAULT_CATEGORY } = require('../services/shared/documentCat
 // The generic, industry-agnostic profile pair every resold tenant gets:
 // everything domain-specific comes from the Tenant row itself (name,
 // industryLabel, persona, thresholds) rather than a hand-written JS file
-// per industry — "same pipeline, different data." FLATBRIZ's own two bots
-// keep their dedicated, hand-tuned profiles elsewhere in this directory.
+// per industry — "same pipeline, different data."
 //
 // Dual-bot training: a tenant's scraped/edited TenantDocument rows are ONE
 // shared knowledge pool (loadTenantKnowledge below) — createTenantSupportProfile
@@ -197,8 +196,7 @@ function createTenantSupportProfile(tenant) {
 // ---------------------------------------------------------------------
 // Sales profile: persuasive, benefit/pricing/feature-forward, objection-
 // aware — same underlying documents, deliberately different treatment:
-//   - NO minConfidence gate (mirrors FLATBRIZ's own flatbrizSales.profile.js
-//     exactly — a sales conversation should stay engaged rather than bail
+//   - NO minConfidence gate — a sales conversation should stay engaged rather than bail
 //     out at the first uncertain match; it still gates on zero chunks, and
 //     the model still has its own sentinel discipline as a second line of
 //     defense against answering from nothing).

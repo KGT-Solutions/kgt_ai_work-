@@ -161,7 +161,7 @@ router.post('/:tenantId/scrape', async (req, res) => {
   let result;
   try {
     // browserFallback: headless-Chromium rendering for SPA shells / bot-
-    // blocked pages. Enabled ONLY here, behind super-admin auth — Chromium
+    // blocked pages. Enabled ONLY here, behind operator auth — Chromium
     // runs --no-sandbox, so it must never be reachable by an anonymous
     // caller (publicRegister's /analyze stays static-only).
     result = await crawlSite(url, { browserFallback: true });

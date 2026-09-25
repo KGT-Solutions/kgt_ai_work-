@@ -12,7 +12,7 @@ const { issueApiKey } = require('../utils/tenantApiKeys');
 // Deliberately unauthenticated — that's the entire point of self-serve — so
 // everything here is IP-rate-limited and server-side capped instead of
 // relying on a login. This is a materially different trust boundary from
-// tenantAdmin.routes.js (super-admin only): anyone on the internet can call
+// tenantAdmin.routes.js (operators only): anyone on the internet can call
 // these two endpoints, so nothing here should assume good-faith input.
 //
 // Two-step split mirrors the wizard's own Step 2 (preview + edit) / Step 3
