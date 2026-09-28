@@ -198,10 +198,19 @@ describe('tenant bots: conversational prompt layer', () => {
     assert.match(sales, /never lists/);
   });
 
-  test('the degraded (LLM-down) fallback returns readable prose, not raw markdown', () => {
+  test('the degraded (LLM-down) fallback is a polite message, never a knowledge-base excerpt', () => {
     const ranked = [{ chunk: { title: 'Returns', content: '## Returns\n\n- **30 days** to return\n- Free pickup' }, score: 5 }];
-    const { answer } = createTenantSupportProfile(TENANT).formatDegraded(ranked);
-    assert.doesNotMatch(answer, /##|\*\*|^- /m);
-    assert.match(answer, /30 days to return/);
+    for (const profile of [createTenantSupportProfile(TENANT), createTenantSalesProfile(TENANT)]) {
+      const result = profile.formatDegraded(ranked);
+      assert.equal(result.degraded, true);
+      assert.doesNotMatch(result.answer, /30 days|Free pickup|Returns|##|\*\*/);
+      assert.match(result.answer, /try again|ask again/i);
+    }
+  });
+
+  test('sales replies are told to end with one engagement question; support stays factual', () => {
+    assert.match(sales, /End with ONE short, gentle question/);
+    assert.doesNotMatch(support, /End with ONE short, gentle question/);
+    assert.match(support, /No sales pitch/);
   });
 });

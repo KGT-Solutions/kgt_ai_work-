@@ -8,6 +8,7 @@
 // @property {number} [topK]                                 - retrieval candidates to keep (default 3)
 // @property {number} [minScore]                              - below this, treated as "no relevant chunks" (default 2)
 // @property {string} [excerptLabel]                          - e.g. "MANUAL EXCERPTS"
+// @property {string} [replyReminder]                         - one must-follow reply rule, repeated after the question in the user prompt
 // @property {string} [queryLabel]                             - e.g. "USER QUESTION"
 // @property {(ctx: object) => string} systemPrompt            - persona + rules (Requirement 1)
 // @property {string} noAnswerSentinel                          - exact token the model must emit when it can't answer

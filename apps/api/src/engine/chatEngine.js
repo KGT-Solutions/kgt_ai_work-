@@ -99,9 +99,10 @@ async function getEngineAnswer({ profile, query, ctx = {} }) {
     }
     return result;
   } catch (err) {
-    // Graceful degradation: a relevant chunk exists even if the LLM call
-    // itself failed (missing key, rate limit, upstream error) — hand it
-    // back directly rather than erroring out.
+    // Graceful degradation when every LLM provider failed (missing key,
+    // retired model, rate limit, outage): the profile's formatDegraded()
+    // returns a polite "try again" reply rather than an error or a raw
+    // excerpt, and the question is filed as a ticket so it isn't lost.
     if (
       err instanceof ChatConfigError ||
       err instanceof ChatRateLimitError ||
@@ -116,6 +117,7 @@ async function getEngineAnswer({ profile, query, ctx = {} }) {
       );
       const result = profile.formatDegraded(ranked, ctx);
       await profile.onResult?.(result, query, ctx);
+      if (profile.ticketing) await fileSupportTicket({ profile, query, confidence, ctx });
       return result;
     }
     throw err;

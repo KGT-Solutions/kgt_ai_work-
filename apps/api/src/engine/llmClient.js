@@ -58,6 +58,40 @@ function getTemperature() {
   return Number.isFinite(t) ? t : 0.2;
 }
 
+// Reasoning models (gpt-oss on Groq, o-series on OpenAI) spend part of the
+// completion budget on hidden reasoning before writing the answer, so the
+// cap has to leave room for both or the visible answer comes back empty.
+function getMaxTokens() {
+  const n = Number(process.env.LLM_MAX_TOKENS);
+  return Number.isInteger(n) && n > 0 ? n : 1024;
+}
+
+// Groq's gpt-oss models accept reasoning_effort; "low" keeps answers fast
+// and is plenty for grounded Q&A over a few excerpts.
+function groqReasoningParams(model) {
+  if (!/^openai\/gpt-oss/i.test(model)) return {};
+  const effort = String(process.env.LLM_REASONING_EFFORT || 'low').toLowerCase();
+  return ['low', 'medium', 'high'].includes(effort) ? { reasoning_effort: effort } : {};
+}
+
+// Model defaults, kept in one place. Providers retire models regularly
+// (Groq decommissioned llama3-70b-8192, and llama-3.3-70b-versatile is not
+// available to every key), so verifyLlmModels() checks these at startup.
+const DEFAULT_MODELS = {
+  groq: 'openai/gpt-oss-120b',
+  openai: 'gpt-4o-mini',
+  anthropic: 'claude-haiku-4-5-20251001'
+};
+const MODEL_ENV = { groq: 'GROQ_MODEL', openai: 'OPENAI_MODEL', anthropic: 'ANTHROPIC_MODEL' };
+
+function modelFor(provider) {
+  return String(process.env[MODEL_ENV[provider]] || '').trim() || DEFAULT_MODELS[provider];
+}
+
+// A 400/404 that names the model means configuration, not a transient
+// outage: report it as ChatConfigError with the fix, instead of a raw body.
+const MODEL_UNAVAILABLE = /model_decommissioned|model_not_found|does not exist|decommissioned|no longer supported|do not have access/i;
+
 function getProviderChain() {
   const primary = String(process.env.LLM_PRIMARY || process.env.CHAT_LLM_PROVIDER || 'anthropic')
     .trim()
@@ -101,8 +135,20 @@ function describeLlmConfig() {
   };
 }
 
-async function callChatCompletionsStyle({ url, apiKey, model, systemPrompt, userPrompt, providerLabel }) {
-  const res = await fetchWithTimeout(
+// Free and low tiers (Groq especially) return 429 with a short Retry-After
+// under bursty traffic. Waiting that long once is far better than failing
+// the chat when it's only a few seconds; anything longer fails over now.
+const MAX_RATE_LIMIT_WAIT_MS = 8000;
+
+function retryAfterMs(res) {
+  const seconds = Number(res.headers?.get?.('retry-after'));
+  return Number.isFinite(seconds) && seconds >= 0 ? Math.ceil(seconds * 1000) : null;
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function callChatCompletionsStyle({ url, apiKey, model, modelEnv, extraParams = {}, systemPrompt, userPrompt, providerLabel }) {
+  const send = () => fetchWithTimeout(
     url,
     {
       method: 'POST',
@@ -112,8 +158,9 @@ async function callChatCompletionsStyle({ url, apiKey, model, systemPrompt, user
       },
       body: JSON.stringify({
         model,
-        max_tokens: 512,
+        max_tokens: getMaxTokens(),
         temperature: getTemperature(),
+        ...extraParams,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt }
@@ -123,18 +170,39 @@ async function callChatCompletionsStyle({ url, apiKey, model, systemPrompt, user
     providerLabel
   );
 
+  let res = await send();
+  if (res.status === 429) {
+    const wait = retryAfterMs(res);
+    if (wait !== null && wait <= MAX_RATE_LIMIT_WAIT_MS) {
+      await sleep(wait);
+      res = await send();
+    }
+  }
+
   if (res.status === 429) throw new ChatRateLimitError(`${providerLabel} rate limit exceeded.`);
   if (res.status === 401 || res.status === 403) {
     throw new ChatConfigError(`${providerLabel} rejected the configured API key.`);
   }
   if (!res.ok) {
     const body = await res.text().catch(() => '');
+    if ((res.status === 400 || res.status === 404) && MODEL_UNAVAILABLE.test(body)) {
+      throw new ChatConfigError(
+        `${providerLabel} model "${model}" is unavailable (retired, or not enabled for this key). Set ${modelEnv} to a current model.`
+      );
+    }
     throw new ChatUpstreamError(`${providerLabel} error ${res.status}: ${body.slice(0, 300)}`);
   }
 
   const data = await res.json();
-  const text = data.choices?.[0]?.message?.content?.trim();
-  if (!text) throw new ChatUpstreamError(`${providerLabel} returned an empty response.`);
+  const choice = data.choices?.[0];
+  const text = choice?.message?.content?.trim();
+  if (!text) {
+    throw new ChatUpstreamError(
+      choice?.finish_reason === 'length'
+        ? `${providerLabel} used its whole token budget before answering — raise LLM_MAX_TOKENS.`
+        : `${providerLabel} returned an empty response.`
+    );
+  }
   return {
     text,
     model,
@@ -148,11 +216,13 @@ async function callChatCompletionsStyle({ url, apiKey, model, systemPrompt, user
 async function callGroq({ systemPrompt, userPrompt }) {
   const apiKey = readKey('GROQ_API_KEY');
   if (!apiKey) throw new ChatConfigError('GROQ_API_KEY is not configured.');
-  const model = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+  const model = modelFor('groq');
   const result = await callChatCompletionsStyle({
     url: 'https://api.groq.com/openai/v1/chat/completions',
     apiKey,
     model,
+    modelEnv: 'GROQ_MODEL',
+    extraParams: groqReasoningParams(model),
     systemPrompt,
     userPrompt,
     providerLabel: 'Groq'
@@ -163,11 +233,12 @@ async function callGroq({ systemPrompt, userPrompt }) {
 async function callOpenAI({ systemPrompt, userPrompt }) {
   const apiKey = readKey('OPENAI_API_KEY');
   if (!apiKey) throw new ChatConfigError('OPENAI_API_KEY is not configured.');
-  const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+  const model = modelFor('openai');
   const result = await callChatCompletionsStyle({
     url: 'https://api.openai.com/v1/chat/completions',
     apiKey,
     model,
+    modelEnv: 'OPENAI_MODEL',
     systemPrompt,
     userPrompt,
     providerLabel: 'OpenAI'
@@ -179,7 +250,7 @@ async function callAnthropic({ systemPrompt, userPrompt }) {
   const apiKey = readKey('ANTHROPIC_API_KEY');
   if (!apiKey) throw new ChatConfigError('ANTHROPIC_API_KEY is not configured.');
 
-  const model = process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5-20251001';
+  const model = modelFor('anthropic');
 
   const res = await fetchWithTimeout(
     'https://api.anthropic.com/v1/messages',
@@ -192,7 +263,7 @@ async function callAnthropic({ systemPrompt, userPrompt }) {
       },
       body: JSON.stringify({
         model,
-        max_tokens: 512,
+        max_tokens: getMaxTokens(),
         temperature: getTemperature(),
         system: systemPrompt,
         messages: [{ role: 'user', content: userPrompt }]
@@ -207,6 +278,9 @@ async function callAnthropic({ systemPrompt, userPrompt }) {
   }
   if (!res.ok) {
     const body = await res.text().catch(() => '');
+    if ((res.status === 400 || res.status === 404) && /not_found_error|model/i.test(body) && MODEL_UNAVAILABLE.test(body)) {
+      throw new ChatConfigError(`Anthropic model "${model}" is unavailable. Set ANTHROPIC_MODEL to a current model.`);
+    }
     throw new ChatUpstreamError(`Anthropic error ${res.status}: ${body.slice(0, 300)}`);
   }
 
@@ -270,10 +344,51 @@ function formatAttempts(attempts) {
   return attempts.map((a) => `${a.provider}: ${a.error} (${a.message})`).join('; ');
 }
 
+const MODEL_LIST_URLS = {
+  groq: 'https://api.groq.com/openai/v1/models',
+  openai: 'https://api.openai.com/v1/models'
+};
+
+/**
+ * Startup check: asks each configured OpenAI-compatible provider whether the
+ * model it's set to actually exists for this key, so a retired or
+ * inaccessible model shows up in the boot log instead of as degraded chat
+ * answers later. Never throws; a provider that can't be reached is reported
+ * as unverified, not as a failure.
+ * @returns {Promise<Array<{ provider: string, model: string, status: 'ok'|'missing'|'unverified', suggestions?: string[], reason?: string }>>}
+ */
+async function verifyLlmModels() {
+  const results = [];
+  for (const provider of getProviderChain()) {
+    const url = MODEL_LIST_URLS[provider];
+    if (!url || !providerHasKey(provider)) continue;
+    const model = modelFor(provider);
+    try {
+      const res = await fetchWithTimeout(url, { headers: { authorization: `Bearer ${readKey(KEY_ENV[provider])}` } }, provider);
+      if (!res.ok) {
+        results.push({ provider, model, status: 'unverified', reason: `model list returned HTTP ${res.status}` });
+        continue;
+      }
+      const ids = ((await res.json()).data || []).map((m) => m.id);
+      if (ids.includes(model)) {
+        results.push({ provider, model, status: 'ok' });
+      } else {
+        const chat = ids.filter((id) => !/whisper|tts|guard|embed|moderation|dall-e|image|audio|transcribe|realtime|search/i.test(id));
+        results.push({ provider, model, status: 'missing', suggestions: chat.sort().slice(0, 8) });
+      }
+    } catch (err) {
+      results.push({ provider, model, status: 'unverified', reason: err.message });
+    }
+  }
+  return results;
+}
+
 module.exports = {
   generateAnswer,
   isLlmConfigured,
   describeLlmConfig,
+  verifyLlmModels,
+  DEFAULT_MODELS,
   formatAttempts,
   ChatConfigError,
   ChatRateLimitError,
