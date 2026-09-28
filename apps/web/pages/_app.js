@@ -1,10 +1,9 @@
 import '../styles/globals.css';
-import { AlertProvider } from '../components/AppAlert';
+import { ToastProvider } from '../components/ui/toast';
 
+// Pages can export `getLayout` to keep a shared shell mounted across route
+// changes (the dashboard's sidebar and session stay put while its subpages switch).
 export default function App({ Component, pageProps }) {
-  return (
-    <AlertProvider>
-      <Component {...pageProps} />
-    </AlertProvider>
-  );
+  const getLayout = Component.getLayout || ((page) => page);
+  return <ToastProvider>{getLayout(<Component {...pageProps} />)}</ToastProvider>;
 }

@@ -1,7 +1,7 @@
 // The universal 3-tier document taxonomy — ids mirror the DocumentCategory
 // enum in apps/api/prisma/schema.prisma (and services/shared/documentCategory.js).
-// Shared by the self-serve wizard (pages/register.js) and the super-admin
-// Documents tab (pages/tenants/[tenantId].js).
+// Shared by the signup wizard (pages/register.js) and the workspace
+// components (components/workspace/*).
 export const DOC_CATEGORIES = [
   {
     id: 'CORE_OVERVIEW',

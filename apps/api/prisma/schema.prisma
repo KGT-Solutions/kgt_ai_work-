@@ -48,16 +48,37 @@ model Tenant {
 // tenant from the database row, never from anything the client sends.
 // Created by the signup wizard (/api/v1/public/register/complete).
 model TenantUser {
-  id           String    @id @default(uuid())
-  tenant       Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  tenantId     String
-  email        String    @unique
-  name         String?
-  passwordHash String
-  createdAt    DateTime  @default(now())
-  lastLoginAt  DateTime?
+  id                String    @id @default(uuid())
+  tenant            Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantId          String
+  email             String    @unique
+  name              String?
+  passwordHash      String
+  createdAt         DateTime  @default(now())
+  lastLoginAt       DateTime?
+  // Sessions issued before this moment are rejected (middleware/clientAuth.js),
+  // so resetting a password signs the account out everywhere.
+  passwordChangedAt DateTime?
+
+  resetCodes PasswordResetCode[]
 
   @@index([tenantId])
+}
+
+// One-time 6-digit code for the forgot-password flow (routes/clientAuth.routes.js).
+// Only a hash of the code is stored; it expires after 10 minutes, locks after
+// 5 wrong attempts, and is single-use. Requesting a new code voids older ones.
+model PasswordResetCode {
+  id        String     @id @default(uuid())
+  user      TenantUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String
+  codeHash  String
+  expiresAt DateTime
+  attempts  Int        @default(0)
+  usedAt    DateTime?
+  createdAt DateTime   @default(now())
+
+  @@index([userId])
 }
 
 // Widget/API credentials. Only a SHA-256 hash of each key is stored — the

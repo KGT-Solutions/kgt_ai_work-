@@ -1,114 +1,72 @@
 import { useState } from 'react';
-import { useRouter } from 'next/router';
-import OperatorLayout from '../../../components/OperatorLayout';
-import { ui, colors, radius } from '../../../components/ui';
-import { api } from '../../../lib/api';
+import { staffLayout } from '../../../components/shell/DashboardShell';
+import { Button, ButtonLink, Card, CardHeader, CodeBlock, Field, Input, PageHeader, SecretField, Textarea } from '../../../components/ui';
+import { IconArrowRight, IconKey } from '../../../components/ui/icons';
+import { api, embedSnippet } from '../../../lib/api';
 
-export default function NewTenantPage() {
-  const router = useRouter();
-  const [name, setName] = useState('');
-  const [industryLabel, setIndustryLabel] = useState('');
-  const [persona, setPersona] = useState('');
-  const [minConfidence, setMinConfidence] = useState('0.30');
-  const [loading, setLoading] = useState(false);
+// Staff-provisioned company (no client login). Its first API key is shown once.
+export default function NewCompany() {
+  const [form, setForm] = useState({ name: '', industryLabel: '', persona: '', minConfidence: '0.30' });
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const [created, setCreated] = useState(null); // holds the one-time apiKey reveal
+  const [created, setCreated] = useState(null);
+  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
   const submit = async (e) => {
     e.preventDefault();
+    if (!form.name.trim() || !form.industryLabel.trim()) return setError('Company name and industry are required.');
+    setBusy(true);
     setError('');
-    if (!name.trim() || !industryLabel.trim()) {
-      setError('Name and industry are required.');
-      return;
-    }
-    setLoading(true);
     try {
-      const tenant = await api.createTenant({
-        name: name.trim(),
-        industryLabel: industryLabel.trim(),
-        persona: persona.trim() || undefined,
-        minConfidence: minConfidence !== '' ? Number(minConfidence) : undefined
-      });
-      setCreated(tenant);
-    } catch (e2) {
-      setError(e2.message);
+      setCreated(await api.createTenant({
+        name: form.name.trim(),
+        industryLabel: form.industryLabel.trim(),
+        persona: form.persona.trim() || undefined,
+        minConfidence: form.minConfidence !== '' ? Number(form.minConfidence) : undefined
+      }));
+    } catch (err) {
+      setError(err.message);
     } finally {
-      setLoading(false);
+      setBusy(false);
     }
   };
 
   if (created) {
     return (
-      <OperatorLayout title="Tenant created" subtitle={created.name}>
-        <div style={{ ...ui.form, borderColor: '#F0B429', background: '#FFFBEB' }}>
-          <p style={ui.formTitle}>Copy the API key now — it won't be shown again</p>
-          <p style={ui.hint}>
-            This is what the tenant's own app sends as <code>X-Tenant-Api-Key</code> when calling{' '}
-            <code>POST /api/v1/tenant-chat/{created.slug}/chat</code>. If it's lost, there's no way to
-            retrieve it — issue a new one from the tenant's API keys tab and revoke this one.
-          </p>
-          <div style={keyBox}>{created.apiKey}</div>
-          <div style={{ display: 'flex', gap: 12 }}>
-            <button
-              type="button"
-              style={ui.btnSecondary}
-              onClick={() => navigator.clipboard?.writeText(created.apiKey)}
-            >
-              Copy to clipboard
-            </button>
-            <button type="button" style={ui.btn} onClick={() => router.push(`/admin/tenants/${created.id}`)}>
-              Continue to tenant →
-            </button>
+      <>
+        <PageHeader title={`${created.name} created`} description="Copy the API key now — it's shown only this once." />
+        <Card className="border-cyan-400/25 shadow-glow">
+          <CardHeader icon={<IconKey className="h-4 w-4" />} title="First API key" description={`Sent as X-Tenant-Api-Key to POST /api/v1/tenant-chat/${created.slug}/chat, or used in the embed snippet.`} />
+          <div className="space-y-4 p-5">
+            <SecretField value={created.apiKey} label="API key" />
+            <CodeBlock filename="index.html" code={embedSnippet(created.slug, created.apiKey)} />
+            <ButtonLink href={`/admin/tenants/${created.id}`} variant="primary">Open company <IconArrowRight className="h-4 w-4" /></ButtonLink>
           </div>
-        </div>
-      </OperatorLayout>
+        </Card>
+      </>
     );
   }
 
   return (
-    <OperatorLayout title="New tenant" subtitle="Provision a customer to run the chat engine on their own data." error={error}>
-      <form onSubmit={submit} style={ui.form}>
-        <p style={ui.formTitle}>Tenant details</p>
-
-        <label style={label}>Company name</label>
-        <input style={ui.input} value={name} onChange={(e) => setName(e.target.value)} placeholder="Acme Retail Co" />
-
-        <label style={label}>Industry / role label</label>
-        <input
-          style={ui.input}
-          value={industryLabel}
-          onChange={(e) => setIndustryLabel(e.target.value)}
-          placeholder="Retail Customer Support"
-        />
-        <p style={ui.hint}>Shown to the model as its role — e.g. "You are the support assistant for Acme Retail Co (Retail Customer Support)."</p>
-
-        <label style={label}>Extra persona / rules (optional)</label>
-        <textarea
-          style={{ ...ui.textarea, minHeight: 90 }}
-          value={persona}
-          onChange={(e) => setPersona(e.target.value)}
-          placeholder="e.g. Always mention our 24/7 support line when a customer sounds frustrated."
-        />
-
-        <label style={label}>Confidence gate threshold</label>
-        <input
-          style={{ ...ui.input, maxWidth: 140 }}
-          type="number" min="0" max="1" step="0.05"
-          value={minConfidence}
-          onChange={(e) => setMinConfidence(e.target.value)}
-        />
-        <p style={ui.hint}>Below this (0–1), the bot skips the LLM and files a support ticket instead of guessing. 0.30 is a reasonable default.</p>
-
-        <button type="submit" style={ui.btn} disabled={loading}>
-          {loading ? 'Creating…' : 'Create tenant'}
-        </button>
-      </form>
-    </OperatorLayout>
+    <>
+      <PageHeader title="New company" description="Provision a company directly. It gets an API key but no dashboard login — companies that sign up themselves get both." />
+      <Card className="max-w-2xl">
+        <form onSubmit={submit} className="space-y-5 p-6" noValidate>
+          <Field label="Company name" htmlFor="c-name"><Input id="c-name" value={form.name} onChange={set('name')} placeholder="Acme Retail Co" /></Field>
+          <Field label="Industry / role" htmlFor="c-ind" hint={'Shown to the model as its role, e.g. "support assistant for Acme Retail Co (Retail Customer Support)".'}>
+            <Input id="c-ind" value={form.industryLabel} onChange={set('industryLabel')} placeholder="Retail Customer Support" />
+          </Field>
+          <Field label="Extra persona / rules (optional)" htmlFor="c-persona">
+            <Textarea id="c-persona" value={form.persona} onChange={set('persona')} className="min-h-[90px]" placeholder="e.g. Always mention our 24/7 support line when a customer sounds frustrated." />
+          </Field>
+          <Field label="Support confidence gate" htmlFor="c-gate" hint="0–1. Below this match score the Support Bot hands off instead of answering. 0.30 is a good default.">
+            <Input id="c-gate" type="number" min="0" max="1" step="0.05" value={form.minConfidence} onChange={set('minConfidence')} className="max-w-[140px]" />
+          </Field>
+          {error && <p className="rounded-lg border border-rose-400/25 bg-rose-500/10 px-3 py-2 text-[13px] text-rose-100" role="alert">{error}</p>}
+          <Button type="submit" variant="primary" loading={busy}>Create company</Button>
+        </form>
+      </Card>
+    </>
   );
 }
-
-const label = { fontSize: 12, fontWeight: 600, color: colors.textMuted, textTransform: 'uppercase', letterSpacing: '0.05em' };
-const keyBox = {
-  fontFamily: 'monospace', fontSize: 13, background: colors.card, border: `1px solid ${colors.border}`,
-  borderRadius: radius.sm, padding: 14, wordBreak: 'break-all', marginBottom: 4
-};
+NewCompany.getLayout = staffLayout;

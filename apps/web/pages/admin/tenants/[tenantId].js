@@ -1,93 +1,96 @@
+import Link from 'next/link';
 import { useRouter } from 'next/router';
 import { useEffect, useMemo, useState } from 'react';
-import OperatorLayout from '../../../components/OperatorLayout';
-import TenantWorkspace from '../../../components/TenantWorkspace';
-import { ui, colors } from '../../../components/ui';
+import { staffLayout } from '../../../components/shell/DashboardShell';
+import BotSandbox from '../../../components/workspace/BotSandbox';
+import DocumentManager from '../../../components/workspace/DocumentManager';
+import KeyVault from '../../../components/workspace/KeyVault';
+import Overview from '../../../components/workspace/Overview';
+import TicketsList from '../../../components/workspace/TicketsList';
+import UsagePanel from '../../../components/workspace/UsagePanel';
+import { Badge, Button, Card, PageHeader, Skeleton, cx } from '../../../components/ui';
+import { useToast } from '../../../components/ui/toast';
+import { IconArrowLeft } from '../../../components/ui/icons';
 import { api, staffWorkspace } from '../../../lib/api';
 
-// KGT staff inspecting one company: its profile, contact and status, then the
-// same workspace the company sees on its own dashboard.
-export default function AdminTenantPage() {
+// KGT staff inside one company: profile, contact and status, then the same
+// workspace components the company sees on its own dashboard.
+const TABS = ['Overview', 'Documents', 'Test bots', 'API keys', 'Tickets', 'Usage'];
+
+export default function StaffTenant() {
   const router = useRouter();
+  const toast = useToast();
   const { tenantId } = router.query;
   const [tenant, setTenant] = useState(null);
-  const [signedIn, setSignedIn] = useState(false);
-  const [error, setErrorState] = useState(null);
-  const [success, setSuccessState] = useState(null);
-  const notify = ({ error: e, success: s }) => {
-    if (e) setErrorState({ message: e, at: Date.now() });
-    if (s) setSuccessState({ message: s, at: Date.now() });
-  };
+  const [tab, setTab] = useState('Overview');
+  const [busy, setBusy] = useState(false);
   const ws = useMemo(() => (tenantId ? staffWorkspace(tenantId) : null), [tenantId]);
 
-  const load = async () => {
-    if (!tenantId) return;
-    try {
-      setTenant(await api.getTenant(tenantId));
-    } catch (e) {
-      notify({ error: e.message });
-    }
-  };
+  const load = () => api.getTenant(tenantId).then(setTenant).catch((e) => toast.error(e.message));
+  useEffect(() => { if (tenantId) load(); }, [tenantId]);
 
-  // The route param arrives after hydration, so wait for both it and the session.
-  useEffect(() => { if (signedIn && tenantId) load(); }, [signedIn, tenantId]);
-
-  const toggleActive = async () => {
+  const toggle = async () => {
+    setBusy(true);
     try {
       await api.updateTenant(tenant.id, { active: !tenant.active });
-      notify({ success: tenant.active ? 'Deactivated — dashboard, API keys and widget stop working immediately.' : 'Reactivated.' });
+      toast.success(tenant.active ? 'Deactivated — dashboard, keys and widget stop immediately.' : 'Reactivated.');
       await load();
     } catch (e) {
-      notify({ error: e.message });
+      toast.error(e.message);
+    } finally {
+      setBusy(false);
     }
   };
 
-  const m = tenant?.metrics;
+  if (!tenant || !ws) return <div className="space-y-4"><Skeleton className="h-8 w-64" /><Skeleton className="h-32" /><Skeleton className="h-64" /></div>;
+  const m = tenant.metrics;
 
   return (
-    <OperatorLayout
-      title={tenant?.name || 'Company'}
-      subtitle={tenant ? `${tenant.industryLabel} · ${tenant.slug}` : ''}
-      error={error}
-      success={success}
-      onSession={() => setSignedIn(true)}
-      loading={!tenant}
-    >
-      {tenant && ws && (
-        <>
-          <div style={{ ...ui.form, gap: 10, marginBottom: 20 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-              <span style={{ ...ui.tag, ...(tenant.active ? ui.tagOpen : ui.tagClosed) }}>{tenant.active ? 'Active' : 'Deactivated'}</span>
-              <span style={ui.hint}>Support confidence gate: {Math.round(tenant.minConfidence * 100)}%</span>
-              <button type="button" style={{ ...ui.btnSecondary, marginLeft: 'auto', padding: '6px 14px' }} onClick={toggleActive}>
-                {tenant.active ? 'Deactivate company' : 'Reactivate company'}
-              </button>
-            </div>
-            <dl style={facts}>
-              <dt style={dt}>Contact</dt>
-              <dd style={dd}>
-                {m.accounts.length
-                  ? m.accounts.map((a) => `${a.name ? `${a.name} · ` : ''}${a.email}`).join(', ')
-                  : tenant.signupEmail || 'Staff-created (no dashboard login)'}
-              </dd>
-              <dt style={dt}>Joined</dt>
-              <dd style={dd}>{new Date(tenant.createdAt).toLocaleString('en-IN')}</dd>
-              <dt style={dt}>Knowledge</dt>
-              <dd style={dd}>{m.documents} documents</dd>
-              <dt style={dt}>API keys</dt>
-              <dd style={dd}>{m.activeKeys} active{m.keyLastUsedAt ? `, last used ${new Date(m.keyLastUsedAt).toLocaleString('en-IN')}` : ', not used yet'}</dd>
-              <dt style={dt}>Usage</dt>
-              <dd style={dd}>{m.conversations} conversations, {m.questions} questions, {m.llmCalls} AI answers (≈ ${m.estimatedCostUsd.toFixed(4)})</dd>
-            </dl>
-          </div>
+    <>
+      <Link href="/admin" className="mb-4 inline-flex items-center gap-1.5 text-sm text-fg-3 hover:text-fg-2"><IconArrowLeft className="h-4 w-4" />All companies</Link>
+      <PageHeader title={<span className="inline-flex flex-wrap items-center gap-3">{tenant.name}<Badge tone={tenant.active ? 'success' : 'neutral'} dot>{tenant.active ? 'Active' : 'Deactivated'}</Badge></span>}
+        description={`${tenant.industryLabel} · ${tenant.slug}`}
+        actions={<Button variant={tenant.active ? 'danger' : 'primary'} onClick={toggle} loading={busy}>{tenant.active ? 'Deactivate company' : 'Reactivate company'}</Button>} />
 
-          <TenantWorkspace ws={ws} tenant={tenant} audience="staff" notify={notify} />
-        </>
-      )}
-    </OperatorLayout>
+      <Card className="mb-6 p-5">
+        <dl className="grid gap-x-8 gap-y-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
+          <Fact label="Contact">{m.accounts.length ? m.accounts.map((a) => `${a.name ? `${a.name} · ` : ''}${a.email}`).join(', ') : tenant.signupEmail || 'Staff-created (no login)'}</Fact>
+          <Fact label="Joined">{new Date(tenant.createdAt).toLocaleString()}</Fact>
+          <Fact label="Support confidence gate">{Math.round(tenant.minConfidence * 100)}%</Fact>
+          <Fact label="Knowledge">{m.documents} documents</Fact>
+          <Fact label="API keys">{m.activeKeys} active{m.keyLastUsedAt ? `, last used ${new Date(m.keyLastUsedAt).toLocaleString()}` : ', not used yet'}</Fact>
+          <Fact label="Usage">{m.conversations} conversations · {m.questions} questions · {m.llmCalls} AI answers (≈ ${m.estimatedCostUsd.toFixed(4)})</Fact>
+        </dl>
+      </Card>
+
+      <div role="tablist" aria-label="Workspace" className="mb-6 flex gap-1 overflow-x-auto border-b border-white/[0.06]">
+        {TABS.map((t) => (
+          <button key={t} type="button" role="tab" aria-selected={tab === t} onClick={() => setTab(t)}
+            className={cx('relative whitespace-nowrap px-3 py-2.5 text-sm font-medium transition', tab === t ? 'text-fg' : 'text-fg-3 hover:text-fg-2')}>
+            {t}
+            {tab === t && <span className="absolute inset-x-2 -bottom-px h-0.5 rounded-full bg-cyan-400" />}
+          </button>
+        ))}
+      </div>
+
+      <div key={tab} className="animate-fade-up">
+        {tab === 'Overview' && <Overview ws={ws} tenant={tenant} />}
+        {tab === 'Documents' && <DocumentManager ws={ws} audience="staff" />}
+        {tab === 'Test bots' && <BotSandbox ws={ws} tenant={tenant} />}
+        {tab === 'API keys' && <KeyVault ws={ws} tenant={tenant} />}
+        {tab === 'Tickets' && <TicketsList ws={ws} />}
+        {tab === 'Usage' && <UsagePanel ws={ws} />}
+      </div>
+    </>
   );
 }
+StaffTenant.getLayout = staffLayout;
 
-const facts = { display: 'grid', gridTemplateColumns: 'max-content 1fr', gap: '6px 16px', margin: 0, fontSize: 14 };
-const dt = { color: colors.textMuted, fontWeight: 600 };
-const dd = { margin: 0, color: colors.text };
+function Fact({ label, children }) {
+  return (
+    <div className="min-w-0">
+      <dt className="text-xs text-fg-3">{label}</dt>
+      <dd className="mt-0.5 text-fg-2">{children}</dd>
+    </div>
+  );
+}

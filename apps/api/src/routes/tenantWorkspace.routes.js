@@ -301,6 +301,35 @@ router.get('/usage', async (req, res) => {
   });
 });
 
+// GET /usage/daily?days=30 — one row per UTC day (7–90 days, oldest first),
+// zero-filled so charts have no gaps: questions asked, conversations started,
+// AI answers generated, tokens used, and tickets filed.
+router.get('/usage/daily', async (req, res) => {
+  const days = Math.min(90, Math.max(7, Number.parseInt(req.query.days, 10) || 30));
+  const tenantId = req.tenant.id;
+  const rows = await prisma.$queryRaw`
+    WITH d AS (
+      SELECT generate_series(date_trunc('day', now() AT TIME ZONE 'UTC') - make_interval(days => ${days - 1}::int),
+                             date_trunc('day', now() AT TIME ZONE 'UTC'), interval '1 day')::date AS day
+    ),
+    q AS (SELECT (m."createdAt" AT TIME ZONE 'UTC')::date AS day, COUNT(*)::int AS n
+          FROM "ChatMessage" m JOIN "ChatSession" s ON s.id = m."sessionId"
+          WHERE s."tenantId" = ${tenantId} AND m.role = 'user' GROUP BY 1),
+    c AS (SELECT ("startedAt" AT TIME ZONE 'UTC')::date AS day, COUNT(*)::int AS n
+          FROM "ChatSession" WHERE "tenantId" = ${tenantId} GROUP BY 1),
+    u AS (SELECT ("createdAt" AT TIME ZONE 'UTC')::date AS day, COUNT(*)::int AS n,
+                 SUM("promptTokens" + "completionTokens")::int AS tokens
+          FROM "UsageLog" WHERE "tenantId" = ${tenantId} GROUP BY 1),
+    t AS (SELECT ("createdAt" AT TIME ZONE 'UTC')::date AS day, COUNT(*)::int AS n
+          FROM "SupportTicket" WHERE "tenantId" = ${tenantId} GROUP BY 1)
+    SELECT to_char(d.day, 'YYYY-MM-DD') AS date,
+           COALESCE(q.n, 0) AS questions, COALESCE(c.n, 0) AS conversations,
+           COALESCE(u.n, 0) AS "aiAnswers", COALESCE(u.tokens, 0) AS tokens, COALESCE(t.n, 0) AS tickets
+    FROM d LEFT JOIN q USING (day) LEFT JOIN c USING (day) LEFT JOIN u USING (day) LEFT JOIN t USING (day)
+    ORDER BY d.day`;
+  res.json({ days, series: rows });
+});
+
 // Wrapped here, not in app.js: this router is mounted inside other routers,
 // and wrapRouterAsync only reaches a router's own routes, not nested ones.
 module.exports = wrapRouterAsync(router);

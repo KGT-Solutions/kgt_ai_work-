@@ -24,13 +24,18 @@ async function requireClient(req, res, next) {
   try {
     const user = await prisma.tenantUser.findUnique({
       where: { id: claims.tenantUserId },
-      select: { id: true, email: true, name: true, tenant: { select: TENANT_FIELDS } }
+      select: { id: true, email: true, name: true, passwordChangedAt: true, tenant: { select: TENANT_FIELDS } }
     });
     if (!user) return res.status(401).json({ error: 'Invalid token' });
+    // Issued before the last password change (a reset elsewhere): sign in again.
+    // JWT iat has 1-second resolution, so compare in whole seconds.
+    if (user.passwordChangedAt && claims.iat < Math.floor(user.passwordChangedAt.getTime() / 1000)) {
+      return res.status(401).json({ error: 'Your password was changed — please sign in again.' });
+    }
     if (!user.tenant.active) {
       return res.status(403).json({ error: 'This account has been deactivated. Contact KGT support.' });
     }
-    const { tenant, ...tenantUser } = user;
+    const { tenant, passwordChangedAt, ...tenantUser } = user;
     req.tenantUser = tenantUser;
     req.tenant = tenant;
     req.actor = 'client';

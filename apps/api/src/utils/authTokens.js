@@ -10,7 +10,9 @@ const jwt = require('jsonwebtoken');
 // can point a client at another company's data.
 
 const DEV_JWT_SECRET = 'dev-secret-change-me'; // assertProdSafety refuses to boot production with this
-const TOKEN_TTL = { operator: '12h', client: '7d' };
+// reset — short-lived proof that a password-reset code was verified
+//         (routes/clientAuth.routes.js)  { tenantUserId, resetCodeId }
+const TOKEN_TTL = { operator: '12h', client: '7d', reset: '10m' };
 
 function jwtSecret() {
   return process.env.JWT_SECRET || DEV_JWT_SECRET;

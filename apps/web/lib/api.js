@@ -71,6 +71,10 @@ export const api = {
   // ── Client company
   clientLogin: (email, password) => request('/api/v1/client/login', { method: 'POST', body: { email, password } }),
   clientMe: () => request('/api/v1/client/me', { auth: 'client' }),
+  // Forgot password: email → 6-digit code → reset token → new password
+  requestResetCode: (email) => request('/api/v1/client/password/forgot', { method: 'POST', body: { email } }),
+  verifyResetCode: (email, code) => request('/api/v1/client/password/verify', { method: 'POST', body: { email, code } }),
+  resetPassword: (resetToken, password) => request('/api/v1/client/password/reset', { method: 'POST', body: { resetToken, password } }),
 
   // ── Public signup wizard (pages/register.js) — no auth
   // authorized: the visitor ticked the crawl-authorization box — the API refuses to crawl without it.
@@ -87,7 +91,7 @@ export const api = {
 // One tenant's workspace (documents, keys, test chat, tickets, usage), with
 // the same methods whoever is looking: a client sees its own tenant only
 // (the API resolves it from the session), staff reach any tenant by id.
-// components/TenantWorkspace.js is written against this interface.
+// components/workspace/* are written against this interface.
 function workspace(base, auth) {
   const r = (path, opts = {}) => request(`${base}${path}`, { ...opts, auth });
   return {
@@ -108,7 +112,8 @@ function workspace(base, auth) {
     revokeApiKey: (keyId, { force = false } = {}) => r(`/api-keys/${enc(keyId)}${force ? '?force=true' : ''}`, { method: 'DELETE' }),
     chat: (payload) => r('/chat', { method: 'POST', body: payload }),
     listTickets: () => r('/tickets'),
-    getUsage: () => r('/usage')
+    getUsage: () => r('/usage'),
+    getDailyUsage: (days = 30) => r(`/usage/daily?days=${days}`)
   };
 }
 
