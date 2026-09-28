@@ -223,3 +223,59 @@ describe('POST /analyze-pdf (real express + multer, no DB touched)', () => {
     assert.equal(res.status, 400);
   });
 });
+
+describe('POST /tenants/:id/documents/pdf (operator upload; real express + multer, Prisma stubbed)', () => {
+  const prisma = require('../src/lib/prisma');
+  let server;
+  let base;
+  let saved;
+  const originals = {};
+
+  before(async () => {
+    originals.findUnique = prisma.tenant.findUnique;
+    originals.createMany = prisma.tenantDocument.createMany;
+    prisma.tenant.findUnique = async ({ where }) => (where.id === 't1' ? { id: 't1' } : null);
+    prisma.tenantDocument.createMany = async ({ data }) => { saved = data; return { count: data.length }; };
+    const app = express();
+    app.use('/tenants', require('../src/routes/tenantAdmin.routes'));
+    await new Promise((resolve) => { server = app.listen(0, resolve); });
+    base = `http://127.0.0.1:${server.address().port}/tenants`;
+  });
+  after(() => {
+    prisma.tenant.findUnique = originals.findUnique;
+    prisma.tenantDocument.createMany = originals.createMany;
+    server.close();
+  });
+
+  const upload = (tenantId, buf, { name = 'guide.pdf', category } = {}) => {
+    const form = new FormData();
+    if (category) form.append('category', category);
+    form.append('file', new Blob([buf], { type: 'application/pdf' }), name);
+    return fetch(`${base}/${tenantId}/documents/pdf`, { method: 'POST', body: form });
+  };
+  const guide = () => makePdf([page(['Returns', 18], ['Unopened items can be returned within 30 days for a refund.']),
+    page(['Shipping', 18], ['Orders ship within two business days to any address.'])]);
+
+  test('saves every section to the tenant and reports where they went', async () => {
+    saved = null;
+    const res = await upload('t1', guide());
+    const body = await res.json();
+    assert.equal(res.status, 201);
+    assert.ok(body.documentsCreated >= 1);
+    assert.equal(saved.length, body.documentsCreated);
+    assert.ok(saved.every((d) => d.tenantId === 't1' && d.title && d.content));
+    assert.equal(Object.values(body.categories).reduce((a, b) => a + b, 0), body.documentsCreated);
+  });
+
+  test('an explicit category files every section there', async () => {
+    const res = await upload('t1', guide(), { category: 'FAQ' });
+    assert.equal(res.status, 201);
+    assert.ok(saved.every((d) => d.category === 'FAQ'));
+  });
+
+  test('rejects an unknown category, a non-PDF and an unknown tenant', async () => {
+    assert.equal((await upload('t1', guide(), { category: 'NOPE' })).status, 400);
+    assert.equal((await upload('t1', Buffer.from('just text'), { name: 'notes.txt' })).status, 400);
+    assert.equal((await upload('missing', guide())).status, 404);
+  });
+});

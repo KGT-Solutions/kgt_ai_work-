@@ -41,7 +41,11 @@ function request(path, { method = 'GET', body } = {}) {
 }
 
 function requestMultipart(path, formData) {
-  return send(path, { method: 'POST', body: formData });
+  // No Content-Type header: the browser sets multipart/form-data with its boundary.
+  const headers = {};
+  const token = getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return send(path, { method: 'POST', headers, body: formData });
 }
 
 const tenant = (id) => `/api/v1/tenants/${encodeURIComponent(id)}`;
@@ -61,6 +65,13 @@ export const api = {
     request(`${tenant(tenantId)}/documents`, { method: 'POST', body: payload }),
   updateTenantDocument: (tenantId, documentId, payload) =>
     request(`${tenant(tenantId)}/documents/${encodeURIComponent(documentId)}`, { method: 'PATCH', body: payload }),
+  // category: a DOC_CATEGORIES id to file every section under, or '' to let the API suggest one per section
+  uploadTenantPdf: (tenantId, file, category) => {
+    const formData = new FormData();
+    if (category) formData.append('category', category);
+    formData.append('file', file);
+    return requestMultipart(`${tenant(tenantId)}/documents/pdf`, formData);
+  },
   deleteTenantDocument: (tenantId, documentId) =>
     request(`${tenant(tenantId)}/documents/${encodeURIComponent(documentId)}`, { method: 'DELETE' }),
   scrapeTenantUrl: (tenantId, url) => request(`${tenant(tenantId)}/scrape`, { method: 'POST', body: { url } }),

@@ -2,10 +2,41 @@ const express = require('express');
 const { issueApiKey } = require('../utils/tenantApiKeys');
 const prisma = require('../lib/prisma');
 const { invalidateTenantKnowledge } = require('../domains/tenantProfile');
+const multer = require('multer');
 const { crawlSite, CrawlerError } = require('../services/shared/crawler');
+const { pdfToDocuments, PdfIngestError } = require('../services/shared/pdfIngest');
 const { parseCategory, suggestCategory } = require('../services/shared/documentCategory');
 
 const router = express.Router();
+
+// Operator PDF upload: same parser and limits as the public wizard's
+// /analyze-pdf, but saves the sections straight to the tenant. Memory
+// storage — the buffer is parsed and discarded within the request.
+const MAX_PDF_BYTES = 10 * 1024 * 1024;
+const pdfUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_PDF_BYTES, files: 1, fields: 2 },
+  fileFilter: (_req, file, cb) => {
+    // Some browsers send application/octet-stream for a .pdf; the %PDF-
+    // magic-byte check in pdfToDocuments is the real gate.
+    const looksPdf = file.mimetype === 'application/pdf' || /\.pdf$/i.test(file.originalname || '');
+    cb(looksPdf ? null : new PdfIngestError('Only PDF files are accepted', 400), looksPdf);
+  }
+});
+
+function pdfUploadMiddleware(req, res, next) {
+  pdfUpload.single('file')(req, res, (err) => {
+    if (!err) return next();
+    if (err instanceof PdfIngestError) return res.status(err.statusCode).json({ error: err.message });
+    if (err instanceof multer.MulterError) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({ error: `That PDF is larger than ${MAX_PDF_BYTES / (1024 * 1024)}MB` });
+      }
+      return res.status(400).json({ error: 'Upload exactly one PDF in a field named "file"' });
+    }
+    next(err);
+  });
+}
 
 function makeSlug(name) {
   return String(name).toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
@@ -139,6 +170,43 @@ router.post('/:tenantId/documents', async (req, res) => {
   });
   invalidateTenantKnowledge(tenant.id); // next chat request re-reads from the DB
   res.status(201).json(doc);
+});
+
+// POST /api/v1/tenants/:tenantId/documents/pdf — multipart: file (the PDF),
+// optional category. With a category, every section is filed there; without
+// one, each section gets the same suggestion the wizard would make.
+router.post('/:tenantId/documents/pdf', pdfUploadMiddleware, async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'Attach a PDF in a field named "file"' });
+  const chosen = req.body?.category ? parseCategory(req.body.category) : null;
+  if (chosen && !chosen.ok) return res.status(400).json({ error: chosen.error });
+
+  const tenant = await prisma.tenant.findUnique({ where: { id: req.params.tenantId }, select: { id: true } });
+  if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+
+  let parsed;
+  try {
+    parsed = await pdfToDocuments(req.file.buffer, req.file.originalname);
+  } catch (e) {
+    if (e instanceof PdfIngestError) return res.status(e.statusCode).json({ error: e.message });
+    throw e;
+  }
+
+  const docs = parsed.pages.map((p) => ({
+    tenantId: tenant.id,
+    title: p.title,
+    content: p.markdown,
+    category: chosen ? chosen.value : suggestCategory({ title: p.title, markdown: p.markdown, source: 'pdf' })
+  }));
+  await prisma.tenantDocument.createMany({ data: docs });
+  invalidateTenantKnowledge(tenant.id);
+
+  res.status(201).json({
+    fileName: req.file.originalname,
+    title: parsed.title,
+    documentsCreated: docs.length,
+    truncated: parsed.truncated,
+    categories: docs.reduce((m, d) => ({ ...m, [d.category]: (m[d.category] || 0) + 1 }), {})
+  });
 });
 
 // POST /api/v1/tenants/:tenantId/scrape — auto-training from a company

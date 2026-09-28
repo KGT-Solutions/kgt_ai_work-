@@ -3,7 +3,7 @@ import Head from 'next/head';
 import { api, BASE_URL } from '../lib/api';
 // The API suggests a category for every crawled/uploaded page (which block it
 // starts in); the visitor can move anything between blocks before training.
-import { DOC_CATEGORIES, DEFAULT_CATEGORY, categoryLabel } from '../lib/documentCategories';
+import { DOC_CATEGORIES, DEFAULT_CATEGORY } from '../lib/documentCategories';
 
 const INDUSTRIES = [
   'SaaS & Technology', 'E-commerce & Retail', 'Healthcare & Pharma', 'Real Estate & Housing',
@@ -130,8 +130,9 @@ export default function RegisterPage() {
     return added[0]?.category;
   };
 
-  const addTextPage = (category) => {
-    const [page] = withIds([{ title: '', content: '', url: null, category, manual: true, autoExpand: true }]);
+  // A blank entry to write in, or (from a .txt/.md upload) one pre-filled with the file's text.
+  const addTextPage = (category, { title = '', content = '', sourceFile } = {}) => {
+    const [page] = withIds([{ title, content, url: null, category, manual: !sourceFile, sourceFile, autoExpand: true }]);
     setPages((prev) => [...prev, page]);
   };
 
@@ -474,7 +475,7 @@ function Step2KnowledgeSource({
               pages={pages.filter((p) => p.category === c.id)}
               updatePage={updatePage}
               onPdfPages={(data, fileName) => onPdfPages(data, fileName, c.id)}
-              onAddText={() => onAddText(c.id)}
+              onAddText={(prefill) => onAddText(c.id, prefill)}
             />
           ))}
         </div>
@@ -767,10 +768,10 @@ function KnowledgeBlock({ index, category, pages, updatePage, onPdfPages, onAddT
           <PageRow key={p.id} page={p} onChange={(patch) => updatePage(p.id, patch)} />
         ))}
         <div className="grid gap-3 sm:grid-cols-[1fr,auto]">
-          <PdfUploadCard onPages={onPdfPages} title={`Upload a PDF to ${category.short}`} />
+          <FileUploadCard onPdfPages={onPdfPages} onTextFile={onAddText} title={`Upload files to ${category.short}`} />
           <button
             type="button"
-            onClick={onAddText}
+            onClick={() => onAddText()}
             className="flex items-center justify-center gap-2 rounded-xl border-2 border-dashed border-slate-300 bg-white px-5 py-4 text-sm font-semibold text-slate-700 transition hover:border-indigo-400 hover:text-indigo-700"
           >
             <PencilIcon className="h-4 w-4" /> Paste or write text
@@ -781,81 +782,103 @@ function KnowledgeBlock({ index, category, pages, updatePage, onPdfPages, onAddT
   );
 }
 
-function PdfUploadCard({ onPages, title }) {
-  const [uploading, setUploading] = useState(false);
-  const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
+const MAX_TEXT_FILE_KB = 200;
+const isPdf = (file) => /\.pdf$/i.test(file.name) || file.type === 'application/pdf';
+const isTextFile = (file) => /\.(txt|md|markdown)$/i.test(file.name) || /^text\/(plain|markdown)$/.test(file.type);
+
+// File picker + drop zone for one knowledge block. The whole card is a
+// <label> for the file input, so clicking anywhere on it opens the browser's
+// native picker directly (no scripted .click()), and the input stays
+// keyboard-focusable. Several files at once: PDFs are parsed by the API into
+// sections; .txt/.md files are read in the browser into one editable entry each.
+function FileUploadCard({ onPdfPages, onTextFile, title }) {
+  const [busyFile, setBusyFile] = useState('');
+  const [results, setResults] = useState([]); // [{ ok, text }]
   const [dragOver, setDragOver] = useState(false);
   const inputRef = useRef(null);
 
-  const handleFile = async (file) => {
-    if (!file || uploading) return;
-    setError('');
-    setNotice('');
-    // Client-side checks are only for a fast, friendly error — the server
-    // enforces both (plus a %PDF- magic-byte check) regardless.
-    if (!/\.pdf$/i.test(file.name) && file.type !== 'application/pdf') {
-      setError('Please choose a PDF file.');
-      return;
+  const handleOne = async (file) => {
+    if (isPdf(file)) {
+      if (file.size > MAX_PDF_MB * 1024 * 1024) return { ok: false, text: `${file.name}: larger than ${MAX_PDF_MB}MB.` };
+      try {
+        const data = await api.analyzeCompanyPdf(file);
+        onPdfPages(data, file.name);
+        const n = data.pages.length;
+        return {
+          ok: true,
+          text: `${file.name}: added ${n} section${n === 1 ? '' : 's'}` + (data.truncated ? ' (long PDF: only the first part was imported)' : '') + '.'
+        };
+      } catch (err) {
+        return { ok: false, text: `${file.name}: ${err.message}` };
+      }
     }
-    if (file.size > MAX_PDF_MB * 1024 * 1024) {
-      setError(`That file is larger than ${MAX_PDF_MB}MB.`);
-      return;
+    if (isTextFile(file)) {
+      if (file.size > MAX_TEXT_FILE_KB * 1024) return { ok: false, text: `${file.name}: text files are limited to ${MAX_TEXT_FILE_KB}KB.` };
+      const content = (await file.text()).trim();
+      if (!content) return { ok: false, text: `${file.name}: the file is empty.` };
+      onTextFile({ title: file.name.replace(/\.(txt|md|markdown)$/i, ''), content, sourceFile: file.name });
+      return { ok: true, text: `${file.name}: added as an entry you can edit.` };
     }
-    setUploading(true);
-    try {
-      const data = await api.analyzeCompanyPdf(file);
-      const landedIn = onPages(data, file.name);
-      setNotice(
-        `Added ${data.pages.length} section${data.pages.length === 1 ? '' : 's'} from ${file.name}` +
-        (landedIn ? ` to ${categoryLabel(landedIn)}` : '') +
-        (data.truncated ? ' — the PDF was too long, so only the first part was imported.' : '.')
-      );
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setUploading(false);
-      if (inputRef.current) inputRef.current.value = ''; // allow re-selecting the same file
+    return { ok: false, text: `${file.name}: use a PDF, .txt or .md file.` };
+  };
+
+  const handleFiles = async (fileList) => {
+    const files = Array.from(fileList || []);
+    if (!files.length || busyFile) return;
+    setResults([]);
+    const out = [];
+    // One at a time: the API rate-limits PDF parsing per visitor, and it keeps
+    // the progress line honest.
+    for (const file of files) {
+      setBusyFile(file.name);
+      out.push(await handleOne(file));
     }
+    setBusyFile('');
+    setResults(out);
+    if (inputRef.current) inputRef.current.value = ''; // allow choosing the same file again
   };
 
   return (
     <div>
-      <div
-        role="button"
-        tabIndex={0}
-        onClick={() => inputRef.current?.click()}
-        onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && inputRef.current?.click()}
+      <label
         onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
         onDragLeave={() => setDragOver(false)}
         onDrop={(e) => {
           e.preventDefault();
           setDragOver(false);
-          handleFile(e.dataTransfer.files?.[0]);
+          handleFiles(e.dataTransfer.files);
         }}
         className={
-          'flex items-center gap-3 rounded-xl border-2 border-dashed px-4 py-4 transition ' +
+          'relative flex cursor-pointer items-center gap-3 rounded-xl border-2 border-dashed px-4 py-4 transition focus-within:ring-4 focus-within:ring-indigo-500/20 ' +
           (dragOver ? 'border-indigo-500 bg-indigo-50' : 'border-slate-300 bg-white hover:border-indigo-400')
         }
       >
         <input
           ref={inputRef}
           type="file"
-          accept="application/pdf,.pdf"
-          className="hidden"
-          onClick={(e) => e.stopPropagation()} // inputRef.click() bubbles to the dropzone's own onClick
-          onChange={(e) => handleFile(e.target.files?.[0])}
+          multiple
+          accept="application/pdf,.pdf,.txt,.md,.markdown,text/plain,text/markdown"
+          className="absolute h-px w-px overflow-hidden opacity-0"
+          disabled={!!busyFile}
+          onChange={(e) => handleFiles(e.target.files)}
         />
         <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-slate-500">
-          {uploading ? <Spinner className="h-4 w-4 text-indigo-600" /> : <UploadIcon className="h-4 w-4" />}
+          {busyFile ? <Spinner className="h-4 w-4 text-indigo-600" /> : <UploadIcon className="h-4 w-4" />}
         </span>
         <span className="min-w-0">
-          <span className="block text-sm font-semibold text-slate-900">{uploading ? 'Reading your PDF…' : title}</span>
-          <span className="block text-xs text-slate-500">Drop a file or click to browse · text-based PDFs up to {MAX_PDF_MB}MB</span>
+          <span className="block truncate text-sm font-semibold text-slate-900">{busyFile ? `Reading ${busyFile}…` : title}</span>
+          <span className="block text-xs text-slate-500">
+            Click to choose files or drop them here · PDF up to {MAX_PDF_MB}MB, or .txt / .md
+          </span>
         </span>
-      </div>
-      {error && <p className="mt-2 text-xs font-medium text-red-700">{error}</p>}
-      {notice && <p className="mt-2 text-xs font-medium text-emerald-700">{notice}</p>}
+      </label>
+      {results.length > 0 && (
+        <ul className="mt-2 space-y-0.5" aria-live="polite">
+          {results.map((r, i) => (
+            <li key={i} className={'text-xs font-medium ' + (r.ok ? 'text-emerald-700' : 'text-red-700')}>{r.text}</li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
@@ -874,7 +897,11 @@ function PageRow({ page, onChange }) {
     );
   }
 
-  const source = page.url ? page.url : page.sourceFile ? `PDF · ${page.sourceFile}` : 'Written by you';
+  const source = page.url
+    ? page.url
+    : page.sourceFile
+      ? `${/\.pdf$/i.test(page.sourceFile) ? 'PDF' : 'File'} · ${page.sourceFile}`
+      : 'Written by you';
   const SourceIcon = page.url ? GlobeIcon : page.sourceFile ? DocumentIcon : PencilIcon;
 
   return (

@@ -23,10 +23,12 @@ export default function OperatorLayout({ title, subtitle, children, error, succe
   const lastError = useRef('');
   const lastSuccess = useRef('');
 
+  // error/success: a string, or { message } — pages that can repeat the same
+  // message pass a fresh object each time so it's shown again.
   useEffect(() => {
     if (error && error !== lastError.current) {
       lastError.current = error;
-      showError(error);
+      showError(typeof error === 'string' ? error : error.message);
     }
     if (!error) lastError.current = '';
   }, [error]);
@@ -34,7 +36,7 @@ export default function OperatorLayout({ title, subtitle, children, error, succe
   useEffect(() => {
     if (success && success !== lastSuccess.current) {
       lastSuccess.current = success;
-      showSuccess(success);
+      showSuccess(typeof success === 'string' ? success : success.message);
     }
     if (!success) lastSuccess.current = '';
   }, [success]);

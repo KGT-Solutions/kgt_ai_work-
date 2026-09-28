@@ -6,6 +6,7 @@ import { api, BASE_URL } from '../../lib/api';
 import { DOC_CATEGORIES, DEFAULT_CATEGORY, categoryLabel } from '../../lib/documentCategories';
 
 const TABS = ['Documents', 'Test bots', 'API keys', 'Tickets', 'Usage'];
+const MAX_PDF_MB = 10; // mirrors MAX_PDF_BYTES in apps/api/src/routes/tenantAdmin.routes.js
 
 export default function TenantDetailPage() {
   const router = useRouter();
@@ -20,8 +21,13 @@ export default function TenantDetailPage() {
   // it without the operator pasting it back in. Never stored anywhere else.
   const [sessionKey, setSessionKey] = useState('');
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [success, setSuccess] = useState('');
+  // Each message is a fresh object, so OperatorLayout shows it again even
+  // when the text matches the previous one (a plain string wouldn't change
+  // state on a repeat, and the second identical error would never appear).
+  const [error, setErrorState] = useState(null);
+  const [success, setSuccessState] = useState(null);
+  const setError = (message) => setErrorState(message ? { message, at: Date.now() } : null);
+  const setSuccess = (message) => setSuccessState(message ? { message, at: Date.now() } : null);
 
   const load = async () => {
     if (!tenantId) return;
@@ -113,35 +119,11 @@ export default function TenantDetailPage() {
 }
 
 function DocumentsTab({ tenantId, documents, onSaved, setError, setSuccess }) {
-  const [title, setTitle] = useState('');
-  const [content, setContent] = useState('');
-  const [category, setCategory] = useState(DEFAULT_CATEGORY);
-  const [saving, setSaving] = useState(false);
+  const [showAddForm, setShowAddForm] = useState(false);
   const [scrapeUrl, setScrapeUrl] = useState('');
   const [scraping, setScraping] = useState(false);
   const [filter, setFilter] = useState('ALL');
   const visibleDocs = filter === 'ALL' ? documents : documents.filter((d) => d.category === filter);
-
-  const submit = async (e) => {
-    e.preventDefault();
-    setError('');
-    if (!title.trim() || !content.trim()) {
-      setError('Title and content are required.');
-      return;
-    }
-    setSaving(true);
-    try {
-      await api.createTenantDocument(tenantId, { title: title.trim(), content, category });
-      setSuccess(`"${title.trim()}" added to ${categoryLabel(category)} — searchable immediately, no restart needed.`);
-      setTitle('');
-      setContent('');
-      await onSaved();
-    } catch (e2) {
-      setError(e2.message);
-    } finally {
-      setSaving(false);
-    }
-  };
 
   const startAutoTrain = async (e) => {
     e.preventDefault();
@@ -196,30 +178,28 @@ function DocumentsTab({ tenantId, documents, onSaved, setError, setSuccess }) {
         )}
       </form>
 
-      <form onSubmit={submit} style={ui.form}>
-        <p style={ui.formTitle}>Add a document</p>
-        <p style={ui.hint}>
-          Plain text or Markdown. Split it into <code>## Heading</code> sections — each becomes one
-          retrievable chunk. Add <code>{'<!-- tags: benefit:free_shipping -->'}</code> under a heading to
-          show that benefit as a Sales Bot highlight.
-        </p>
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-          <input
-            style={{ ...ui.input, flex: '1 1 260px' }}
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            placeholder="e.g. Returns Policy"
-          />
-          <CategorySelect value={category} onChange={setCategory} />
-        </div>
-        <textarea
-          style={{ ...ui.textarea, minHeight: 160, fontFamily: 'monospace', fontSize: 13 }}
-          value={content}
-          onChange={(e) => setContent(e.target.value)}
-          placeholder={'## Returns\nItems can be returned within 30 days...\n\n## Shipping\nStandard shipping takes 5-7 business days.'}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', margin: '4px 0 12px' }}>
+        <button
+          type="button"
+          style={showAddForm ? ui.btnSecondary : ui.btn}
+          onClick={() => setShowAddForm((open) => !open)}
+          aria-expanded={showAddForm}
+          aria-controls="add-document-panel"
+        >
+          {showAddForm ? 'Close' : '+ Add document'}
+        </button>
+        {!showAddForm && <span style={ui.hint}>Write or paste text, or upload a PDF.</span>}
+      </div>
+
+      {showAddForm && (
+        <AddDocumentPanel
+          tenantId={tenantId}
+          onAdded={async (message) => {
+            setSuccess(message);
+            await onSaved();
+          }}
         />
-        <button type="submit" style={ui.btn} disabled={saving}>{saving ? 'Adding…' : 'Add document'}</button>
-      </form>
+      )}
 
       <p style={{ ...ui.formTitle, marginTop: 28, marginBottom: 12 }}>
         Training documents ({documents.length})
@@ -280,6 +260,178 @@ function DocumentsTab({ tenantId, documents, onSaved, setError, setSuccess }) {
         </div>
       )}
     </>
+  );
+}
+
+// The "Add document" panel: write/paste text, or upload a PDF that the API
+// splits into sections. Errors show inline here rather than as a toast, so
+// the same message on a second attempt is still visible.
+function AddDocumentPanel({ tenantId, onAdded }) {
+  const [mode, setMode] = useState('write'); // 'write' | 'pdf'
+  const [title, setTitle] = useState('');
+  const [content, setContent] = useState('');
+  const [category, setCategory] = useState(DEFAULT_CATEGORY);
+  const [pdfCategory, setPdfCategory] = useState(''); // '' = auto-detect per section
+  const [file, setFile] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [problem, setProblem] = useState('');
+  const fileRef = useRef(null);
+
+  const switchMode = (m) => {
+    setMode(m);
+    setProblem('');
+  };
+
+  const saveText = async (e) => {
+    e.preventDefault();
+    if (busy) return;
+    if (!title.trim() || !content.trim()) {
+      setProblem(!title.trim() ? 'Add a title for this document.' : 'Add some content — the bots answer from this text.');
+      return;
+    }
+    setBusy(true);
+    setProblem('');
+    try {
+      await api.createTenantDocument(tenantId, { title: title.trim(), content, category });
+      await onAdded(`"${title.trim()}" added to ${categoryLabel(category)} — both bots can use it on the next question.`);
+      setTitle('');
+      setContent('');
+    } catch (err) {
+      setProblem(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const pickFile = (picked) => {
+    setProblem('');
+    if (!picked) return setFile(null);
+    if (!/\.pdf$/i.test(picked.name) && picked.type !== 'application/pdf') {
+      setFile(null);
+      return setProblem('Choose a PDF file.');
+    }
+    if (picked.size > MAX_PDF_MB * 1024 * 1024) {
+      setFile(null);
+      return setProblem(`That file is larger than ${MAX_PDF_MB}MB.`);
+    }
+    setFile(picked);
+  };
+
+  const uploadPdf = async (e) => {
+    e.preventDefault();
+    if (busy) return;
+    if (!file) return setProblem('Choose a PDF to upload.');
+    setBusy(true);
+    setProblem('');
+    try {
+      const r = await api.uploadTenantPdf(tenantId, file, pdfCategory);
+      const where = Object.entries(r.categories).map(([c, n]) => `${n} in ${categoryLabel(c)}`).join(', ');
+      await onAdded(
+        `Added ${r.documentsCreated} section${r.documentsCreated === 1 ? '' : 's'} from ${r.fileName} (${where}).` +
+        (r.truncated ? ' The PDF was long, so only the first part was imported.' : '')
+      );
+      setFile(null);
+      if (fileRef.current) fileRef.current.value = '';
+    } catch (err) {
+      setProblem(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div id="add-document-panel" style={{ ...ui.form, gap: 12 }}>
+      <div role="tablist" aria-label="How to add" style={{ display: 'flex', gap: 8 }}>
+        {[['write', 'Write or paste'], ['pdf', 'Upload PDF']].map(([m, label]) => (
+          <button
+            key={m}
+            type="button"
+            role="tab"
+            aria-selected={mode === m}
+            onClick={() => switchMode(m)}
+            style={mode === m ? ui.btn : ui.btnSecondary}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {mode === 'write' ? (
+        <form onSubmit={saveText} style={{ display: 'grid', gap: 10 }}>
+          <p style={ui.hint}>
+            Plain text or Markdown. Split it into <code>## Heading</code> sections — each becomes one
+            retrievable chunk. Add <code>{'<!-- tags: benefit:free_shipping -->'}</code> under a heading to
+            show that benefit as a Sales Bot highlight.
+          </p>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            <input
+              id="new-doc-title"
+              aria-label="Document title"
+              style={{ ...ui.input, flex: '1 1 260px' }}
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="e.g. Returns Policy"
+              autoFocus
+            />
+            <CategorySelect value={category} onChange={setCategory} />
+          </div>
+          <textarea
+            id="new-doc-content"
+            aria-label="Document content"
+            style={{ ...ui.textarea, minHeight: 160, fontFamily: 'monospace', fontSize: 13 }}
+            value={content}
+            onChange={(e) => setContent(e.target.value)}
+            placeholder={'## Returns\nItems can be returned within 30 days...\n\n## Shipping\nStandard shipping takes 5-7 business days.'}
+          />
+          <div>
+            <button type="submit" style={ui.btn} disabled={busy}>{busy ? 'Saving…' : 'Save document'}</button>
+          </div>
+        </form>
+      ) : (
+        <form onSubmit={uploadPdf} style={{ display: 'grid', gap: 10 }}>
+          <p style={ui.hint}>
+            Text-based PDFs up to {MAX_PDF_MB}MB (manuals, FAQs, price lists). Headings become separate
+            sections. Scanned images can't be read.
+          </p>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+            {/* A real <label> around the input opens the native file picker on
+                every browser, with no scripted .click() involved. */}
+            <label style={{ ...ui.btnSecondary, position: 'relative', display: 'inline-flex', alignItems: 'center', cursor: 'pointer' }}>
+              Choose PDF…
+              <input
+                ref={fileRef}
+                id="new-doc-pdf"
+                type="file"
+                accept="application/pdf,.pdf"
+                onChange={(e) => pickFile(e.target.files?.[0])}
+                style={{ position: 'absolute', width: 1, height: 1, opacity: 0, overflow: 'hidden' }}
+              />
+            </label>
+            <span style={{ ...ui.meta, marginTop: 0 }}>
+              {file ? `${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)` : 'No file chosen'}
+            </span>
+          </div>
+          <select
+            aria-label="File the sections under"
+            style={{ ...ui.input, width: 'auto', maxWidth: 360 }}
+            value={pdfCategory}
+            onChange={(e) => setPdfCategory(e.target.value)}
+          >
+            <option value="">Auto-detect section for each part</option>
+            {DOC_CATEGORIES.map((c) => <option key={c.id} value={c.id}>All into: {c.label}</option>)}
+          </select>
+          <div>
+            <button type="submit" style={ui.btn} disabled={busy || !file}>
+              {busy ? 'Reading PDF…' : 'Upload and add'}
+            </button>
+          </div>
+        </form>
+      )}
+
+      {problem && (
+        <p role="alert" style={{ margin: 0, fontSize: 13, color: '#B4483A' }}>{problem}</p>
+      )}
+    </div>
   );
 }
 
