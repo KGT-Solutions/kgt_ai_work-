@@ -1,22 +1,25 @@
 export const BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4100';
 
-// Operator console session (pages/login.js). The public signup wizard
-// (pages/register.js) never has one — its calls go to unauthenticated routes.
-const TOKEN_KEY = 'hubToken';
+// Two separate sessions, stored under separate keys:
+//   operator — KGT staff, /admin pages   (typ "operator" JWT)
+//   client   — a customer company, /dashboard (typ "client" JWT)
+// The API rejects each token on the other's routes; keeping them apart here
+// also means signing in as one never silently reuses the other.
+const TOKEN_KEYS = { operator: 'kgtStaffToken', client: 'kgtClientToken' };
 
-export function getToken() {
+export function getToken(kind) {
   if (typeof window === 'undefined') return null;
   try {
-    return window.localStorage.getItem(TOKEN_KEY);
+    return window.localStorage.getItem(TOKEN_KEYS[kind]);
   } catch {
     return null;
   }
 }
 
-export function setSession(token) {
+export function setToken(kind, token) {
   try {
-    if (token) window.localStorage.setItem(TOKEN_KEY, token);
-    else window.localStorage.removeItem(TOKEN_KEY);
+    if (token) window.localStorage.setItem(TOKEN_KEYS[kind], token);
+    else window.localStorage.removeItem(TOKEN_KEYS[kind]);
   } catch {
     // storage blocked — the session simply won't survive a reload
   }
@@ -24,6 +27,7 @@ export function setSession(token) {
 
 async function send(path, init) {
   const res = await fetch(`${BASE_URL}${path}`, init);
+  if (res.status === 204) return null;
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     const err = new Error(data.error || 'Request failed');
@@ -33,59 +37,42 @@ async function send(path, init) {
   return data;
 }
 
-function request(path, { method = 'GET', body } = {}) {
-  const headers = { 'Content-Type': 'application/json' };
-  const token = getToken();
-  if (token) headers.Authorization = `Bearer ${token}`;
-  return send(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+function authHeaders(auth) {
+  const token = auth ? getToken(auth) : null;
+  return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
-function requestMultipart(path, formData) {
-  // No Content-Type header: the browser sets multipart/form-data with its boundary.
-  const headers = {};
-  const token = getToken();
-  if (token) headers.Authorization = `Bearer ${token}`;
-  return send(path, { method: 'POST', headers, body: formData });
+// auth: 'operator' | 'client' | undefined (public)
+function request(path, { method = 'GET', body, auth } = {}) {
+  return send(path, {
+    method,
+    headers: { 'Content-Type': 'application/json', ...authHeaders(auth) },
+    body: body ? JSON.stringify(body) : undefined
+  });
 }
 
-const tenant = (id) => `/api/v1/tenants/${encodeURIComponent(id)}`;
+// No Content-Type header: the browser sets multipart/form-data with its boundary.
+function requestMultipart(path, formData, auth) {
+  return send(path, { method: 'POST', headers: authHeaders(auth), body: formData });
+}
+
+const enc = encodeURIComponent;
 
 export const api = {
-  // ── Operator session
-  login: (email, password) => request('/api/v1/operator/login', { method: 'POST', body: { email, password } }),
-  getMe: () => request('/api/v1/operator/me'),
+  // ── KGT staff
+  staffLogin: (email, password) => request('/api/v1/operator/login', { method: 'POST', body: { email, password } }),
+  staffMe: () => request('/api/v1/operator/me', { auth: 'operator' }),
+  listTenants: () => request('/api/v1/tenants', { auth: 'operator' }),
+  createTenant: (payload) => request('/api/v1/tenants', { method: 'POST', body: payload, auth: 'operator' }),
+  getTenant: (tenantId) => request(`/api/v1/tenants/${enc(tenantId)}`, { auth: 'operator' }),
+  updateTenant: (tenantId, payload) =>
+    request(`/api/v1/tenants/${enc(tenantId)}`, { method: 'PATCH', body: payload, auth: 'operator' }),
 
-  // ── Tenants (operator only)
-  listTenants: () => request('/api/v1/tenants'),
-  createTenant: (payload) => request('/api/v1/tenants', { method: 'POST', body: payload }),
-  getTenant: (tenantId) => request(tenant(tenantId)),
-  updateTenant: (tenantId, payload) => request(tenant(tenantId), { method: 'PATCH', body: payload }),
-  getTenantDocuments: (tenantId) => request(`${tenant(tenantId)}/documents`),
-  createTenantDocument: (tenantId, payload) =>
-    request(`${tenant(tenantId)}/documents`, { method: 'POST', body: payload }),
-  updateTenantDocument: (tenantId, documentId, payload) =>
-    request(`${tenant(tenantId)}/documents/${encodeURIComponent(documentId)}`, { method: 'PATCH', body: payload }),
-  // category: a DOC_CATEGORIES id to file every section under, or '' to let the API suggest one per section
-  uploadTenantPdf: (tenantId, file, category) => {
-    const formData = new FormData();
-    if (category) formData.append('category', category);
-    formData.append('file', file);
-    return requestMultipart(`${tenant(tenantId)}/documents/pdf`, formData);
-  },
-  deleteTenantDocument: (tenantId, documentId) =>
-    request(`${tenant(tenantId)}/documents/${encodeURIComponent(documentId)}`, { method: 'DELETE' }),
-  scrapeTenantUrl: (tenantId, url) => request(`${tenant(tenantId)}/scrape`, { method: 'POST', body: { url } }),
-  getTenantTickets: (tenantId) => request(`${tenant(tenantId)}/tickets`),
-  getTenantUsage: (tenantId) => request(`${tenant(tenantId)}/usage`),
+  // ── Client company
+  clientLogin: (email, password) => request('/api/v1/client/login', { method: 'POST', body: { email, password } }),
+  clientMe: () => request('/api/v1/client/me', { auth: 'client' }),
 
-  // ── Tenant API keys (plaintext is returned only by createApiKey)
-  listApiKeys: (tenantId) => request(`${tenant(tenantId)}/api-keys`),
-  createApiKey: (tenantId, label) => request(`${tenant(tenantId)}/api-keys`, { method: 'POST', body: { label } }),
-  revokeApiKey: (tenantId, keyId, { force = false } = {}) =>
-    request(`${tenant(tenantId)}/api-keys/${encodeURIComponent(keyId)}${force ? '?force=true' : ''}`, { method: 'DELETE' }),
-
-  // ── Public self-serve signup wizard (pages/register.js) — no auth;
-  // see apps/api/src/routes/publicRegister.routes.js.
+  // ── Public signup wizard (pages/register.js) — no auth
   // authorized: the visitor ticked the crawl-authorization box — the API refuses to crawl without it.
   analyzeCompanyUrl: (url, { authorized } = {}) =>
     request('/api/v1/public/register/analyze', { method: 'POST', body: { url, authorized: authorized === true } }),
@@ -96,3 +83,37 @@ export const api = {
   },
   completeRegistration: (payload) => request('/api/v1/public/register/complete', { method: 'POST', body: payload })
 };
+
+// One tenant's workspace (documents, keys, test chat, tickets, usage), with
+// the same methods whoever is looking: a client sees its own tenant only
+// (the API resolves it from the session), staff reach any tenant by id.
+// components/TenantWorkspace.js is written against this interface.
+function workspace(base, auth) {
+  const r = (path, opts = {}) => request(`${base}${path}`, { ...opts, auth });
+  return {
+    listDocuments: () => r('/documents'),
+    createDocument: (payload) => r('/documents', { method: 'POST', body: payload }),
+    updateDocument: (id, payload) => r(`/documents/${enc(id)}`, { method: 'PATCH', body: payload }),
+    deleteDocument: (id) => r(`/documents/${enc(id)}`, { method: 'DELETE' }),
+    // category: a DOC_CATEGORIES id to file every section under, or '' to auto-detect per section
+    uploadPdf: (file, category) => {
+      const formData = new FormData();
+      if (category) formData.append('category', category);
+      formData.append('file', file);
+      return requestMultipart(`${base}/documents/pdf`, formData, auth);
+    },
+    importWebsite: (url, { authorized } = {}) => r('/scrape', { method: 'POST', body: { url, authorized: authorized === true } }),
+    listApiKeys: () => r('/api-keys'),
+    createApiKey: (label) => r('/api-keys', { method: 'POST', body: { label } }),
+    revokeApiKey: (keyId, { force = false } = {}) => r(`/api-keys/${enc(keyId)}${force ? '?force=true' : ''}`, { method: 'DELETE' }),
+    chat: (payload) => r('/chat', { method: 'POST', body: payload }),
+    listTickets: () => r('/tickets'),
+    getUsage: () => r('/usage')
+  };
+}
+
+export const clientWorkspace = () => workspace('/api/v1/client/workspace', 'client');
+export const staffWorkspace = (tenantId) => workspace(`/api/v1/tenants/${enc(tenantId)}`, 'operator');
+
+export const embedSnippet = (slug, apiKey) =>
+  `<script src="${BASE_URL}/widgets/tenant-chat-widget.js" data-tenant-id="${slug}" data-api-key="${apiKey}" defer></script>`;

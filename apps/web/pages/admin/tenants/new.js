@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { useRouter } from 'next/router';
-import OperatorLayout from '../../components/OperatorLayout';
-import { ui, colors, radius } from '../../components/ui';
-import { api } from '../../lib/api';
+import OperatorLayout from '../../../components/OperatorLayout';
+import { ui, colors, radius } from '../../../components/ui';
+import { api } from '../../../lib/api';
 
 export default function NewTenantPage() {
   const router = useRouter();
@@ -56,7 +56,7 @@ export default function NewTenantPage() {
             >
               Copy to clipboard
             </button>
-            <button type="button" style={ui.btn} onClick={() => router.push(`/tenants/${created.id}`)}>
+            <button type="button" style={ui.btn} onClick={() => router.push(`/admin/tenants/${created.id}`)}>
               Continue to tenant →
             </button>
           </div>

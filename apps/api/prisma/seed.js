@@ -122,9 +122,13 @@ async function main() {
   await seedFlatbrizTenant();
 }
 
-main()
-  .catch((err) => {
-    console.error('[seed] failed:', err.message);
-    process.exitCode = 1;
-  })
-  .finally(() => prisma.$disconnect());
+if (require.main === module) {
+  main()
+    .catch((err) => {
+      console.error('[seed] failed:', err.message);
+      process.exitCode = 1;
+    })
+    .finally(() => prisma.$disconnect());
+}
+
+module.exports = { seedOperator, seedFlatbrizTenant, prisma };

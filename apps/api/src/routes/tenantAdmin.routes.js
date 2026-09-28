@@ -1,57 +1,66 @@
 const express = require('express');
-const { issueApiKey } = require('../utils/tenantApiKeys');
 const prisma = require('../lib/prisma');
-const { invalidateTenantKnowledge } = require('../domains/tenantProfile');
-const multer = require('multer');
-const { crawlSite, CrawlerError } = require('../services/shared/crawler');
-const { pdfToDocuments, PdfIngestError } = require('../services/shared/pdfIngest');
-const { parseCategory, suggestCategory } = require('../services/shared/documentCategory');
+const { issueApiKey } = require('../utils/tenantApiKeys');
+const workspaceRoutes = require('./tenantWorkspace.routes');
 
+// KGT staff only — mounted behind requireOperator in app.js. The master
+// view across every client company, plus create / inspect / activate /
+// deactivate. Per-tenant work (documents, keys, chat, tickets, usage) is
+// the shared workspace router, entered only after loadTenantFromParam has
+// confirmed the tenant exists.
 const router = express.Router();
-
-// Operator PDF upload: same parser and limits as the public wizard's
-// /analyze-pdf, but saves the sections straight to the tenant. Memory
-// storage — the buffer is parsed and discarded within the request.
-const MAX_PDF_BYTES = 10 * 1024 * 1024;
-const pdfUpload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: MAX_PDF_BYTES, files: 1, fields: 2 },
-  fileFilter: (_req, file, cb) => {
-    // Some browsers send application/octet-stream for a .pdf; the %PDF-
-    // magic-byte check in pdfToDocuments is the real gate.
-    const looksPdf = file.mimetype === 'application/pdf' || /\.pdf$/i.test(file.originalname || '');
-    cb(looksPdf ? null : new PdfIngestError('Only PDF files are accepted', 400), looksPdf);
-  }
-});
-
-function pdfUploadMiddleware(req, res, next) {
-  pdfUpload.single('file')(req, res, (err) => {
-    if (!err) return next();
-    if (err instanceof PdfIngestError) return res.status(err.statusCode).json({ error: err.message });
-    if (err instanceof multer.MulterError) {
-      if (err.code === 'LIMIT_FILE_SIZE') {
-        return res.status(413).json({ error: `That PDF is larger than ${MAX_PDF_BYTES / (1024 * 1024)}MB` });
-      }
-      return res.status(400).json({ error: 'Upload exactly one PDF in a field named "file"' });
-    }
-    next(err);
-  });
-}
 
 function makeSlug(name) {
   return String(name).toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
 }
 
-// POST /api/v1/tenants — provision a new customer. Returns the API key ONCE;
-// it's not retrievable again (same convention as any real API-key issuer).
+const TENANT_FIELDS = {
+  id: true, slug: true, name: true, industryLabel: true, persona: true, active: true,
+  outOfScopeMessage: true, minConfidence: true, signupEmail: true, createdAt: true
+};
+
+// Per-tenant metrics for the master overview, computed in a handful of
+// grouped queries rather than one query per tenant.
+async function tenantMetrics(tenantIds) {
+  const where = { tenantId: { in: tenantIds } };
+  const [docs, keys, usage, sessions, questions, users] = await Promise.all([
+    prisma.tenantDocument.groupBy({ by: ['tenantId'], where, _count: { _all: true } }),
+    prisma.tenantApiKey.groupBy({ by: ['tenantId'], where: { ...where, revokedAt: null }, _count: { _all: true }, _max: { lastUsedAt: true } }),
+    prisma.usageLog.groupBy({ by: ['tenantId'], where, _count: { _all: true }, _sum: { estimatedCostUsd: true }, _max: { createdAt: true } }),
+    prisma.chatSession.groupBy({ by: ['tenantId'], where, _count: { _all: true } }),
+    tenantIds.length
+      ? prisma.$queryRaw`SELECT s."tenantId" AS "tenantId", COUNT(*)::int AS n
+          FROM "ChatMessage" m JOIN "ChatSession" s ON s.id = m."sessionId"
+          WHERE m.role = 'user' AND s."tenantId" = ANY(${tenantIds}) GROUP BY s."tenantId"`
+      : [],
+    prisma.tenantUser.findMany({ where, select: { tenantId: true, email: true, name: true, lastLoginAt: true }, orderBy: { createdAt: 'asc' } })
+  ]);
+  const by = (rows) => Object.fromEntries(rows.map((r) => [r.tenantId, r]));
+  const docsBy = by(docs); const keysBy = by(keys); const usageBy = by(usage); const sessionsBy = by(sessions);
+  const questionsBy = Object.fromEntries(questions.map((q) => [q.tenantId, q.n]));
+  const usersBy = users.reduce((m, u) => ({ ...m, [u.tenantId]: [...(m[u.tenantId] || []), u] }), {});
+
+  return (id) => ({
+    documents: docsBy[id]?._count._all || 0,
+    activeKeys: keysBy[id]?._count._all || 0,
+    keyLastUsedAt: keysBy[id]?._max.lastUsedAt || null,
+    llmCalls: usageBy[id]?._count._all || 0,
+    estimatedCostUsd: usageBy[id]?._sum.estimatedCostUsd || 0,
+    lastActivityAt: usageBy[id]?._max.createdAt || null,
+    conversations: sessionsBy[id]?._count._all || 0,
+    questions: questionsBy[id] || 0,
+    accounts: (usersBy[id] || []).map(({ email, name, lastLoginAt }) => ({ email, name, lastLoginAt }))
+  });
+}
+
+// POST /api/v1/tenants — staff-provisioned tenant (no client login; the
+// company can be given one later). Returns the API key ONCE.
 router.post('/', async (req, res) => {
   const name = String(req.body?.name || '').trim();
   const industryLabel = String(req.body?.industryLabel || '').trim();
-  if (!name || !industryLabel) {
-    return res.status(400).json({ error: 'name and industryLabel are required' });
-  }
-
-  const slug = String(req.body?.slug || makeSlug(name));
+  if (!name || !industryLabel) return res.status(400).json({ error: 'name and industryLabel are required' });
+  const slug = makeSlug(req.body?.slug || name);
+  if (!slug) return res.status(400).json({ error: 'name must contain letters or digits' });
 
   try {
     const { tenant, apiKey } = await prisma.$transaction(async (tx) => {
@@ -63,7 +72,8 @@ router.post('/', async (req, res) => {
           persona: req.body?.persona || null,
           outOfScopeMessage: req.body?.outOfScopeMessage || undefined,
           minConfidence: req.body?.minConfidence !== undefined ? Number(req.body.minConfidence) : undefined
-        }
+        },
+        select: TENANT_FIELDS
       });
       const { key } = await issueApiKey(tx, created.id);
       return { tenant: created, apiKey: key };
@@ -75,273 +85,52 @@ router.post('/', async (req, res) => {
   }
 });
 
+// GET /api/v1/tenants — master overview of every client company.
 router.get('/', async (req, res) => {
-  const tenants = await prisma.tenant.findMany({
-    orderBy: { createdAt: 'desc' },
-    select: {
-      id: true, slug: true, name: true, industryLabel: true, active: true,
-      minConfidence: true, createdAt: true
-    }
-  });
-  res.json(tenants);
+  const tenants = await prisma.tenant.findMany({ orderBy: { createdAt: 'desc' }, select: TENANT_FIELDS });
+  const metricsFor = await tenantMetrics(tenants.map((t) => t.id));
+  res.json(tenants.map((t) => ({ ...t, metrics: metricsFor(t.id) })));
 });
 
 router.get('/:tenantId', async (req, res) => {
-  const tenant = await prisma.tenant.findUnique({
-    where: { id: req.params.tenantId },
-    select: {
-      id: true, slug: true, name: true, industryLabel: true, persona: true, active: true,
-      outOfScopeMessage: true, minConfidence: true, createdAt: true
-    }
-  });
+  const tenant = await prisma.tenant.findUnique({ where: { id: req.params.tenantId }, select: TENANT_FIELDS });
   if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
-  res.json(tenant);
+  const metricsFor = await tenantMetrics([tenant.id]);
+  res.json({ ...tenant, metrics: metricsFor(tenant.id) });
 });
 
 router.patch('/:tenantId', async (req, res) => {
-  const tenant = await prisma.tenant.findUnique({ where: { id: req.params.tenantId } });
+  const tenant = await prisma.tenant.findUnique({ where: { id: req.params.tenantId }, select: { id: true } });
   if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
 
   const data = {};
   if (req.body?.active !== undefined) data.active = !!req.body.active;
   if (req.body?.persona !== undefined) data.persona = req.body.persona || null;
-  if (req.body?.minConfidence !== undefined) data.minConfidence = Number(req.body.minConfidence);
-  if (req.body?.outOfScopeMessage !== undefined) data.outOfScopeMessage = req.body.outOfScopeMessage;
-
-  const updated = await prisma.tenant.update({ where: { id: tenant.id }, data });
-  res.json(updated);
-});
-
-// API keys. Plaintext is returned only by the POST that issues a key; the
-// list shows prefixes and dates so admins can tell keys apart. Rotation is
-// issue-then-revoke, so a live widget never has a moment without a valid key.
-const API_KEY_PUBLIC_FIELDS = { id: true, keyPrefix: true, label: true, createdAt: true, lastUsedAt: true, revokedAt: true };
-
-router.get('/:tenantId/api-keys', async (req, res) => {
-  const tenant = await prisma.tenant.findUnique({ where: { id: req.params.tenantId }, select: { id: true } });
-  if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
-  const keys = await prisma.tenantApiKey.findMany({
-    where: { tenantId: tenant.id },
-    orderBy: { createdAt: 'desc' },
-    select: API_KEY_PUBLIC_FIELDS
-  });
-  res.json(keys);
-});
-
-router.post('/:tenantId/api-keys', async (req, res) => {
-  const tenant = await prisma.tenant.findUnique({ where: { id: req.params.tenantId }, select: { id: true } });
-  if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
-  const label = String(req.body?.label || '').trim().slice(0, 80) || 'Default';
-  const { key, row } = await issueApiKey(prisma, tenant.id, label);
-  res.status(201).json({ id: row.id, keyPrefix: row.keyPrefix, label: row.label, createdAt: row.createdAt, apiKey: key });
-});
-
-router.delete('/:tenantId/api-keys/:keyId', async (req, res) => {
-  const key = await prisma.tenantApiKey.findFirst({ where: { id: req.params.keyId, tenantId: req.params.tenantId } });
-  if (!key) return res.status(404).json({ error: 'API key not found' });
-  if (key.revokedAt) return res.json({ id: key.id, revokedAt: key.revokedAt });
-
-  const liveCount = await prisma.tenantApiKey.count({ where: { tenantId: key.tenantId, revokedAt: null } });
-  if (liveCount <= 1 && req.query.force !== 'true') {
-    return res.status(409).json({
-      error: "This is the tenant's last active key — revoking it takes every embedded widget offline. Issue a new key first, or pass ?force=true."
-    });
+  if (req.body?.minConfidence !== undefined) {
+    const n = Number(req.body.minConfidence);
+    if (!(n >= 0 && n <= 1)) return res.status(400).json({ error: 'minConfidence must be between 0 and 1' });
+    data.minConfidence = n;
   }
-  const revoked = await prisma.tenantApiKey.update({
-    where: { id: key.id },
-    data: { revokedAt: new Date() },
-    select: API_KEY_PUBLIC_FIELDS
-  });
-  res.json(revoked);
+  if (req.body?.outOfScopeMessage !== undefined) data.outOfScopeMessage = String(req.body.outOfScopeMessage).slice(0, 500);
+
+  res.json(await prisma.tenant.update({ where: { id: tenant.id }, data, select: TENANT_FIELDS }));
 });
 
-router.post('/:tenantId/documents', async (req, res) => {
-  const title = String(req.body?.title || '').trim();
-  const content = String(req.body?.content || '').trim();
-  if (!title || !content) return res.status(400).json({ error: 'title and content are required' });
-  const category = parseCategory(req.body?.category);
-  if (!category.ok) return res.status(400).json({ error: category.error });
-
-  const tenant = await prisma.tenant.findUnique({ where: { id: req.params.tenantId } });
-  if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
-
-  const doc = await prisma.tenantDocument.create({
-    data: { tenantId: tenant.id, title, content, category: category.value }
-  });
-  invalidateTenantKnowledge(tenant.id); // next chat request re-reads from the DB
-  res.status(201).json(doc);
-});
-
-// POST /api/v1/tenants/:tenantId/documents/pdf — multipart: file (the PDF),
-// optional category. With a category, every section is filed there; without
-// one, each section gets the same suggestion the wizard would make.
-router.post('/:tenantId/documents/pdf', pdfUploadMiddleware, async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'Attach a PDF in a field named "file"' });
-  const chosen = req.body?.category ? parseCategory(req.body.category) : null;
-  if (chosen && !chosen.ok) return res.status(400).json({ error: chosen.error });
-
-  const tenant = await prisma.tenant.findUnique({ where: { id: req.params.tenantId }, select: { id: true } });
-  if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
-
-  let parsed;
+// Staff acting inside one tenant: resolve it from the URL, then hand off to
+// the shared workspace router, which reads only req.tenant.
+async function loadTenantFromParam(req, res, next) {
   try {
-    parsed = await pdfToDocuments(req.file.buffer, req.file.originalname);
-  } catch (e) {
-    if (e instanceof PdfIngestError) return res.status(e.statusCode).json({ error: e.message });
-    throw e;
+    const tenant = await prisma.tenant.findUnique({ where: { id: req.params.tenantId }, select: TENANT_FIELDS });
+    if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
+    req.tenant = tenant;
+    req.actor = 'operator';
+    next();
+  } catch (err) {
+    next(err);
   }
+}
 
-  const docs = parsed.pages.map((p) => ({
-    tenantId: tenant.id,
-    title: p.title,
-    content: p.markdown,
-    category: chosen ? chosen.value : suggestCategory({ title: p.title, markdown: p.markdown, source: 'pdf' })
-  }));
-  await prisma.tenantDocument.createMany({ data: docs });
-  invalidateTenantKnowledge(tenant.id);
-
-  res.status(201).json({
-    fileName: req.file.originalname,
-    title: parsed.title,
-    documentsCreated: docs.length,
-    truncated: parsed.truncated,
-    categories: docs.reduce((m, d) => ({ ...m, [d.category]: (m[d.category] || 0) + 1 }), {})
-  });
-});
-
-// POST /api/v1/tenants/:tenantId/scrape — auto-training from a company
-// website: crawl a bounded set of same-domain pages, convert each into the
-// same "## Heading" markdown shape a hand-pasted document already uses, and
-// save one TenantDocument per page (sourceUrl set so the Documents Tab can
-// show provenance and link back to the original page). Reuses the exact
-// document pipeline (same table, same invalidateTenantKnowledge cache-bust)
-// rather than writing to the filesystem — a tenant's knowledge base needs
-// to survive a container restart/redeploy without a persistent volume, and
-// this keeps scraped and hand-edited documents indistinguishable to both
-// the support and sales profiles (domains/tenantProfile.js) reading from it.
-router.post('/:tenantId/scrape', async (req, res) => {
-  const url = String(req.body?.url || '').trim();
-  if (!url) return res.status(400).json({ error: 'url is required' });
-
-  const tenant = await prisma.tenant.findUnique({ where: { id: req.params.tenantId } });
-  if (!tenant) return res.status(404).json({ error: 'Tenant not found' });
-
-  let result;
-  try {
-    // browserFallback: headless-Chromium rendering for SPA shells / bot-
-    // blocked pages. Enabled ONLY here, behind operator auth — Chromium
-    // runs --no-sandbox, so it must never be reachable by an anonymous
-    // caller (publicRegister's /analyze stays static-only).
-    result = await crawlSite(url, { browserFallback: true });
-  } catch (e) {
-    if (e instanceof CrawlerError) return res.status(e.statusCode).json({ error: e.message });
-    throw e; // an unexpected failure — let the global error handler log and 500 it
-  }
-
-  const created = await prisma.$transaction(
-    result.pages.map((page) =>
-      prisma.tenantDocument.create({
-        data: {
-          tenantId: tenant.id,
-          title: page.title.slice(0, 200),
-          content: page.markdown,
-          sourceUrl: page.url,
-          // No review step on this admin path, so the suggestion is saved
-          // as-is; the Documents tab can re-categorise it afterwards.
-          category: suggestCategory({ title: page.title, url: page.url, markdown: page.markdown, source: 'crawl' })
-        }
-      })
-    )
-  );
-  invalidateTenantKnowledge(tenant.id); // next chat request (support or sales) re-reads from the DB
-
-  res.status(201).json({
-    message:
-      `Successfully extracted and indexed ${result.crawled} page${result.crawled === 1 ? '' : 's'} from ` +
-      `${result.baseHost} — both bots can use ${created.length} new document${created.length === 1 ? '' : 's'} immediately` +
-      (result.rendered ? ` (${result.rendered} rendered in a headless browser)` : '') +
-      (result.skipped ? `. (Skipped ${result.skipped} low-content/non-HTML page${result.skipped === 1 ? '' : 's'}.)` : '.'),
-    crawled: result.crawled,
-    skipped: result.skipped,
-    rendered: result.rendered,
-    documents: created.map((doc) => ({ id: doc.id, title: doc.title, sourceUrl: doc.sourceUrl, category: doc.category }))
-  });
-});
-
-// Optional ?category=FAQ filter; without it, every document is returned.
-router.get('/:tenantId/documents', async (req, res) => {
-  const where = { tenantId: req.params.tenantId };
-  if (req.query.category !== undefined) {
-    const category = parseCategory(req.query.category, null);
-    if (!category.ok || !category.value) return res.status(400).json({ error: category.error || 'category is empty' });
-    where.category = category.value;
-  }
-  const docs = await prisma.tenantDocument.findMany({ where, orderBy: { createdAt: 'desc' } });
-  res.json(docs);
-});
-
-router.patch('/:tenantId/documents/:documentId', async (req, res) => {
-  const existing = await prisma.tenantDocument.findFirst({
-    where: { id: req.params.documentId, tenantId: req.params.tenantId }
-  });
-  if (!existing) return res.status(404).json({ error: 'Document not found' });
-
-  const data = {};
-  if (req.body?.title !== undefined) {
-    const title = String(req.body.title).trim();
-    if (!title) return res.status(400).json({ error: 'title cannot be empty' });
-    data.title = title;
-  }
-  if (req.body?.content !== undefined) {
-    const content = String(req.body.content).trim();
-    if (!content) return res.status(400).json({ error: 'content cannot be empty' });
-    data.content = content;
-  }
-  if (req.body?.category !== undefined) {
-    const category = parseCategory(req.body.category, null);
-    if (!category.ok || !category.value) return res.status(400).json({ error: category.error || 'category cannot be empty' });
-    data.category = category.value;
-  }
-  if (!Object.keys(data).length) return res.status(400).json({ error: 'Nothing to update' });
-
-  const updated = await prisma.tenantDocument.update({ where: { id: existing.id }, data });
-  invalidateTenantKnowledge(existing.tenantId); // an edited chunk must be re-read on the very next chat request
-  res.json(updated);
-});
-
-router.delete('/:tenantId/documents/:documentId', async (req, res) => {
-  const existing = await prisma.tenantDocument.findFirst({
-    where: { id: req.params.documentId, tenantId: req.params.tenantId }
-  });
-  if (!existing) return res.status(404).json({ error: 'Document not found' });
-
-  await prisma.tenantDocument.delete({ where: { id: existing.id } });
-  invalidateTenantKnowledge(existing.tenantId); // a deleted chunk must stop being retrievable immediately
-  res.status(204).end();
-});
-
-router.get('/:tenantId/tickets', async (req, res) => {
-  const tickets = await prisma.supportTicket.findMany({
-    where: { tenantId: req.params.tenantId },
-    orderBy: { createdAt: 'desc' },
-    take: 100
-  });
-  res.json(tickets);
-});
-
-router.get('/:tenantId/usage', async (req, res) => {
-  const logs = await prisma.usageLog.findMany({ where: { tenantId: req.params.tenantId } });
-  const summary = logs.reduce(
-    (acc, l) => {
-      acc.calls += 1;
-      acc.promptTokens += l.promptTokens;
-      acc.completionTokens += l.completionTokens;
-      acc.estimatedCostUsd += l.estimatedCostUsd;
-      return acc;
-    },
-    { calls: 0, promptTokens: 0, completionTokens: 0, estimatedCostUsd: 0 }
-  );
-  res.json(summary); // this is the shape a Stripe metered-billing sync job would read
-});
+router.use('/:tenantId', loadTenantFromParam, workspaceRoutes);
 
 module.exports = router;
+module.exports.loadTenantFromParam = loadTenantFromParam;

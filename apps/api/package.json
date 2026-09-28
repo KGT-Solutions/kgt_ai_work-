@@ -9,7 +9,8 @@
     "seed": "node prisma/seed.js",
     "prisma:migrate": "prisma migrate dev",
     "prisma:generate": "prisma generate",
-    "prisma:studio": "prisma studio"
+    "prisma:studio": "prisma studio",
+    "db:reset": "node prisma/reset.js"
   },
   "dependencies": {
     "@prisma/client": "^5.14.0",

@@ -18,16 +18,33 @@ each bot weights differently.
 ```
 apps/
   api/   Express + Prisma API (Postgres)
-         - /api/v1/public/register   self-serve signup: crawl a website or parse PDFs, then train
-         - /api/v1/tenant-chat/:slug Support + Sales chat (per-tenant API key)
-         - /api/v1/tenants           tenant, document, API-key management (operators)
-         - /api/v1/operator          operator console sign-in
+         - /api/v1/public/register    self-serve signup (website scan + file parsing, then launch)
+         - /api/v1/client             client sign-in / me
+         - /api/v1/client/workspace   the signed-in company's own documents, keys, test chat, tickets, usage
+         - /api/v1/tenants            every company — KGT staff only
+         - /api/v1/operator           staff sign-in
+         - /api/v1/tenant-chat/:slug  Support + Sales chat for the widget (per-tenant API key)
          - /widgets/tenant-chat-widget.js  embeddable chat widget
   web/   Next.js
-         - /register                 public onboarding wizard for companies
-         - /login, /tenants          operator console: tenants, documents, API keys,
-                                     live bot testing, tickets, usage
+         - /register                  signup wizard → lands the company on its dashboard
+         - /login, /dashboard         client companies: their own bots only
+         - /admin/login, /admin       KGT staff: master control over every company
 ```
+
+## Who can see what
+
+| | Signs in at | Token | Reaches |
+|---|---|---|---|
+| Client company | `/login` | `client` JWT | only its own tenant, resolved server-side from its account |
+| Website widget | — | `tk_…` API key (stored as SHA-256) | only the tenant that owns the key |
+| KGT staff | `/admin/login` | `operator` JWT | every tenant |
+
+Tokens are typed, so a client token is refused on staff routes and the reverse
+(`apps/api/src/utils/authTokens.js`). The per-tenant routes
+(`routes/tenantWorkspace.routes.js`) read the tenant only from the session and
+look up every document or key id together with that tenant's id, so another
+company's data reads exactly like data that doesn't exist. Deactivating a
+company in `/admin` immediately stops its dashboard, API keys and widget.
 
 ## Run it (Docker)
 
@@ -40,8 +57,9 @@ docker compose --env-file .env.docker up -d --build
 
 | Service | URL |
 |---|---|
-| Onboarding wizard | http://localhost:3100/register |
-| Operator console | http://localhost:3100/login |
+| Signup wizard | http://localhost:3100/register |
+| Client dashboard | http://localhost:3100/login |
+| KGT staff console | http://localhost:3100/admin/login |
 | API | http://localhost:4100 (health: `/health`) |
 | Postgres | localhost:5440 |
 
@@ -59,13 +77,29 @@ On first start the API applies migrations and runs the seed:
 
 Set `SEED_FLATBRIZ_TENANT=false` for a platform with no pre-installed tenant.
 
+## Wipe test data
+
+Removes every company and everything that belongs to one (client accounts,
+documents, keys, consents, chats, tickets, usage) and every staff account
+except `HUB_ADMIN_EMAIL`, which is kept or created. Irreversible, so back up first:
+
+```bash
+docker exec kgt-ai-hub-postgres pg_dump -U kgthub kgthub > kgthub-backup.sql
+docker exec kgt-ai-hub-api npm run db:reset                 # dry run: shows what's there
+docker exec kgt-ai-hub-api npm run db:reset -- --yes        # wipe
+```
+
+Add `--with-showcase` to re-create Tenant #1 afterwards. The API seeds on every
+start, so set `SEED_FLATBRIZ_TENANT=false` if Flatbriz should stay gone.
+
 Everything uses its own container names (`kgt-ai-hub-*`), volume and ports, so
 it runs alongside other stacks on the same host.
 
 ## Try the bots
 
-In the console, open a tenant → **API keys** → issue a key → **Test bots**.
-Or call the API directly:
+On the client dashboard (or, for staff, any company in `/admin`), open
+**Test bots** — it chats through the signed-in session, no key needed. Or call
+the widget endpoint directly:
 
 ```bash
 curl -s -X POST http://localhost:4100/api/v1/tenant-chat/flatbriz/chat \

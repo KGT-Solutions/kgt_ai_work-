@@ -234,8 +234,10 @@ describe('POST /tenants/:id/documents/pdf (operator upload; real express + multe
   before(async () => {
     originals.findUnique = prisma.tenant.findUnique;
     originals.createMany = prisma.tenantDocument.createMany;
+    originals.count = prisma.tenantDocument.count;
     prisma.tenant.findUnique = async ({ where }) => (where.id === 't1' ? { id: 't1' } : null);
     prisma.tenantDocument.createMany = async ({ data }) => { saved = data; return { count: data.length }; };
+    prisma.tenantDocument.count = async () => 0; // the per-tenant document cap check
     const app = express();
     app.use('/tenants', require('../src/routes/tenantAdmin.routes'));
     await new Promise((resolve) => { server = app.listen(0, resolve); });
@@ -244,6 +246,7 @@ describe('POST /tenants/:id/documents/pdf (operator upload; real express + multe
   after(() => {
     prisma.tenant.findUnique = originals.findUnique;
     prisma.tenantDocument.createMany = originals.createMany;
+    prisma.tenantDocument.count = originals.count;
     server.close();
   });
 

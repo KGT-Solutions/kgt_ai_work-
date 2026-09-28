@@ -7,6 +7,9 @@ const { pdfToDocuments, PdfIngestError } = require('../services/shared/pdfIngest
 const { parseCategory, suggestCategory } = require('../services/shared/documentCategory');
 const { createIpRateLimiter } = require('../utils/ipRateLimit');
 const { issueApiKey } = require('../utils/tenantApiKeys');
+const { hashPassword } = require('../utils/password');
+const { signClientToken } = require('../middleware/clientAuth');
+const { crawlConsentRecord, hostOf } = require('../services/shared/crawlConsent');
 
 // Public self-serve registration wizard backend (apps/admin-web/pages/register.js).
 // Deliberately unauthenticated — that's the entire point of self-serve — so
@@ -25,11 +28,14 @@ const { issueApiKey } = require('../utils/tenantApiKeys');
 const router = express.Router();
 
 const isAnalyzeRateLimited = createIpRateLimiter({ max: 8, windowMs: 10 * 60 * 1000 });
-const isCompleteRateLimited = createIpRateLimiter({ max: 3, windowMs: 60 * 60 * 1000 });
+// Signups per IP per hour. Every attempt counts, including rejected ones, so
+// the endpoint can't be used to probe which emails already have accounts.
+const isCompleteRateLimited = createIpRateLimiter({ max: Number(process.env.SIGNUP_RATE_LIMIT_MAX) || 3, windowMs: 60 * 60 * 1000 });
 const isPdfRateLimited = createIpRateLimiter({ max: 10, windowMs: 10 * 60 * 1000 });
 
-// Room for a full crawl (crawler.js MAX_PAGES = 12) plus a multi-part PDF.
-const MAX_PAGES_ON_COMPLETE = 25;
+// Room for a full crawl (crawler.js MAX_PAGES = 12) plus several uploaded
+// documents: the wizard lets a company combine both sources.
+const MAX_PAGES_ON_COMPLETE = 40;
 const MAX_PDF_BYTES = 10 * 1024 * 1024;
 
 // Memory storage, not disk: the PDF is parsed and discarded within the
@@ -67,24 +73,8 @@ function pdfUploadMiddleware(req, res, next) {
 const MAX_TITLE_LEN = 200;
 const MAX_CONTENT_LEN = 20000; // per page — a hard ceiling regardless of what the client claims it sent
 
-// The authorization a visitor must give before we crawl their site. The text
-// the wizard shows (CRAWL_CONSENT_TEXT in apps/admin-web/pages/register.js)
-// must match this one — when the wording changes, change both and bump the
-// version, so every TenantConsent row records exactly what was agreed to.
-const CRAWL_CONSENT_STATEMENT =
-  'I am an authorized representative and legally permit the KGT Solutions AI crawler to access and ' +
-  'extract content from this domain.';
-const CRAWL_CONSENT_VERSION = '2026-09-24';
-
 const MAX_SOURCE_URL_LEN = 2048;
-
-function hostOf(url) {
-  try {
-    return new URL(url).hostname.toLowerCase();
-  } catch {
-    return null;
-  }
-}
+const MIN_PASSWORD_LEN = 10;
 
 function makeSlug(name) {
   const base = String(name).toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
@@ -167,15 +157,23 @@ router.post('/complete', async (req, res) => {
     });
   }
 
-  const companyName = String(req.body?.companyName || '').trim();
+  const companyName = String(req.body?.companyName || '').trim().slice(0, 120);
   const email = String(req.body?.email || '').trim().toLowerCase();
-  const industryLabel = String(req.body?.industryLabel || '').trim();
+  const password = String(req.body?.password || '');
+  const contactName = String(req.body?.contactName || '').trim().slice(0, 120) || null;
+  const industryLabel = String(req.body?.industryLabel || '').trim().slice(0, 120);
   const rawPages = Array.isArray(req.body?.pages) ? req.body.pages : [];
 
   if (!companyName) return res.status(400).json({ error: 'companyName is required' });
   if (!isValidEmail(email)) return res.status(400).json({ error: 'A valid business email is required' });
+  if (password.length < MIN_PASSWORD_LEN) {
+    return res.status(400).json({ error: `Choose a password of at least ${MIN_PASSWORD_LEN} characters` });
+  }
   if (!industryLabel) return res.status(400).json({ error: 'industryLabel is required' });
-  if (!rawPages.length) return res.status(400).json({ error: 'At least one reviewed page is required — run Analyze first' });
+  if (!rawPages.length) return res.status(400).json({ error: 'Add at least one website page or document to train on' });
+  if (await prisma.tenantUser.findUnique({ where: { email }, select: { id: true } })) {
+    return res.status(409).json({ error: 'An account with this email already exists — sign in instead.' });
+  }
 
   const pages = [];
   for (const p of rawPages.slice(0, MAX_PAGES_ON_COMPLETE)) {
@@ -202,39 +200,42 @@ router.post('/complete', async (req, res) => {
     return res.status(400).json({ error: 'Crawled pages require websiteConsent: { authorized: true, url }' });
   }
 
-  const { tenant, apiKey } = await prisma.$transaction(async (tx) => {
-    const created = await tx.tenant.create({
-      data: { name: companyName, slug: makeSlug(companyName), industryLabel, signupEmail: email }
-    });
-    const { key } = await issueApiKey(tx, created.id);
-    await tx.tenantDocument.createMany({
-      data: pages.map((p) => ({ tenantId: created.id, ...p }))
-    });
-    if (consentHost) {
-      await tx.tenantConsent.create({
-        data: {
-          tenantId: created.id,
-          kind: 'WEBSITE_CRAWL',
-          domain: consentHost,
-          statement: CRAWL_CONSENT_STATEMENT,
-          statementVersion: CRAWL_CONSENT_VERSION,
-          email,
-          ipAddress: req.ip || null,
-          userAgent: String(req.headers['user-agent'] || '').slice(0, 512) || null
-        }
+  // Tenant, its first API key, documents, crawl consent and the client's
+  // login are created together or not at all.
+  let created;
+  try {
+    created = await prisma.$transaction(async (tx) => {
+      const tenant = await tx.tenant.create({
+        data: { name: companyName, slug: makeSlug(companyName), industryLabel, signupEmail: email }
       });
-    }
-    return { tenant: created, apiKey: key };
-  });
+      const { key } = await issueApiKey(tx, tenant.id, 'Website widget');
+      await tx.tenantDocument.createMany({ data: pages.map((p) => ({ tenantId: tenant.id, ...p })) });
+      if (consentHost) {
+        await tx.tenantConsent.create({
+          data: { tenantId: tenant.id, ...crawlConsentRecord({ url: String(consent.url), email, req }) }
+        });
+      }
+      const user = await tx.tenantUser.create({
+        data: { tenantId: tenant.id, email, name: contactName, passwordHash: hashPassword(password), lastLoginAt: new Date() }
+      });
+      return { tenant, apiKey: key, user };
+    });
+  } catch (e) {
+    // Two signups racing on the same email: the unique index wins.
+    if (e.code === 'P2002') return res.status(409).json({ error: 'An account with this email already exists — sign in instead.' });
+    throw e;
+  }
   // No invalidateTenantKnowledge call needed — this tenant's knowledge
   // cache has never been populated, so there's nothing stale to clear.
 
   res.status(201).json({
-    tenantId: tenant.id,
-    slug: tenant.slug,
-    apiKey,
-    name: tenant.name,
-    documentsCreated: pages.length
+    tenantId: created.tenant.id,
+    slug: created.tenant.slug,
+    name: created.tenant.name,
+    apiKey: created.apiKey, // shown once, on the dashboard's welcome banner
+    documentsCreated: pages.length,
+    // Signed straight in: the wizard lands the new client on /dashboard.
+    token: signClientToken(created.user)
   });
 });
 

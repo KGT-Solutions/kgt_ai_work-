@@ -33,12 +33,31 @@ model Tenant {
   signupEmail       String?  // set when provisioned via the public self-serve wizard; null for an admin-created tenant
   createdAt         DateTime @default(now())
 
+  users        TenantUser[]
   documents    TenantDocument[]
   apiKeys      TenantApiKey[]
   consents     TenantConsent[]
   chatSessions ChatSession[]
   tickets      SupportTicket[]
   usageLogs    UsageLog[]
+}
+
+// A client company's own login to its dashboard (/dashboard). Belongs to
+// exactly one tenant and can only ever see that tenant's data: the client
+// JWT carries this user's id, and middleware/clientAuth.js resolves the
+// tenant from the database row, never from anything the client sends.
+// Created by the signup wizard (/api/v1/public/register/complete).
+model TenantUser {
+  id           String    @id @default(uuid())
+  tenant       Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantId     String
+  email        String    @unique
+  name         String?
+  passwordHash String
+  createdAt    DateTime  @default(now())
+  lastLoginAt  DateTime?
+
+  @@index([tenantId])
 }
 
 // Widget/API credentials. Only a SHA-256 hash of each key is stored — the

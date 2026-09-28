@@ -1,9 +1,19 @@
 import { useEffect, useRef, useState } from 'react';
 import Head from 'next/head';
-import { api, BASE_URL } from '../lib/api';
+import { useRouter } from 'next/router';
+import { api, setToken } from '../lib/api';
+import { putSignupHandoff } from '../lib/signupHandoff';
 // The API suggests a category for every crawled/uploaded page (which block it
 // starts in); the visitor can move anything between blocks before training.
 import { DOC_CATEGORIES, DEFAULT_CATEGORY } from '../lib/documentCategories';
+
+// Self-serve signup for a new client company, in three steps:
+//   1. Company & account  — company, contact, email, password, industry
+//   2. Knowledge          — scan the website AND/OR upload files / write entries,
+//                           all reviewed together in three knowledge blocks
+//   3. Review & launch    — creates the isolated tenant, its first (hashed)
+//                           API key and the client login in one request, then
+//                           lands the company on its own /dashboard, signed in.
 
 const INDUSTRIES = [
   'SaaS & Technology', 'E-commerce & Retail', 'Healthcare & Pharma', 'Real Estate & Housing',
@@ -21,108 +31,79 @@ const CRAWLER_PERMISSION_TEXT =
   'Please allow the AI crawler to go deep into your website pages to scrape and index all necessary ' +
   'content so your support and sales bots get trained with absolute precision.';
 
-// Must match CRAWL_CONSENT_STATEMENT in apps/api/src/routes/publicRegister.routes.js,
+// Must match CRAWL_CONSENT_STATEMENT in apps/api/src/services/shared/crawlConsent.js,
 // which is the copy stored in each tenant's consent record.
 const CRAWL_CONSENT_TEXT =
   'I am an authorized representative and legally permit the KGT Solutions AI crawler to access and ' +
   'extract content from this domain.';
 
 // Mirrors MAX_PAGES_ON_COMPLETE in apps/api/src/routes/publicRegister.routes.js
-// — the server silently drops anything past it, so stop the visitor here.
-const MAX_TRAINING_PAGES = 25;
+// — the server drops anything past it, so stop the visitor here.
+const MAX_TRAINING_PAGES = 40;
 const MAX_PDF_MB = 10;
+const MIN_PASSWORD_LEN = 10; // mirrors the API
 
 const STEPS = [
-  { label: 'Enterprise details', sub: 'Company & industry' },
-  { label: 'Knowledge source', sub: 'Documents or website' },
-  { label: 'Train & deploy', sub: 'Keys, embed & sandbox' }
+  { label: 'Company & account', sub: 'Who you are, how you sign in' },
+  { label: 'Knowledge', sub: 'Website and/or documents' },
+  { label: 'Review & launch', sub: 'Create your bots' }
 ];
 
 const isValidEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim());
 const isTrainable = (p) => !p.deleted && p.title.trim() && p.content.trim();
 
 export default function RegisterPage() {
+  const router = useRouter();
   const [step, setStep] = useState(1);
 
   // Step 1
-  const [companyName, setCompanyName] = useState('');
-  const [email, setEmail] = useState('');
-  const [industryLabel, setIndustryLabel] = useState(INDUSTRIES[0]);
+  const [account, setAccount] = useState({
+    companyName: '', contactName: '', email: '', password: '', confirm: '', industryLabel: INDUSTRIES[0]
+  });
 
-  // Step 2 — 'documents' | 'website' | null (not chosen yet). The two paths are
-  // strictly separate: each trains only on its own content, and switching
-  // paths hides (but keeps) whatever the other one collected.
-  const [sourceMode, setSourceMode] = useState(null);
-
-  // Documents path — PDF sections and hand-written entries, reviewed in the 3 blocks.
+  // Step 2 — one list for everything: crawled pages (url set), PDF sections
+  // (sourceFile set) and hand-written entries (manual).
   const [pages, setPages] = useState([]);
-  // ids must stay unique across repeated uploads (array indexes would collide).
+  // ids must stay unique across repeated crawls and uploads (array indexes would collide).
   const nextPageId = useRef(0);
   const withIds = (list) =>
     list.map((p) => ({ category: DEFAULT_CATEGORY, ...p, id: nextPageId.current++, deleted: false }));
 
-  // Website path — crawl, then train straight away (no review blocks).
-  const [crawlConsent, setCrawlConsent] = useState(false);
+  // Website scan (optional)
   const [websiteUrl, setWebsiteUrl] = useState('');
-  const [scrapeStage, setScrapeStage] = useState(null); // null | 'crawling' | 'training'
-  const [scrapeError, setScrapeError] = useState('');
+  const [crawlConsent, setCrawlConsent] = useState(false);
+  const [scanning, setScanning] = useState(false);
+  const [scanError, setScanError] = useState('');
   const [crawlStats, setCrawlStats] = useState(null);
-  // The last successful crawl, so a failed training call (rate limit, network)
-  // can be retried without crawling the same site again.
-  const lastCrawl = useRef(null);
+  // The URL the kept crawled pages came from — recorded with the consent at signup.
+  const [crawledUrl, setCrawledUrl] = useState('');
 
   // Step 3
-  const [training, setTraining] = useState(false);
-  const [trainError, setTrainError] = useState('');
-  const [result, setResult] = useState(null);
+  const [launching, setLaunching] = useState(false);
+  const [launchError, setLaunchError] = useState('');
 
-  const step1Valid = companyName.trim() && isValidEmail(email);
   const trainablePages = pages.filter(isTrainable);
+  const hasCrawledPages = trainablePages.some((p) => p.url);
 
-  // websiteConsent: required by the API whenever crawled pages (sourceUrl set)
-  // are submitted; it's stored as the tenant's crawl-authorization record.
-  const submitRegistration = (list, websiteConsent) =>
-    api.completeRegistration({
-      companyName: companyName.trim(),
-      email: email.trim(),
-      industryLabel,
-      pages: list.map((p) => ({ title: p.title, content: p.content, category: p.category, sourceUrl: p.url || undefined })),
-      websiteConsent
-    });
-
-  const runScrapeAndTrain = async () => {
+  const scanWebsite = async () => {
     const url = websiteUrl.trim();
-    if (!crawlConsent || !url || scrapeStage) return;
-    setScrapeError('');
+    if (!crawlConsent || !url || scanning) return;
+    setScanError('');
+    setScanning(true);
     try {
-      let crawl = lastCrawl.current?.url === url ? lastCrawl.current : null;
-      if (!crawl) {
-        setScrapeStage('crawling');
-        const data = await api.analyzeCompanyUrl(url, { authorized: crawlConsent });
-        crawl = { url, pages: data.pages, stats: { crawled: data.crawled, skipped: data.skipped, baseHost: data.baseHost } };
-        lastCrawl.current = crawl;
-      }
-      setCrawlStats(crawl.stats);
-
-      // No review step on this path, so keep the same first-N pages the server's
-      // own cap would keep, rather than failing on a large site.
-      const trainable = crawl.pages.filter((p) => p.title?.trim() && p.content?.trim()).slice(0, MAX_TRAINING_PAGES);
-      if (!trainable.length) {
-        throw new Error("We couldn't find enough readable content on that site. Try the document upload path instead.");
-      }
-      setScrapeStage('training');
-      const data = await submitRegistration(trainable, { authorized: crawlConsent, url });
-      setResult(data);
-      goTo(3);
+      const data = await api.analyzeCompanyUrl(url, { authorized: crawlConsent });
+      // A re-scan replaces the previous scan's pages but keeps uploads and written entries.
+      setPages((prev) => [...prev.filter((p) => !p.url), ...withIds(data.pages)]);
+      setCrawlStats({ crawled: data.crawled, skipped: data.skipped, baseHost: data.baseHost });
+      setCrawledUrl(url);
     } catch (err) {
-      setScrapeError(err.message);
+      setScanError(err.message);
     } finally {
-      setScrapeStage(null);
+      setScanning(false);
     }
   };
 
-  // category: the block the PDF was dropped into — the visitor's explicit
-  // choice beats the API's suggestion.
+  // category: the block the file was dropped into — the visitor's choice beats the API's suggestion.
   const addPdfPages = (data, fileName, category) => {
     const added = withIds(data.pages.map((p) => ({ ...p, sourceFile: fileName, ...(category ? { category } : {}) })));
     if (added.length) added[0].autoExpand = true; // "instant preview": open the first parsed part in the editor
@@ -136,24 +117,35 @@ export default function RegisterPage() {
     setPages((prev) => [...prev, page]);
   };
 
-  const runTrain = async () => {
-    if (training) return;
+  const launch = async () => {
+    if (launching) return;
     if (!trainablePages.length) {
-      setTrainError('Keep at least one entry with a title and content — the bots need something to learn from.');
+      setLaunchError('Add at least one website page or document with a title and content.');
       return;
     }
     if (trainablePages.length > MAX_TRAINING_PAGES) {
-      setTrainError(`You can train on up to ${MAX_TRAINING_PAGES} entries — remove ${trainablePages.length - MAX_TRAINING_PAGES} to continue.`);
+      setLaunchError(`You can train on up to ${MAX_TRAINING_PAGES} entries — remove ${trainablePages.length - MAX_TRAINING_PAGES} to continue.`);
       return;
     }
-    setTrainError('');
-    setTraining(true);
+    setLaunchError('');
+    setLaunching(true);
     try {
-      setResult(await submitRegistration(trainablePages));
+      const data = await api.completeRegistration({
+        companyName: account.companyName.trim(),
+        contactName: account.contactName.trim(),
+        email: account.email.trim(),
+        password: account.password,
+        industryLabel: account.industryLabel,
+        pages: trainablePages.map((p) => ({ title: p.title, content: p.content, category: p.category, sourceUrl: p.url || undefined })),
+        // Required by the API whenever crawled pages are included; stored as the consent record.
+        websiteConsent: hasCrawledPages ? { authorized: true, url: crawledUrl } : undefined
+      });
+      setToken('client', data.token);
+      putSignupHandoff({ apiKey: data.apiKey, slug: data.slug, documentsCreated: data.documentsCreated });
+      router.push('/dashboard');
     } catch (err) {
-      setTrainError(err.message);
-    } finally {
-      setTraining(false);
+      setLaunchError(err.status === 409 ? `${err.message}` : err.message);
+      setLaunching(false);
     }
   };
 
@@ -165,7 +157,7 @@ export default function RegisterPage() {
   return (
     <>
       <Head>
-        <title>Enterprise Onboarding — KGT Solutions AI Hub</title>
+        <title>Create your AI bots — KGT Solutions AI Hub</title>
       </Head>
       {/* Tailwind Preflight is disabled app-wide (see tailwind.config.js), so this
           page carries its own zero-specificity resets, scoped to its root. */}
@@ -182,10 +174,6 @@ export default function RegisterPage() {
         :where(.kgt-onboard) :disabled { cursor: not-allowed; }
         @keyframes kgtFadeUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
         .kgt-fade-up { animation: kgtFadeUp 0.35s ease-out both; }
-        @keyframes kgtConfetti {
-          0% { opacity: 1; transform: translateY(0) rotate(0deg); }
-          100% { opacity: 0; transform: translateY(180px) rotate(540deg); }
-        }
         @media (prefers-reduced-motion: reduce) { .kgt-fade-up { animation: none; } }
       `}</style>
 
@@ -196,26 +184,17 @@ export default function RegisterPage() {
         <TopBar />
         <main className="mx-auto max-w-5xl px-4 pb-16 pt-8 sm:px-6 lg:px-8">
           <PageHeader />
-          <StepIndicator step={result ? 4 : step} />
+          <StepIndicator step={step} />
 
-          <div key={result ? 'done' : step} className="kgt-fade-up">
-            {step === 1 && (
-              <Step1Details
-                companyName={companyName} setCompanyName={setCompanyName}
-                email={email} setEmail={setEmail}
-                industryLabel={industryLabel} setIndustryLabel={setIndustryLabel}
-                valid={step1Valid}
-                onNext={() => goTo(2)}
-              />
-            )}
+          <div key={step} className="kgt-fade-up">
+            {step === 1 && <Step1Account account={account} setAccount={setAccount} onNext={() => goTo(2)} />}
 
             {step === 2 && (
-              <Step2KnowledgeSource
-                sourceMode={sourceMode} setSourceMode={setSourceMode}
-                crawlConsent={crawlConsent} setCrawlConsent={setCrawlConsent}
+              <Step2Knowledge
                 websiteUrl={websiteUrl} setWebsiteUrl={setWebsiteUrl}
-                scrapeStage={scrapeStage} scrapeError={scrapeError} crawlStats={crawlStats}
-                onScrapeAndTrain={runScrapeAndTrain}
+                crawlConsent={crawlConsent} setCrawlConsent={setCrawlConsent}
+                scanning={scanning} scanError={scanError} crawlStats={crawlStats}
+                onScan={scanWebsite}
                 pages={pages} setPages={setPages}
                 trainableCount={trainablePages.length}
                 onPdfPages={addPdfPages} onAddText={addTextPage}
@@ -224,17 +203,16 @@ export default function RegisterPage() {
               />
             )}
 
-            {step === 3 && !result && (
-              <Step3Train
-                companyName={companyName} email={email} industryLabel={industryLabel}
+            {step === 3 && (
+              <Step3Review
+                account={account}
                 trainablePages={trainablePages}
-                training={training} trainError={trainError}
+                crawledHost={hasCrawledPages ? crawlStats?.baseHost : null}
+                launching={launching} launchError={launchError}
                 onBack={() => goTo(2)}
-                onTrain={runTrain}
+                onLaunch={launch}
               />
             )}
-
-            {step === 3 && result && <Step3Success companyName={companyName} result={result} />}
           </div>
         </main>
         <Footer />
@@ -260,7 +238,7 @@ function TopBar() {
           </div>
         </div>
         <a href="/login" className="text-sm font-medium text-slate-500 no-underline transition hover:text-slate-900">
-          KGT staff? <span className="font-semibold text-indigo-600">Operator sign in</span>
+          Already a customer? <span className="font-semibold text-indigo-600">Sign in</span>
         </a>
       </div>
     </header>
@@ -275,10 +253,10 @@ function PageHeader() {
       </span>
       <h1 className="mt-4 text-3xl font-extrabold tracking-tight text-slate-900 sm:text-4xl">
         KGT Solutions AI Hub <span className="text-slate-400">—</span>{' '}
-        <span className="bg-gradient-to-r from-indigo-600 to-violet-600 bg-clip-text text-transparent">Enterprise Onboarding</span>
+        <span className="bg-gradient-to-r from-indigo-600 to-violet-600 bg-clip-text text-transparent">Create your AI bots</span>
       </h1>
       <p className="mx-auto mt-3 max-w-2xl text-base text-slate-600">
-        Launch a grounded Support Bot and a conversion-focused Sales Bot, trained on your own knowledge, in three steps.
+        Launch a grounded Support Bot and a conversion-focused Sales Bot, trained on your website and documents, live in three steps.
       </p>
     </div>
   );
@@ -336,66 +314,73 @@ function StepIndicator({ step }) {
 }
 
 // ---------------------------------------------------------------------
-// Step 1 — Enterprise details & industry
+// Step 1 — Company & account
 
-function Step1Details({ companyName, setCompanyName, email, setEmail, industryLabel, setIndustryLabel, valid, onNext }) {
-  const [touched, setTouched] = useState(false);
-  const emailInvalid = touched && email.trim() && !isValidEmail(email);
+function Step1Account({ account, setAccount, onNext }) {
+  const [touched, setTouched] = useState({});
+  const set = (field) => (e) => setAccount((a) => ({ ...a, [field]: e.target.value }));
+  const touch = (field) => () => setTouched((t) => ({ ...t, [field]: true }));
+
+  const problems = {
+    companyName: !account.companyName.trim() ? 'Enter your company name.' : '',
+    email: !isValidEmail(account.email) ? 'Enter a valid email address.' : '',
+    password: account.password.length < MIN_PASSWORD_LEN ? `Use at least ${MIN_PASSWORD_LEN} characters.` : '',
+    confirm: account.confirm !== account.password ? "Passwords don't match." : ''
+  };
+  const valid = !Object.values(problems).some(Boolean);
+  const show = (field) => (touched[field] ? problems[field] : '');
+  const bad = (field) => (show(field) ? ' border-red-400 focus:border-red-500 focus:ring-red-500/20' : '');
 
   return (
     <form
       onSubmit={(e) => {
         e.preventDefault();
-        setTouched(true);
+        setTouched({ companyName: true, email: true, password: true, confirm: true });
         if (valid) onNext();
       }}
       className="mx-auto max-w-2xl"
+      noValidate
     >
       <Card>
         <CardHeader
           icon={<BuildingIcon className="h-5 w-5" />}
-          title="Enterprise details"
-          subtitle="Tell us who you are. Nothing is created until you start training."
+          title="Company & account"
+          subtitle="Your sign-in for the dashboard where you manage and test your bots. Nothing is created until the last step."
         />
         <div className="grid gap-5 p-6 sm:grid-cols-2 sm:p-8">
-          <Field label="Company name" className="sm:col-span-2">
-            <input
-              className={inputClass}
-              value={companyName}
-              onChange={(e) => setCompanyName(e.target.value)}
-              placeholder="Acme Corporation"
-              autoComplete="organization"
-              required
-            />
+          <Field label="Company name" className="sm:col-span-2" error={show('companyName')}>
+            <input className={inputClass + bad('companyName')} value={account.companyName} onChange={set('companyName')} onBlur={touch('companyName')}
+              placeholder="Acme Corporation" autoComplete="organization" />
           </Field>
-          <Field label="Business email" error={emailInvalid ? 'Enter a valid email address.' : ''}>
-            <input
-              type="email"
-              className={inputClass + (emailInvalid ? ' border-red-400 focus:border-red-500 focus:ring-red-500/20' : '')}
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              onBlur={() => setTouched(true)}
-              placeholder="you@company.com"
-              autoComplete="email"
-              required
-            />
+          <Field label="Your name" hint="Optional">
+            <input className={inputClass} value={account.contactName} onChange={set('contactName')} placeholder="Priya Sharma" autoComplete="name" />
           </Field>
           <Field label="Industry">
             <div className="relative">
-              <select
-                className={inputClass + ' appearance-none pr-10'}
-                value={industryLabel}
-                onChange={(e) => setIndustryLabel(e.target.value)}
-              >
+              <select className={inputClass + ' appearance-none pr-10'} value={account.industryLabel} onChange={set('industryLabel')}>
                 {INDUSTRIES.map((i) => <option key={i} value={i}>{i}</option>)}
               </select>
               <ChevronDownIcon className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
             </div>
           </Field>
+          <Field label="Business email" className="sm:col-span-2" error={show('email')} hint="You'll sign in with this.">
+            <input type="email" className={inputClass + bad('email')} value={account.email} onChange={set('email')} onBlur={touch('email')}
+              placeholder="you@company.com" autoComplete="email" />
+          </Field>
+          <Field label="Password" error={show('password')} hint={`At least ${MIN_PASSWORD_LEN} characters.`}>
+            <input type="password" className={inputClass + bad('password')} value={account.password} onChange={set('password')} onBlur={touch('password')}
+              autoComplete="new-password" />
+          </Field>
+          <Field label="Confirm password" error={show('confirm')}>
+            <input type="password" className={inputClass + bad('confirm')} value={account.confirm} onChange={set('confirm')} onBlur={touch('confirm')}
+              autoComplete="new-password" />
+          </Field>
         </div>
         <div className="flex items-center justify-between gap-4 border-t border-slate-100 bg-slate-50/70 px-6 py-4 sm:px-8">
-          <p className="hidden text-xs text-slate-500 sm:block">Your industry tunes each bot's tone and vocabulary.</p>
-          <button type="submit" disabled={!valid} className={primaryBtnClass}>
+          <p className="hidden text-xs text-slate-500 sm:block">
+            Already have an account? <a href="/login" className="font-semibold text-indigo-600">Sign in</a>
+          </p>
+          <button type="submit" className={primaryBtnClass}>
             Continue <ArrowRightIcon className="h-4 w-4" />
           </button>
         </div>
@@ -405,116 +390,159 @@ function Step1Details({ companyName, setCompanyName, email, setEmail, industryLa
 }
 
 // ---------------------------------------------------------------------
-// Step 2 — Knowledge source fork
+// Step 2 — Knowledge: website scan and/or documents, reviewed together
 
-function Step2KnowledgeSource({
-  sourceMode, setSourceMode, crawlConsent, setCrawlConsent, websiteUrl, setWebsiteUrl,
-  scrapeStage, scrapeError, crawlStats, onScrapeAndTrain, pages, setPages, trainableCount,
-  onPdfPages, onAddText, onBack, onNext
+function Step2Knowledge({
+  websiteUrl, setWebsiteUrl, crawlConsent, setCrawlConsent, scanning, scanError, crawlStats, onScan,
+  pages, setPages, trainableCount, onPdfPages, onAddText, onBack, onNext
 }) {
   const updatePage = (id, patch) => setPages((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)));
-  const busy = !!scrapeStage;
 
   return (
     <div className="mx-auto max-w-4xl">
       <TrainingTip />
 
       <div className="mt-10 text-center">
-        <p className="text-xs font-semibold uppercase tracking-[0.14em] text-indigo-600">Step 2 of 3 · Knowledge source</p>
-        <h2 className="mt-2 text-2xl font-bold tracking-tight text-slate-900 sm:text-[1.75rem]">Choose your training method</h2>
+        <p className="text-xs font-semibold uppercase tracking-[0.14em] text-indigo-600">Step 2 of 3 · Knowledge</p>
+        <h2 className="mt-2 text-2xl font-bold tracking-tight text-slate-900 sm:text-[1.75rem]">Teach your bots</h2>
         <p className="mx-auto mt-2 max-w-xl text-sm leading-relaxed text-slate-600">
-          Pick where your bots should learn from. You can switch methods at any time before training starts.
+          Scan your website, upload documents, or both. Everything lands in the three blocks below, where you can
+          review, move and edit it before launch.
         </p>
       </div>
 
-      <div role="radiogroup" aria-label="Training method" className="mt-8 grid gap-5 md:grid-cols-2">
-        <SourceCard
-          selected={sourceMode === 'documents'}
-          onSelect={() => setSourceMode('documents')}
-          disabled={busy}
-          recommended
-          icon={<DocumentIcon className="h-6 w-6" />}
-          title="Upload Structured Documents"
-          badge="Best for secure or private company data"
-          points={['PDFs or pasted text, nothing leaves your control', 'Organized into Overview, FAQs, and Policies', 'Ideal for internal manuals and pricing sheets']}
-        />
-        <SourceCard
-          selected={sourceMode === 'website'}
-          onSelect={() => setSourceMode('website')}
-          disabled={busy}
-          icon={<GlobeIcon className="h-6 w-6" />}
-          title="Auto-Scrape Website URL"
-          badge="Best for public sites, blogs, and marketing pages"
-          points={['Two-tier crawler discovers and structures pages', 'Auto-sorts content into Overview, FAQs, and Policies', 'One click from URL to trained bots']}
+      <div className="mt-8">
+        <WebsiteImportCard
+          websiteUrl={websiteUrl} setWebsiteUrl={setWebsiteUrl}
+          crawlConsent={crawlConsent} setCrawlConsent={setCrawlConsent}
+          scanning={scanning} scanError={scanError} crawlStats={crawlStats}
+          onScan={onScan}
         />
       </div>
 
-      {!sourceMode && (
-        <p className="mt-6 flex items-center justify-center gap-2 text-sm text-slate-500">
-          <ArrowUpIcon className="h-4 w-4 text-slate-400" /> Select a method above to continue.
-        </p>
-      )}
-
-      {/* Strict conditional rendering: exactly one path's UI is ever mounted. */}
-      {sourceMode === 'documents' && (
-        <div key="documents" className="kgt-fade-up mt-6 space-y-4">
-          <div className="flex flex-wrap items-end justify-between gap-2">
-            <div>
-              <h3 className="text-base font-bold text-slate-900">Your knowledge blocks</h3>
-              <p className="text-sm text-slate-500">
-                Upload a PDF or write entries for each block. Fill as many as you like; one is enough to start.
-              </p>
-            </div>
-            <CountPill count={trainableCount} />
+      <div className="mt-8 space-y-4">
+        <div className="flex flex-wrap items-end justify-between gap-2">
+          <div>
+            <h3 className="text-base font-bold text-slate-900">Your knowledge blocks</h3>
+            <p className="text-sm text-slate-500">
+              Upload PDFs, .txt or .md files, or write entries. Scanned website pages appear here too.
+            </p>
           </div>
-          {DOC_CATEGORIES.map((c, i) => (
-            <KnowledgeBlock
-              key={c.id}
-              index={i + 1}
-              category={c}
-              pages={pages.filter((p) => p.category === c.id)}
-              updatePage={updatePage}
-              onPdfPages={(data, fileName) => onPdfPages(data, fileName, c.id)}
-              onAddText={(prefill) => onAddText(c.id, prefill)}
-            />
-          ))}
+          <CountPill count={trainableCount} />
         </div>
-      )}
-
-      {sourceMode === 'website' && (
-        <div key="website" className="kgt-fade-up mt-6">
-          <WebScrapeCard
-            crawlConsent={crawlConsent} setCrawlConsent={setCrawlConsent}
-            websiteUrl={websiteUrl} setWebsiteUrl={setWebsiteUrl}
-            scrapeStage={scrapeStage} scrapeError={scrapeError} crawlStats={crawlStats}
-            onSubmit={onScrapeAndTrain}
-            onSwitchToDocuments={() => setSourceMode('documents')}
+        {DOC_CATEGORIES.map((c, i) => (
+          <KnowledgeBlock
+            key={c.id}
+            index={i + 1}
+            category={c}
+            pages={pages.filter((p) => p.category === c.id)}
+            updatePage={updatePage}
+            onPdfPages={(data, fileName) => onPdfPages(data, fileName, c.id)}
+            onAddText={(prefill) => onAddText(c.id, prefill)}
           />
-        </div>
-      )}
+        ))}
+      </div>
 
       <div className="mt-8 flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <button type="button" onClick={onBack} disabled={busy} className={secondaryBtnClass}>
+        <button type="button" onClick={onBack} disabled={scanning} className={secondaryBtnClass}>
           <ArrowLeftIcon className="h-4 w-4" /> Back
         </button>
-        {/* The website path trains from its own card; only documents need a step 3. */}
-        {sourceMode === 'documents' && (
-          <div className="flex flex-col items-stretch gap-1 sm:items-end">
-            <button type="button" onClick={onNext} disabled={trainableCount === 0} className={primaryBtnClass}>
-              Continue to training <ArrowRightIcon className="h-4 w-4" />
-            </button>
-            {trainableCount === 0 && (
-              <span className="text-center text-xs text-slate-500 sm:text-right">Add at least one entry with a title and content.</span>
-            )}
-            {trainableCount > MAX_TRAINING_PAGES && (
-              <span className="text-center text-xs font-medium text-amber-700 sm:text-right">
-                Over the {MAX_TRAINING_PAGES}-entry limit — remove {trainableCount - MAX_TRAINING_PAGES} before training.
-              </span>
-            )}
-          </div>
-        )}
+        <div className="flex flex-col items-stretch gap-1 sm:items-end">
+          <button type="button" onClick={onNext} disabled={scanning || trainableCount === 0} className={primaryBtnClass}>
+            Review & launch <ArrowRightIcon className="h-4 w-4" />
+          </button>
+          {trainableCount === 0 && !scanning && (
+            <span className="text-center text-xs text-slate-500 sm:text-right">Scan your website or add at least one document.</span>
+          )}
+          {trainableCount > MAX_TRAINING_PAGES && (
+            <span className="text-center text-xs font-medium text-amber-700 sm:text-right">
+              Over the {MAX_TRAINING_PAGES}-entry limit — remove {trainableCount - MAX_TRAINING_PAGES} before launch.
+            </span>
+          )}
+        </div>
       </div>
     </div>
+  );
+}
+
+// Optional website scan. Crawled pages are added to the knowledge blocks for
+// review; nothing is trained until launch. Scanning requires the visitor's
+// authorization (enforced by the API too), and it's recorded at launch.
+function WebsiteImportCard({ websiteUrl, setWebsiteUrl, crawlConsent, setCrawlConsent, scanning, scanError, crawlStats, onScan }) {
+  const [statusIndex, setStatusIndex] = useState(0);
+  useEffect(() => {
+    if (!scanning) return undefined;
+    setStatusIndex(0);
+    const id = setInterval(() => setStatusIndex((i) => Math.min(i + 1, CRAWL_STATUS_MESSAGES.length - 1)), 2200);
+    return () => clearInterval(id);
+  }, [scanning]);
+
+  const canScan = crawlConsent && websiteUrl.trim() && !scanning;
+
+  return (
+    <Card>
+      <CardHeader
+        icon={<GlobeIcon className="h-5 w-5" />}
+        title="Scan your website (optional)"
+        subtitle="Up to 12 public pages — About, FAQ, Support, Pricing and pages linked from them."
+      />
+      <form onSubmit={(e) => { e.preventDefault(); if (canScan) onScan(); }} className="space-y-4 p-6 sm:p-8">
+        <div className="flex flex-col gap-3 sm:flex-row">
+          <div className="relative flex-1">
+            <span className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400"><GlobeIcon className="h-4 w-4" /></span>
+            <input type="url" inputMode="url" aria-label="Website URL" className={inputClass + ' py-3 pl-10 disabled:bg-slate-100'}
+              value={websiteUrl} onChange={(e) => setWebsiteUrl(e.target.value)} placeholder="https://mycompany.com" disabled={scanning} />
+          </div>
+          <button type="submit" disabled={!canScan} className={primaryBtnClass + ' shrink-0'}>
+            {scanning ? <Spinner /> : <SparkIcon className="h-4 w-4" />}
+            {scanning ? 'Scanning…' : crawlStats ? 'Scan again' : 'Scan website'}
+          </button>
+        </div>
+
+        <div className="flex gap-3 rounded-xl border border-indigo-100 bg-gradient-to-br from-indigo-50 to-violet-50 p-4">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-white text-indigo-600 shadow-sm"><ShieldIcon className="h-5 w-5" /></span>
+          <div>
+            <p className="text-xs font-bold uppercase tracking-wide text-indigo-900">Crawler permission &amp; security</p>
+            <p className="mt-1 text-sm leading-relaxed text-indigo-900/80">{CRAWLER_PERMISSION_TEXT}</p>
+          </div>
+        </div>
+
+        <label className={'flex cursor-pointer items-start gap-3 rounded-xl border-2 p-4 transition ' +
+          (crawlConsent ? 'border-emerald-300 bg-emerald-50/60' : 'border-slate-200 bg-white hover:border-slate-300')}>
+          <input type="checkbox" checked={crawlConsent} onChange={(e) => setCrawlConsent(e.target.checked)} disabled={scanning}
+            className="mt-0.5 h-5 w-5 shrink-0 cursor-pointer accent-indigo-600" />
+          <span className="text-sm leading-relaxed text-slate-700">{CRAWL_CONSENT_TEXT} <span className="font-semibold text-red-600">*</span></span>
+        </label>
+
+        {scanning && (
+          <div className="kgt-fade-up rounded-xl border border-indigo-100 bg-indigo-50/60 p-4" aria-live="polite">
+            <div className="flex items-center gap-3">
+              <Spinner className="h-5 w-5 text-indigo-600" />
+              <p className="text-sm font-semibold text-indigo-900">{CRAWL_STATUS_MESSAGES[statusIndex]}</p>
+            </div>
+            <p className="mt-2 text-xs text-indigo-700/80">Usually under a minute. Please keep this tab open.</p>
+          </div>
+        )}
+        {!scanning && scanError && (
+          <div className="kgt-fade-up rounded-xl border border-red-200 bg-red-50 p-4" role="alert">
+            <p className="text-sm font-semibold text-red-800">We couldn't scan that site</p>
+            <p className="mt-1 text-sm text-red-700">{scanError}</p>
+            <p className="mt-2 text-sm text-red-800">JavaScript-heavy or protected sites often can't be scanned — upload documents below instead.</p>
+          </div>
+        )}
+        {!scanning && !scanError && crawlStats && (
+          <p className="kgt-fade-up text-sm text-emerald-700" aria-live="polite">
+            Added {crawlStats.crawled} page{crawlStats.crawled === 1 ? '' : 's'} from {crawlStats.baseHost} to your knowledge blocks
+            {crawlStats.skipped ? ` (skipped ${crawlStats.skipped} with too little text)` : ''}. Review them below.
+          </p>
+        )}
+        {!scanning && !canScan && !crawlStats && (
+          <p className="text-xs text-slate-500">
+            {!websiteUrl.trim() ? 'Enter your website address' : 'Tick the authorization box'} to scan — or skip this and upload documents below.
+          </p>
+        )}
+      </form>
+    </Card>
   );
 }
 
@@ -537,184 +565,6 @@ function TrainingTip() {
         choice—giving your bots 100% accuracy on day one.
       </p>
     </aside>
-  );
-}
-
-function SourceCard({ selected, onSelect, disabled, recommended, icon, title, badge, points }) {
-  return (
-    <button
-      type="button"
-      role="radio"
-      aria-checked={selected}
-      onClick={onSelect}
-      disabled={disabled}
-      className={
-        'group relative flex h-full flex-col rounded-2xl border-2 bg-white p-6 text-left transition duration-200 disabled:opacity-60 ' +
-        (selected
-          ? 'border-indigo-600 shadow-lg shadow-indigo-600/10 ring-4 ring-indigo-100'
-          : 'border-slate-200 shadow-sm enabled:hover:-translate-y-0.5 enabled:hover:border-slate-300 enabled:hover:shadow-md')
-      }
-    >
-      {recommended && (
-        <span className="absolute -top-3 left-6 rounded-full bg-gradient-to-r from-emerald-500 to-teal-500 px-3 py-1 text-[11px] font-bold uppercase tracking-wide text-white shadow-sm">
-          Recommended
-        </span>
-      )}
-      <span
-        className={
-          'absolute right-5 top-5 flex h-6 w-6 items-center justify-center rounded-full border-2 transition ' +
-          (selected ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-slate-300 bg-white text-transparent')
-        }
-      >
-        <CheckIcon className="h-3.5 w-3.5" />
-      </span>
-      <span
-        className={
-          'flex h-12 w-12 items-center justify-center rounded-xl transition ' +
-          (selected ? 'bg-gradient-to-br from-indigo-600 to-violet-600 text-white' : 'bg-slate-100 text-slate-600 group-hover:bg-indigo-50 group-hover:text-indigo-600')
-        }
-      >
-        {icon}
-      </span>
-      <span className="mt-4 block pr-8 text-lg font-bold text-slate-900">{title}</span>
-      <span className={'mt-1.5 inline-block w-fit rounded-full px-2.5 py-0.5 text-xs font-semibold ' + (selected ? 'bg-indigo-50 text-indigo-700' : 'bg-slate-100 text-slate-600')}>
-        {badge}
-      </span>
-      <span className="mt-4 block space-y-2">
-        {points.map((p) => (
-          <span key={p} className="flex items-start gap-2 text-sm text-slate-600">
-            <CheckIcon className="mt-0.5 h-4 w-4 shrink-0 text-emerald-500" />
-            <span>{p}</span>
-          </span>
-        ))}
-      </span>
-    </button>
-  );
-}
-
-function WebScrapeCard({
-  crawlConsent, setCrawlConsent, websiteUrl, setWebsiteUrl, scrapeStage, scrapeError, crawlStats,
-  onSubmit, onSwitchToDocuments
-}) {
-  const [statusIndex, setStatusIndex] = useState(0);
-  useEffect(() => {
-    if (scrapeStage !== 'crawling') return undefined;
-    setStatusIndex(0);
-    const id = setInterval(() => setStatusIndex((i) => Math.min(i + 1, CRAWL_STATUS_MESSAGES.length - 1)), 2200);
-    return () => clearInterval(id);
-  }, [scrapeStage]);
-
-  const busy = !!scrapeStage;
-  const canSubmit = crawlConsent && websiteUrl.trim() && !busy;
-  const statusText =
-    scrapeStage === 'training'
-      ? `Training your Support & Sales bots${crawlStats?.baseHost ? ` on content from ${crawlStats.baseHost}` : ''}…`
-      : CRAWL_STATUS_MESSAGES[statusIndex];
-  // Crawl fills the bar to ~70%, training carries it to ~95%; it only completes on success.
-  const progress = scrapeStage === 'training' ? 95 : ((statusIndex + 1) / CRAWL_STATUS_MESSAGES.length) * 70;
-
-  return (
-    <Card>
-      <CardHeader
-        icon={<GlobeIcon className="h-5 w-5" />}
-        title="Enterprise AI Crawler"
-        subtitle="We'll crawl your site, structure what we find, and train both bots in one go."
-      />
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (canSubmit) onSubmit();
-        }}
-        className="space-y-5 p-6 sm:p-8"
-      >
-        <Field label="Website URL">
-          <div className="relative">
-            <span className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400">
-              <GlobeIcon className="h-4 w-4" />
-            </span>
-            <input
-              type="url"
-              inputMode="url"
-              className={inputClass + ' py-3 pl-10 disabled:bg-slate-100 disabled:text-slate-400'}
-              value={websiteUrl}
-              onChange={(e) => setWebsiteUrl(e.target.value)}
-              placeholder="https://mycompany.com"
-              disabled={busy}
-              required
-            />
-          </div>
-        </Field>
-
-        <div className="flex gap-3 rounded-xl border border-indigo-100 bg-gradient-to-br from-indigo-50 to-violet-50 p-4">
-          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-white text-indigo-600 shadow-sm">
-            <ShieldIcon className="h-5 w-5" />
-          </span>
-          <div>
-            <p className="text-xs font-bold uppercase tracking-wide text-indigo-900">Crawler permission &amp; security</p>
-            <p className="mt-1 text-sm leading-relaxed text-indigo-900/80">{CRAWLER_PERMISSION_TEXT}</p>
-          </div>
-        </div>
-
-        <label
-          className={
-            'flex cursor-pointer items-start gap-3 rounded-xl border-2 p-4 transition ' +
-            (crawlConsent ? 'border-emerald-300 bg-emerald-50/60' : 'border-slate-200 bg-white hover:border-slate-300')
-          }
-        >
-          <input
-            type="checkbox"
-            checked={crawlConsent}
-            onChange={(e) => setCrawlConsent(e.target.checked)}
-            disabled={busy}
-            required
-            className="mt-0.5 h-5 w-5 shrink-0 cursor-pointer accent-indigo-600"
-          />
-          <span className="text-sm leading-relaxed text-slate-700">
-            {CRAWL_CONSENT_TEXT} <span className="font-semibold text-red-600">*</span>
-          </span>
-        </label>
-
-        {busy && (
-          <div className="kgt-fade-up rounded-xl border border-indigo-100 bg-indigo-50/60 p-4" aria-live="polite">
-            <div className="flex items-center gap-3">
-              <Spinner className="h-5 w-5 text-indigo-600" />
-              <p className="text-sm font-semibold text-indigo-900">{statusText}</p>
-            </div>
-            <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-indigo-100">
-              <div className="h-full rounded-full bg-indigo-600 transition-all duration-700" style={{ width: `${progress}%` }} />
-            </div>
-            <p className="mt-2 text-xs text-indigo-700/80">Usually under a minute. Please keep this tab open.</p>
-          </div>
-        )}
-
-        {!busy && scrapeError && (
-          <div className="kgt-fade-up rounded-xl border border-red-200 bg-red-50 p-4" role="alert">
-            <p className="text-sm font-semibold text-red-800">Something went wrong</p>
-            <p className="mt-1 text-sm text-red-700">{scrapeError}</p>
-            <p className="mt-3 text-sm text-red-800">
-              JavaScript-heavy or protected sites often can't be crawled.{' '}
-              <button type="button" onClick={onSwitchToDocuments} className="font-semibold text-red-900 underline underline-offset-2">
-                Upload documents instead
-              </button>
-            </p>
-          </div>
-        )}
-
-        <button type="submit" disabled={!canSubmit} className={primaryBtnClass + ' !w-full py-3.5 text-base'}>
-          {busy ? <Spinner /> : <SparkIcon className="h-5 w-5" />}
-          {scrapeStage === 'crawling' ? 'Scraping website…' : scrapeStage === 'training' ? 'Training AI…' : 'Start Web Scraping & Train AI'}
-        </button>
-        {!busy && !canSubmit && (
-          <p className="-mt-2 text-center text-xs text-slate-500">
-            {!websiteUrl.trim() && !crawlConsent
-              ? 'Enter your website URL and tick the authorization box to continue.'
-              : !websiteUrl.trim()
-                ? 'Enter your website URL to continue.'
-                : 'Tick the authorization box to continue.'}
-          </p>
-        )}
-      </form>
-    </Card>
   );
 }
 
@@ -958,27 +808,28 @@ function PageRow({ page, onChange }) {
 }
 
 // ---------------------------------------------------------------------
-// Step 3 — Train, then credentials + sandbox
+// Step 3 — Review & launch
 
-// Documents path only — the website path trains straight from its Step 2 card.
-function Step3Train({ companyName, email, industryLabel, trainablePages, training, trainError, onBack, onTrain }) {
+function Step3Review({ account, trainablePages, crawledHost, launching, launchError, onBack, onLaunch }) {
   const byCategory = DOC_CATEGORIES.map((c) => ({ ...c, count: trainablePages.filter((p) => p.category === c.id).length }));
+  const fromWebsite = trainablePages.filter((p) => p.url).length;
+  const fromFiles = trainablePages.length - fromWebsite;
 
   return (
     <div className="mx-auto max-w-2xl">
       <Card>
         <CardHeader
           icon={<SparkIcon className="h-5 w-5" />}
-          title="Ready to train your bots"
-          subtitle="Confirm the details below, then start training. Your tenant and API key are created in this step."
+          title="Ready to launch"
+          subtitle="This creates your private workspace, your first API key and your dashboard login, then signs you in."
         />
         <dl className="grid gap-x-6 gap-y-4 p-6 sm:grid-cols-2 sm:p-8">
-          <SummaryItem label="Company" value={companyName} />
-          <SummaryItem label="Business email" value={email} />
-          <SummaryItem label="Industry" value={industryLabel} />
+          <SummaryItem label="Company" value={account.companyName} />
+          <SummaryItem label="Industry" value={account.industryLabel} />
+          <SummaryItem label="Sign-in email" value={account.email} />
           <SummaryItem
-            label="Knowledge source"
-            value="Structured documents"
+            label="Knowledge"
+            value={[fromWebsite && `${fromWebsite} from ${crawledHost || 'your website'}`, fromFiles && `${fromFiles} from documents`].filter(Boolean).join(' · ')}
           />
         </dl>
         <div className="grid grid-cols-3 gap-3 border-t border-slate-100 px-6 py-5 sm:px-8">
@@ -990,24 +841,26 @@ function Step3Train({ companyName, email, industryLabel, trainablePages, trainin
           ))}
         </div>
 
-        {trainError && (
-          <div className="mx-6 mb-2 rounded-lg border border-red-200 bg-red-50 px-4 py-2.5 text-sm text-red-700 sm:mx-8">{trainError}</div>
+        {launchError && (
+          <div className="mx-6 mb-2 rounded-lg border border-red-200 bg-red-50 px-4 py-2.5 text-sm text-red-700 sm:mx-8" role="alert">
+            {launchError}{' '}
+            {/already exists/i.test(launchError) && <a href="/login" className="font-semibold underline">Sign in</a>}
+          </div>
         )}
-
-        {training && (
-          <div className="kgt-fade-up mx-6 mb-2 flex items-center gap-3 rounded-xl border border-indigo-100 bg-indigo-50/60 px-4 py-3 sm:mx-8">
+        {launching && (
+          <div className="kgt-fade-up mx-6 mb-2 flex items-center gap-3 rounded-xl border border-indigo-100 bg-indigo-50/60 px-4 py-3 sm:mx-8" aria-live="polite">
             <Spinner className="h-5 w-5 text-indigo-600" />
-            <span className="text-sm font-semibold text-indigo-900">Indexing {trainablePages.length} entries and provisioning your tenant…</span>
+            <span className="text-sm font-semibold text-indigo-900">Training your bots on {trainablePages.length} entries…</span>
           </div>
         )}
 
         <div className="flex flex-col-reverse gap-3 border-t border-slate-100 bg-slate-50/70 px-6 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-8">
-          <button type="button" onClick={onBack} disabled={training} className={secondaryBtnClass}>
+          <button type="button" onClick={onBack} disabled={launching} className={secondaryBtnClass}>
             <ArrowLeftIcon className="h-4 w-4" /> Back to knowledge
           </button>
-          <button type="button" onClick={onTrain} disabled={training || !trainablePages.length} className={primaryBtnClass}>
-            {training ? <Spinner /> : <SparkIcon className="h-4 w-4" />}
-            {training ? 'Training your bots…' : 'Start AI Training'}
+          <button type="button" onClick={onLaunch} disabled={launching || !trainablePages.length} className={primaryBtnClass}>
+            {launching ? <Spinner /> : <SparkIcon className="h-4 w-4" />}
+            {launching ? 'Creating your bots…' : 'Create my bots'}
           </button>
         </div>
       </Card>
@@ -1023,283 +876,6 @@ function SummaryItem({ label, value }) {
     </div>
   );
 }
-
-function Step3Success({ companyName, result }) {
-  const embedCode =
-    `<script src="${BASE_URL}/widgets/tenant-chat-widget.js" ` +
-    `data-tenant-id="${result.slug}" data-api-key="${result.apiKey}" defer></script>`;
-
-  return (
-    <div>
-      <div className="relative mx-auto max-w-xl overflow-hidden text-center">
-        <Confetti />
-        <div className="relative mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-gradient-to-br from-emerald-400 to-emerald-600 text-white shadow-lg shadow-emerald-500/30 ring-8 ring-emerald-100">
-          <CheckIcon className="h-8 w-8" />
-        </div>
-        <h2 className="relative mt-5 text-3xl font-extrabold tracking-tight text-slate-900">{companyName} is live 🎉</h2>
-        <p className="relative mt-2 text-sm text-slate-600">
-          Trained on {result.documentsCreated} document{result.documentsCreated === 1 ? '' : 's'}. Both bots are answering right now.
-        </p>
-      </div>
-
-      <div className="mt-10 grid gap-5 lg:grid-cols-[1fr,1.1fr]">
-        <div className="space-y-5">
-          <Card>
-            <CardHeader icon={<KeyIcon className="h-5 w-5" />} title="Secure credentials" subtitle="" />
-            <div className="space-y-4 p-6">
-              <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                <ShieldIcon className="mt-0.5 h-4 w-4 shrink-0" />
-                <span>Store your API key somewhere safe — it's shown only once.</span>
-              </div>
-              <CopyField label="Tenant ID" value={result.tenantId} />
-              <CopyField label="API Key" value={result.apiKey} secret />
-            </div>
-          </Card>
-
-          <Card>
-            <CardHeader icon={<CodeIcon className="h-5 w-5" />} title="Embed on your website" subtitle="Paste before the closing </body> tag." />
-            <div className="p-6">
-              <CodeBlock value={embedCode} />
-            </div>
-          </Card>
-        </div>
-
-        <TestBotSandbox slug={result.slug} apiKey={result.apiKey} companyName={companyName} />
-      </div>
-    </div>
-  );
-}
-
-function useCopy() {
-  const [copied, setCopied] = useState(false);
-  const copy = async (value) => {
-    try {
-      await navigator.clipboard.writeText(value);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1800);
-    } catch {
-      // clipboard access denied — the value stays selectable by hand
-    }
-  };
-  return [copied, copy];
-}
-
-function CopyButton({ copied, onClick, dark }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={
-        'inline-flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold transition ' +
-        (copied
-          ? 'bg-emerald-500 text-white'
-          : dark ? 'bg-white/10 text-slate-200 hover:bg-white/20' : 'bg-slate-100 text-slate-700 hover:bg-slate-200')
-      }
-    >
-      {copied ? <CheckIcon className="h-3.5 w-3.5" /> : <CopyIcon className="h-3.5 w-3.5" />}
-      {copied ? 'Copied' : 'Copy'}
-    </button>
-  );
-}
-
-function CopyField({ label, value, secret }) {
-  const [copied, copy] = useCopy();
-  const [revealed, setRevealed] = useState(!secret);
-  const shown = revealed ? value : `${value.slice(0, 6)}${'•'.repeat(18)}${value.slice(-4)}`;
-
-  return (
-    <div>
-      <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</div>
-      <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 py-1.5 pl-3 pr-1.5">
-        <code className="min-w-0 flex-1 truncate font-mono text-xs text-slate-800">{shown}</code>
-        {secret && (
-          <button
-            type="button"
-            onClick={() => setRevealed((v) => !v)}
-            className="shrink-0 rounded-lg px-2 py-1.5 text-xs font-semibold text-slate-500 hover:text-slate-900"
-          >
-            {revealed ? 'Hide' : 'Reveal'}
-          </button>
-        )}
-        <CopyButton copied={copied} onClick={() => copy(value)} />
-      </div>
-    </div>
-  );
-}
-
-function CodeBlock({ value }) {
-  const [copied, copy] = useCopy();
-  return (
-    <div className="overflow-hidden rounded-xl bg-slate-900">
-      <div className="flex items-center justify-between border-b border-white/10 px-4 py-2">
-        <span className="font-mono text-xs text-slate-400">index.html</span>
-        <CopyButton copied={copied} onClick={() => copy(value)} dark />
-      </div>
-      <pre className="overflow-x-auto whitespace-pre-wrap break-all p-4 font-mono text-xs leading-relaxed text-emerald-300">{value}</pre>
-    </div>
-  );
-}
-
-const BOT_TABS = [
-  { id: 'support', label: 'Support Bot', icon: ShieldIcon, starter: 'What is your refund policy?' },
-  { id: 'sales', label: 'Sales Bot', icon: BoltIcon, starter: 'Which plan is right for a team of 20?' }
-];
-
-function TestBotSandbox({ slug, apiKey, companyName }) {
-  const [botType, setBotType] = useState('support');
-  const [sessionIds, setSessionIds] = useState({});
-  const [messages, setMessages] = useState({ support: [], sales: [] });
-  const [input, setInput] = useState('');
-  const [sending, setSending] = useState(false);
-  const scrollRef = useRef(null);
-
-  useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
-  }, [messages, botType, sending]);
-
-  const send = async (text) => {
-    const query = text.trim();
-    if (!query || sending) return;
-    // Capture the tab at send time — the visitor may switch tabs mid-request.
-    const bot = botType;
-    setInput('');
-    setSending(true);
-    setMessages((m) => ({ ...m, [bot]: [...m[bot], { role: 'user', text: query }] }));
-    try {
-      const res = await fetch(`${BASE_URL}/api/v1/tenant-chat/${slug}/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-tenant-api-key': apiKey },
-        body: JSON.stringify({ query, botType: bot, sessionId: sessionIds[bot] })
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || 'The bot could not respond');
-      setSessionIds((s) => ({ ...s, [bot]: data.sessionId }));
-      setMessages((m) => ({ ...m, [bot]: [...m[bot], { role: 'assistant', text: data.answer }] }));
-    } catch (err) {
-      setMessages((m) => ({ ...m, [bot]: [...m[bot], { role: 'assistant', text: err.message, error: true }] }));
-    } finally {
-      setSending(false);
-    }
-  };
-
-  const active = BOT_TABS.find((t) => t.id === botType);
-  const activeMessages = messages[botType];
-
-  return (
-    <Card className="flex flex-col">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-4">
-        <div className="flex items-center gap-2">
-          <span className="relative flex h-2.5 w-2.5">
-            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
-            <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-emerald-500" />
-          </span>
-          <h3 className="text-sm font-bold text-slate-900">Live testing sandbox</h3>
-        </div>
-        <div role="tablist" aria-label="Bot" className="flex rounded-xl bg-slate-100 p-1">
-          {BOT_TABS.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              role="tab"
-              aria-selected={botType === t.id}
-              onClick={() => setBotType(t.id)}
-              className={
-                'inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition ' +
-                (botType === t.id ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800')
-              }
-            >
-              <t.icon className="h-3.5 w-3.5" /> {t.label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div ref={scrollRef} className="flex h-80 flex-col gap-2.5 overflow-y-auto bg-slate-50/60 px-5 py-4">
-        {activeMessages.length === 0 && (
-          <div className="m-auto max-w-xs text-center">
-            <span className="mx-auto flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600">
-              <active.icon className="h-5 w-5" />
-            </span>
-            <p className="mt-3 text-sm font-semibold text-slate-800">Chat with {companyName}'s {active.label}</p>
-            <p className="mt-1 text-xs text-slate-500">Ask something covered by the knowledge you just trained on.</p>
-            <button
-              type="button"
-              onClick={() => send(active.starter)}
-              className="mt-3 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition hover:border-indigo-300 hover:text-indigo-700"
-            >
-              “{active.starter}”
-            </button>
-          </div>
-        )}
-        {activeMessages.map((m, i) => (
-          <div
-            key={i}
-            className={
-              'kgt-fade-up max-w-[85%] whitespace-pre-wrap rounded-2xl px-3.5 py-2 text-sm ' +
-              (m.role === 'user'
-                ? 'ml-auto rounded-br-md bg-indigo-600 text-white'
-                : m.error
-                  ? 'rounded-bl-md border border-red-200 bg-red-50 text-red-700'
-                  : 'rounded-bl-md border border-slate-200 bg-white text-slate-800 shadow-sm')
-            }
-          >
-            {m.text}
-          </div>
-        ))}
-        {sending && (
-          <div className="flex w-fit gap-1 rounded-2xl rounded-bl-md border border-slate-200 bg-white px-3.5 py-3 shadow-sm">
-            {[0, 150, 300].map((d) => (
-              <span key={d} className="h-1.5 w-1.5 animate-bounce rounded-full bg-slate-400" style={{ animationDelay: `${d}ms` }} />
-            ))}
-          </div>
-        )}
-      </div>
-
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          send(input);
-        }}
-        className="flex gap-2 border-t border-slate-100 p-3"
-      >
-        <input
-          className={inputClass}
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder={`Ask the ${active.label}…`}
-          disabled={sending}
-        />
-        <button type="submit" disabled={sending || !input.trim()} className={primaryBtnClass + ' shrink-0 !px-4'} aria-label="Send">
-          <SendIcon className="h-4 w-4" />
-        </button>
-      </form>
-    </Card>
-  );
-}
-
-// Pure-CSS celebration burst — no dependency, skipped under reduced motion.
-function Confetti() {
-  const colors = ['bg-indigo-500', 'bg-violet-500', 'bg-emerald-400', 'bg-amber-400', 'bg-sky-400'];
-  return (
-    <div aria-hidden className="pointer-events-none absolute inset-0 motion-reduce:hidden">
-      {Array.from({ length: 18 }).map((_, i) => (
-        <span
-          key={i}
-          className={`absolute h-2 w-1 rounded-sm ${colors[i % colors.length]}`}
-          style={{
-            left: `${(i * 53) % 100}%`,
-            top: '-10px',
-            animation: `kgtConfetti ${1.6 + (i % 5) * 0.25}s ease-in ${(i % 6) * 0.08}s both`,
-            transform: `rotate(${i * 37}deg)`
-          }}
-        />
-      ))}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------
-// Shared primitives
 
 function Card({ children, className = '' }) {
   return <div className={'overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm ' + className}>{children}</div>;
