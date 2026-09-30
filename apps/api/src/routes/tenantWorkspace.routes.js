@@ -351,8 +351,9 @@ router.get('/usage', async (req, res) => {
 
 // GET /usage/daily?days=30 — one row per UTC day (7–90 days, oldest first),
 // zero-filled so charts have no gaps: questions asked, conversations started,
-// AI answers generated (real LLM calls), cache hits, tokens used, and
-// tickets filed — plus the answers, tokens and cost for each bot.
+// AI answers generated (real LLM calls), cache hits, tokens used, total
+// cost (every bot plus platform work such as starter FAQs) and tickets
+// filed — plus the answers, tokens and cost for each bot.
 router.get('/usage/daily', async (req, res) => {
   const days = Math.min(90, Math.max(7, Number.parseInt(req.query.days, 10) || 30));
   const tenantId = req.tenant.id;
@@ -370,6 +371,7 @@ router.get('/usage/daily', async (req, res) => {
                  COUNT(*) FILTER (WHERE NOT "cacheHit")::int AS n,
                  COUNT(*) FILTER (WHERE "cacheHit")::int AS hits,
                  SUM("promptTokens" + "completionTokens")::int AS tokens,
+                 COALESCE(SUM("estimatedCostUsd"), 0)::float AS cost,
                  COUNT(*) FILTER (WHERE NOT "cacheHit" AND "botType" = 'support')::int AS support_n,
                  COUNT(*) FILTER (WHERE NOT "cacheHit" AND "botType" = 'sales')::int AS sales_n,
                  COALESCE(SUM("promptTokens" + "completionTokens") FILTER (WHERE "botType" = 'support'), 0)::int AS support_tokens,
@@ -382,7 +384,7 @@ router.get('/usage/daily', async (req, res) => {
     SELECT to_char(d.day, 'YYYY-MM-DD') AS date,
            COALESCE(q.n, 0) AS questions, COALESCE(c.n, 0) AS conversations,
            COALESCE(u.n, 0) AS "aiAnswers", COALESCE(u.hits, 0) AS "cacheHits",
-           COALESCE(u.tokens, 0) AS tokens, COALESCE(t.n, 0) AS tickets,
+           COALESCE(u.tokens, 0) AS tokens, COALESCE(u.cost, 0) AS "costUsd", COALESCE(t.n, 0) AS tickets,
            COALESCE(u.support_n, 0) AS "supportAnswers", COALESCE(u.sales_n, 0) AS "salesAnswers",
            COALESCE(u.support_tokens, 0) AS "supportTokens", COALESCE(u.sales_tokens, 0) AS "salesTokens",
            COALESCE(u.support_cost, 0) AS "supportCostUsd", COALESCE(u.sales_cost, 0) AS "salesCostUsd"

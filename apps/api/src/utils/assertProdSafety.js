@@ -23,6 +23,11 @@ function assertProdSafety(env = process.env) {
   if (!env.JWT_SECRET || env.JWT_SECRET === 'dev-secret-change-me') {
     throw new Error('JWT_SECRET must be set to a real secret when DEPLOY_ENV=production');
   }
+  // Without it the dashboard APIs only accept localhost origins, so the
+  // deployed web app couldn't reach them (utils/corsPolicy.js).
+  if (!String(env.CORS_ORIGINS || '').trim()) {
+    throw new Error('CORS_ORIGINS must list the web app origin(s) when DEPLOY_ENV=production');
+  }
 }
 
 module.exports = { assertProdSafety };

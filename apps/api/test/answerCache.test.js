@@ -143,6 +143,24 @@ describe('getEngineAnswer with the answer cache', () => {
     assert.equal(generateAnswerMock.mock.callCount(), 2);
     assert.equal(fresh.cached, undefined);
   });
+
+  test('an answer built from documents that changed mid-request is not cached', async () => {
+    // A document edit lands while this request is reading the knowledge base:
+    // its answer may reflect the old documents, so the next ask must not get it from cache.
+    let editPending = true;
+    const racing = {
+      ...profile('support'),
+      resolveKnowledge: async (ctx) => {
+        const chunks = await profile('support').resolveKnowledge(ctx);
+        if (editPending) { editPending = false; answerCache.invalidateTenant('a'); }
+        return chunks;
+      }
+    };
+    await getEngineAnswer({ profile: racing, query: 'pricing plans cost?', ctx: { tenantId: 'a' } });
+    const next = await getEngineAnswer({ profile: racing, query: 'pricing plans cost?', ctx: { tenantId: 'a' } });
+    assert.equal(generateAnswerMock.mock.callCount(), 2);
+    assert.equal(next.cached, undefined);
+  });
 });
 
 describe('usageStats.foldBreakdowns', () => {

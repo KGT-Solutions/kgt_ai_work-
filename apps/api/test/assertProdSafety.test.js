@@ -26,7 +26,20 @@ describe('assertProdSafety — fail loudly on insecure config, but only when DEP
 
   test('does not throw when DEPLOY_ENV=production with a safe configuration', () => {
     assert.doesNotThrow(() =>
-      assertProdSafety({ DEPLOY_ENV: 'production', JWT_SECRET: 'a-real-secret', DEV_BYPASS_AUTH: 'false' })
+      assertProdSafety({
+        DEPLOY_ENV: 'production', JWT_SECRET: 'a-real-secret', DEV_BYPASS_AUTH: 'false', CORS_ORIGINS: 'https://hub.example.com'
+      })
+    );
+  });
+
+  test('throws if CORS_ORIGINS is unset or blank when DEPLOY_ENV=production', () => {
+    assert.throws(
+      () => assertProdSafety({ DEPLOY_ENV: 'production', JWT_SECRET: 'a-real-secret' }),
+      /CORS_ORIGINS must list/
+    );
+    assert.throws(
+      () => assertProdSafety({ DEPLOY_ENV: 'production', JWT_SECRET: 'a-real-secret', CORS_ORIGINS: '  ' }),
+      /CORS_ORIGINS must list/
     );
   });
 

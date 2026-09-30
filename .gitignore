@@ -87,3 +87,5 @@ uploads/
 backup_*.sql
 *.dump
 *.sql
+# ...but Prisma migrations are schema, not data, and must be committed.
+!apps/api/prisma/migrations/*/migration.sql

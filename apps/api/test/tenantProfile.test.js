@@ -139,4 +139,26 @@ describe('tenantProfile — support and sales share ONE cached knowledge pool pe
     assert.equal(calls, 2);
     assert.notDeepEqual(first, second);
   });
+
+  test('a read that an edit overtakes is not cached, so the edit is visible on the next call', async () => {
+    invalidateTenantKnowledge(TENANT.id);
+    let content = 'OLD pricing content.';
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    prisma.tenantDocument.findMany = async () => {
+      const rows = [{ title: 'Pricing', content: `## Pricing\n\n${content}` }]; // DB snapshot taken now...
+      if (content.startsWith('OLD')) await gate; // ...but the reply arrives late
+      return rows;
+    };
+
+    const profile = createTenantSupportProfile(TENANT);
+    const inflight = profile.resolveKnowledge(); // a chat starts reading
+    content = 'NEW pricing content.'; // PATCH /documents writes...
+    invalidateTenantKnowledge(TENANT.id); // ...then invalidates, while the read is still in flight
+    release();
+    await inflight;
+
+    const after = await profile.resolveKnowledge();
+    assert.match(JSON.stringify(after), /NEW pricing content/);
+  });
 });

@@ -39,6 +39,11 @@ function invalidateTenantKnowledge(tenantId) {
 async function loadTenantKnowledge(tenantId) {
   if (chunkCacheByTenant.has(tenantId)) return chunkCacheByTenant.get(tenantId);
 
+  // A document can change while this read is in flight. invalidateTenantKnowledge
+  // bumps the answer cache's per-tenant generation, so a changed generation
+  // means these rows may predate the change: use them for this one request,
+  // but don't cache them, or the old content would outlive the invalidation.
+  const generation = answerCache.generation(tenantId);
   const documents = await prisma.tenantDocument.findMany({ where: { tenantId } });
   const chunks = documents.flatMap((doc) =>
     // Each TenantDocument.content is treated exactly like one .md file —
@@ -51,7 +56,7 @@ async function loadTenantKnowledge(tenantId) {
     parseIntoChunks(doc.title, doc.content).map((chunk) => ({ ...chunk, category: doc.category || DEFAULT_CATEGORY }))
   );
 
-  chunkCacheByTenant.set(tenantId, chunks);
+  if (answerCache.generation(tenantId) === generation) chunkCacheByTenant.set(tenantId, chunks);
   return chunks;
 }
 

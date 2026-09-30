@@ -184,24 +184,27 @@
     input.value = '';
     sending = true;
     panel.querySelector('#' + ns + '-send').disabled = true;
-    byBotMessages[botType].push({ role: 'user', text: query });
+    // The bot this message went to. The visitor may switch tabs before the
+    // reply arrives; the reply and its sessionId still belong to this bot.
+    var sentBot = botType;
+    byBotMessages[sentBot].push({ role: 'user', text: query });
     renderMessages();
 
     fetch(apiBase + '/api/v1/tenant-chat/' + encodeURIComponent(tenantSlug) + '/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-tenant-api-key': apiKey },
-      body: JSON.stringify({ query: query, botType: botType, sessionId: sessionIds[botType] })
+      body: JSON.stringify({ query: query, botType: sentBot, sessionId: sessionIds[sentBot] })
     })
       .then(function (res) {
         return res.json().then(function (data) { return { ok: res.ok, data: data }; });
       })
       .then(function (result) {
         if (!result.ok) throw new Error(result.data && result.data.error ? result.data.error : 'The bot could not respond.');
-        sessionIds[botType] = result.data.sessionId;
-        byBotMessages[botType].push({ role: 'assistant', text: result.data.answer });
+        sessionIds[sentBot] = result.data.sessionId;
+        byBotMessages[sentBot].push({ role: 'assistant', text: result.data.answer });
       })
       .catch(function (err) {
-        byBotMessages[botType].push({ role: 'assistant', text: err.message, error: true });
+        byBotMessages[sentBot].push({ role: 'assistant', text: err.message, error: true });
       })
       .finally(function () {
         sending = false;

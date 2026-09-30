@@ -37,7 +37,8 @@ export default function UsagePanel({ ws }) {
         <Stat label="AI answers" value={daily && sum('aiAnswers')} sub={daily && `${fmt(sum('supportAnswers'))} support · ${fmt(sum('salesAnswers'))} sales`} />
         <Stat label="Served from cache" value={daily && (periodAnswers ? pct(sum('cacheHits') / periodAnswers) : '—')}
           sub={daily && `${fmt(sum('cacheHits'))} instant answers, no model call`} />
-        <Stat label="Est. model cost" value={daily && usd(sum('supportCostUsd') + sum('salesCostUsd'))} sub={daily && `${fmt(sum('tickets'))} tickets filed`} />
+        {/* costUsd covers both bots and platform work (starter FAQs), like the table's Total row. */}
+        <Stat label="Est. model cost" value={daily && usd(sum('costUsd'))} sub={daily && `${fmt(sum('tickets'))} tickets filed`} />
       </div>
 
       <BotBreakdown usage={totals} />

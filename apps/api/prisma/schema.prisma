@@ -181,7 +181,9 @@ model ChatMessage {
   role       String      // user | assistant
   content    String
   confidence Float?      // the gate score behind this assistant reply, if applicable
-  botType    String?     // support | sales — which bot this turn went to; null on rows from before per-bot tracking
+  // support | sales — which bot this turn went to; null on rows from before
+  // per-bot tracking. CHECK constraint in migration 20261002090000_bot_type_check.
+  botType    String?
   createdAt  DateTime    @default(now())
 
   @@index([sessionId])
@@ -210,6 +212,7 @@ model UsageLog {
   tenantId         String
   // support | sales for chat answers; null for platform work done for the
   // tenant (starter-FAQ generation) and for rows from before per-bot tracking.
+  // CHECK constraint in migration 20261002090000_bot_type_check.
   botType          String?
   provider         String   // groq | openai | anthropic | cache
   model            String
