@@ -93,6 +93,10 @@
     '#' + ns + '-body .msg.bot{align-self:flex-start;background:#f1f5f9;color:#0f172a;}' +
     '#' + ns + '-body .msg.err{align-self:flex-start;background:#fef2f2;color:#b91c1c;}' +
     '#' + ns + '-body .empty{margin:auto;text-align:center;color:#94a3b8;font-size:12.5px;padding:0 10px;}' +
+    '#' + ns + '-body .chips{align-self:flex-start;display:flex;flex-wrap:wrap;gap:6px;max-width:92%;}' +
+    '#' + ns + '-body .chip{border:1px solid #cbd5e1;background:#fff;color:#0f172a;border-radius:999px;' +
+    'padding:5px 10px;font-size:12px;line-height:1.3;text-align:left;cursor:pointer;font-family:inherit;}' +
+    '#' + ns + '-body .chip:hover{border-color:#0f172a;background:#f8fafc;}' +
     '#' + ns + '-form{display:flex;gap:8px;padding:10px;border-top:1px solid #e2e8f0;flex-shrink:0;}' +
     '#' + ns + '-input{flex:1;border:1px solid #cbd5e1;border-radius:8px;padding:8px 10px;font-size:13px;outline:none;}' +
     '#' + ns + '-input:focus{border-color:#0f172a;}' +
@@ -155,6 +159,22 @@
       el.textContent = m.text;
       body.appendChild(el);
     }
+    // Suggested follow-ups under the latest reply only; clicking one asks it.
+    var last = msgs[msgs.length - 1];
+    if (!sending && last.role === 'assistant' && !last.error && last.followUps && last.followUps.length) {
+      var chips = document.createElement('div');
+      chips.className = 'chips';
+      chips.setAttribute('aria-label', 'Suggested questions');
+      for (var j = 0; j < last.followUps.length; j++) {
+        var chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'chip';
+        chip.textContent = last.followUps[j];
+        chip.addEventListener('click', function (e) { sendQuery(e.currentTarget.textContent); });
+        chips.appendChild(chip);
+      }
+      body.appendChild(chips);
+    }
     body.scrollTop = body.scrollHeight;
   }
 
@@ -179,9 +199,14 @@
   panel.querySelector('#' + ns + '-form').addEventListener('submit', function (e) {
     e.preventDefault();
     var input = panel.querySelector('#' + ns + '-input');
-    var query = input.value.trim();
-    if (!query || sending) return;
-    input.value = '';
+    if (sendQuery(input.value)) input.value = '';
+  });
+
+  // Sends one question to the current bot. Used by the form and the
+  // follow-up chips. Returns false if there was nothing to send.
+  function sendQuery(text) {
+    var query = String(text || '').trim();
+    if (!query || sending) return false;
     sending = true;
     panel.querySelector('#' + ns + '-send').disabled = true;
     // The bot this message went to. The visitor may switch tabs before the
@@ -201,7 +226,7 @@
       .then(function (result) {
         if (!result.ok) throw new Error(result.data && result.data.error ? result.data.error : 'The bot could not respond.');
         sessionIds[sentBot] = result.data.sessionId;
-        byBotMessages[sentBot].push({ role: 'assistant', text: result.data.answer });
+        byBotMessages[sentBot].push({ role: 'assistant', text: result.data.answer, followUps: result.data.followUps || [] });
       })
       .catch(function (err) {
         byBotMessages[sentBot].push({ role: 'assistant', text: err.message, error: true });
@@ -211,7 +236,8 @@
         panel.querySelector('#' + ns + '-send').disabled = false;
         renderMessages();
       });
-  });
+    return true;
+  }
 
   function mount() {
     document.body.appendChild(panel);

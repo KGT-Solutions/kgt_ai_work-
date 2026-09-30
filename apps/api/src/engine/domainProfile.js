@@ -18,7 +18,9 @@
 // @property {(chunks: array, ctx: object) => array} [filterChunks] - optional per-request scoping (e.g. role-based access to a subset of files) applied right after load, before retrieval
 // @property {(ctx: object) => Promise<array>} [resolveKnowledge] - alternative to knowledgeBasePath: DB-backed (or any other dynamic) chunk source
 // @property {number} [minConfidence] - 0-1 gate on top of minScore (Pillar 4); unset = old zero-chunks-only gate, unchanged behavior
-// @property {boolean} [ticketing] - file a SupportTicket (engine/ticketing.js) when the gate fails or the model can't answer; requires ctx.tenantId
+// @property {number} [handoffBelow] - 0-1: a model "no answer" hands off (formatFallback + ticket) only below this confidence; defaults to minConfidence, else 0.30
+// @property {boolean} [ticketing] - file a SupportTicket (engine/ticketing.js) on a handoff: the gate fails, the model can't answer below handoffBelow, or the LLM is down; requires ctx.tenantId
+// @property {(ctx: object, confidence: number) => object} [formatNoAnswer] - the model found no answer at or above handoffBelow: a no-handoff reply (e.g. ask to rephrase); without it, formatFallback is used
 // @property {boolean} [usageTracking] - log a UsageLog (engine/usageTracking.js) on every real LLM call and cache hit; requires ctx.tenantId
 // @property {'support'|'sales'} [botType] - which bot this profile is; recorded on UsageLog rows and part of the answer-cache key
 // @property {boolean} [answerCache] - re-use a recent answer to the same question (engine/answerCache.js); requires botType and ctx.tenantId

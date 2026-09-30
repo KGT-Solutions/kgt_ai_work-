@@ -25,6 +25,9 @@ const {
   ChatUpstreamError
 } = require('./llmClient');
 
+// Handoff threshold for profiles that set neither handoffBelow nor minConfidence.
+const DEFAULT_HANDOFF_BELOW = 0.3;
+
 /**
  * @param {{ profile: import('./domainProfile').DomainProfile, query: string, ctx?: object }} params
  * @returns {Promise<object>} whatever shape profile.format*() returns — the
@@ -73,10 +76,15 @@ async function getEngineAnswer({ profile, query, ctx = {} }) {
   // a strong one under it).
   const topRawScore = ranked.length ? Math.max(...ranked.map((r) => r.rawScore ?? r.score)) : 0;
   const confidence = ranked.length ? computeConfidence(query, topRawScore) : 0;
+  // At or above the threshold is a pass: 0.30 exactly goes to the model.
   const gateFailed = !ranked.length || (profile.minConfidence != null && confidence < profile.minConfidence);
+  // A handoff (fallback reply + ticket) happens only below this threshold.
+  const handoffBelow = profile.handoffBelow ?? profile.minConfidence ?? DEFAULT_HANDOFF_BELOW;
+  const lowConfidence = confidence < handoffBelow;
 
   if (gateFailed) {
     const result = profile.formatFallback(ctx, confidence);
+    result.handoff = true;
     await profile.onResult?.(result, query, ctx);
     if (profile.ticketing) await fileSupportTicket({ profile, query, confidence, ctx });
     return result;
@@ -119,11 +127,22 @@ async function getEngineAnswer({ profile, query, ctx = {} }) {
     const noAnswer = answerText === profile.noAnswerSentinel;
     const effectiveRanked =
       citedIndex != null ? [ranked[citedIndex], ...ranked.filter((_, i) => i !== citedIndex)] : ranked;
-    const result = noAnswer ? profile.formatFallback(ctx, confidence) : profile.formatSuccess(answerText, effectiveRanked, ctx);
+    // The model found no answer in the excerpts. Below the threshold that's a
+    // handoff, as at the gate. At or above it, retrieval did find relevant
+    // documents (usually a wording mismatch rather than a real knowledge gap),
+    // so the bot asks for a rephrase instead of promising a person and filing
+    // a ticket. That reply still carries the confidence, which tenantChat.js
+    // stores on the ChatMessage for review.
+    const handoff = noAnswer && lowConfidence;
+    let result;
+    if (!noAnswer) result = profile.formatSuccess(answerText, effectiveRanked, ctx);
+    else if (handoff || !profile.formatNoAnswer) result = profile.formatFallback(ctx, confidence);
+    else result = profile.formatNoAnswer(ctx, confidence);
+    if (handoff) result.handoff = true;
     if (cached?.value) result.cached = true; // served without an LLM call
     await profile.onResult?.(result, query, ctx);
 
-    if (noAnswer && profile.ticketing) {
+    if (handoff && profile.ticketing) {
       await fileSupportTicket({ profile, query, confidence, ctx });
     }
     return result;
@@ -145,6 +164,9 @@ async function getEngineAnswer({ profile, query, ctx = {} }) {
         (err.attempts?.length ? formatAttempts(err.attempts) : `${err.name}: ${err.message}`)
       );
       const result = profile.formatDegraded(ranked, ctx);
+      // An outage, not a confidence call: the question is filed whatever the
+      // confidence, since nothing else would capture it.
+      if (profile.ticketing) result.handoff = true;
       await profile.onResult?.(result, query, ctx);
       if (profile.ticketing) await fileSupportTicket({ profile, query, confidence, ctx });
       return result;

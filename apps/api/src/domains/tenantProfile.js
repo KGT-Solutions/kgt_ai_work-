@@ -121,6 +121,16 @@ const SALES_DEGRADED_MESSAGE =
   "Sorry, I can't pull that up right now. I've passed your question to our team so they can follow up — " +
   'feel free to ask again in a few minutes.';
 
+// The model found no answer although retrieval matched at or above the
+// handoff threshold (chatEngine.js): no ticket is filed, so these must not
+// promise a person — they ask for the detail that usually closes the gap.
+const SUPPORT_NO_ANSWER_MESSAGE =
+  "I couldn't find a clear answer to that in our help content. Could you rephrase it, or add a little " +
+  "more detail about what you're trying to do?";
+const SALES_NO_ANSWER_MESSAGE =
+  "I don't have the specifics on that one. Could you tell me a bit more about what you're looking for, " +
+  'so I can point you to the right plan or feature?';
+
 function baseRules(tenant) {
   const persona = tenant.persona ? `\n\nADDITIONAL GUIDANCE FROM ${tenant.name.toUpperCase()}:\n${tenant.persona}` : '';
   return { persona };
@@ -189,6 +199,9 @@ function createTenantSupportProfile(tenant) {
 
     formatFallback(ctx, confidence) {
       return { answer: tenant.outOfScopeMessage, sourceSection: null, confidence, bot: 'support' };
+    },
+    formatNoAnswer(ctx, confidence) {
+      return { answer: SUPPORT_NO_ANSWER_MESSAGE, sourceSection: null, confidence, bot: 'support' };
     },
     formatSuccess(rawAnswer, rankedChunks) {
       return { answer: rawAnswer, sourceSection: rankedChunks[0]?.chunk.title ?? null, bot: 'support' };
@@ -264,6 +277,10 @@ function createTenantSalesProfile(tenant) {
     actions: [],
     topK: 3,
     minScore: 0, // no minConfidence set below — see the block comment above
+    // No gate before the model, but the same handoff line as support: a
+    // "no answer" below the tenant's threshold goes to a person, above it
+    // the bot asks for more detail (formatNoAnswer).
+    handoffBelow: tenant.minConfidence,
     chunkWeight: makeChunkWeight(SALES_CATEGORY_WEIGHTS),
     relativeMinScore: RELATIVE_MIN_SCORE,
     ticketing: true, // an unanswerable sales question is still worth a human follow-up
@@ -286,6 +303,9 @@ function createTenantSalesProfile(tenant) {
         confidence,
         bot: 'sales'
       };
+    },
+    formatNoAnswer(ctx, confidence) {
+      return { answer: SALES_NO_ANSWER_MESSAGE, keyBenefitsHighlighted: [], confidence, bot: 'sales' };
     },
     formatSuccess(rawAnswer, rankedChunks) {
       return {

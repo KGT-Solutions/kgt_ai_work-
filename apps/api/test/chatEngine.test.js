@@ -222,3 +222,78 @@ describe('getEngineAnswer — onResult hook and opt-in gating (minConfidence uns
     await assert.doesNotReject(() => getEngineAnswer({ profile, query: 'alpha', ctx: {} }));
   });
 });
+
+describe('getEngineAnswer — 30% threshold and handoffs', () => {
+  const prisma = require('../src/lib/prisma');
+  let tickets;
+  let originalCreate;
+  beforeEach(() => {
+    tickets = [];
+    originalCreate = prisma.supportTicket.create;
+    // Proxy-backed delegate: reassign rather than mock.method (see tenantProfile.test.js).
+    prisma.supportTicket.create = async ({ data }) => { tickets.push(data); return data; };
+  });
+  const restore = () => { prisma.supportTicket.create = originalCreate; };
+  const ticketing = { minScore: 0, ticketing: true };
+  const ctx = { tenantId: 't1' };
+
+  // The fixture's confidence for "alpha", read from the gate itself.
+  async function alphaConfidence() {
+    let seen;
+    await getEngineAnswer({
+      profile: makeProfile({ minScore: 0, minConfidence: 1.01, formatFallback: (_c, conf) => { seen = conf; return { answer: 'F' }; } }),
+      query: 'alpha', ctx: {}
+    });
+    return seen;
+  }
+
+  test('a confidence exactly at the threshold passes to the LLM, with no handoff or ticket', async () => {
+    try {
+      const threshold = await alphaConfidence();
+      generateAnswerMock.mock.resetCalls();
+      generateAnswerMock.mock.mockImplementation(async () => ({ text: 'alpha answer', provider: 'x', model: 'y', usage: {} }));
+      const result = await getEngineAnswer({ profile: makeProfile({ ...ticketing, minConfidence: threshold }), query: 'alpha', ctx });
+      assert.equal(generateAnswerMock.mock.callCount(), 1);
+      assert.equal(result.answer, 'alpha answer');
+      assert.equal(result.handoff, undefined);
+      assert.equal(tickets.length, 0);
+    } finally { restore(); }
+  });
+
+  test('below the threshold: fallback, handoff flag and a ticket carrying the confidence', async () => {
+    try {
+      const result = await getEngineAnswer({ profile: makeProfile({ ...ticketing, minConfidence: 0.99 }), query: 'alpha', ctx });
+      assert.equal(result.answer, 'FALLBACK');
+      assert.equal(result.handoff, true);
+      assert.equal(tickets.length, 1);
+      assert.equal(typeof tickets[0].confidence, 'number');
+    } finally { restore(); }
+  });
+
+  test('the model finding no answer at or above the threshold asks to rephrase: no handoff, no ticket', async () => {
+    try {
+      generateAnswerMock.mock.mockImplementation(async () => ({ text: 'NO_ANSWER', provider: 'x', model: 'y', usage: {} }));
+      const profile = makeProfile({
+        ...ticketing, minConfidence: 0.01,
+        formatNoAnswer: (_c, confidence) => ({ answer: 'REPHRASE', confidence })
+      });
+      const result = await getEngineAnswer({ profile, query: 'alpha', ctx });
+      assert.equal(result.answer, 'REPHRASE');
+      assert.equal(result.handoff, undefined);
+      assert.ok(result.confidence >= 0.01, 'the confidence still travels with the result, for the chat log');
+      assert.equal(tickets.length, 0);
+    } finally { restore(); }
+  });
+
+  test('without a minConfidence gate (sales), a no-answer below handoffBelow still hands off', async () => {
+    try {
+      generateAnswerMock.mock.mockImplementation(async () => ({ text: 'NO_ANSWER', provider: 'x', model: 'y', usage: {} }));
+      const profile = makeProfile({ ...ticketing, handoffBelow: 0.99, formatNoAnswer: () => ({ answer: 'REPHRASE' }) });
+      const result = await getEngineAnswer({ profile, query: 'alpha', ctx });
+      assert.equal(generateAnswerMock.mock.callCount(), 1, 'no gate: the model is still asked');
+      assert.equal(result.answer, 'FALLBACK');
+      assert.equal(result.handoff, true);
+      assert.equal(tickets.length, 1);
+    } finally { restore(); }
+  });
+});

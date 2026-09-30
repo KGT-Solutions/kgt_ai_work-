@@ -98,7 +98,8 @@ export default function BotSandbox({ ws, tenant }) {
           return (
             <BotPane key={bot.id} bot={bot} tenant={tenant} thread={threads[bot.id]} pending={pending[bot.id]}
               starters={tailored.length ? tailored : bot.starters} tailored={tailored.length > 0} generating={generating}
-              dimmed={target !== 'both' && target !== bot.id} onStarter={(s) => { setTarget(bot.id); ask(bot.id, s); }} />
+              dimmed={target !== 'both' && target !== bot.id} onStarter={(s) => { setTarget(bot.id); ask(bot.id, s); }}
+              onFollowUp={(q) => ask(bot.id, q)} />
           );
         })}
       </div>
@@ -129,7 +130,7 @@ export default function BotSandbox({ ws, tenant }) {
   );
 }
 
-function BotPane({ bot, tenant, thread, pending, starters, tailored, generating, dimmed, onStarter }) {
+function BotPane({ bot, tenant, thread, pending, starters, tailored, generating, dimmed, onStarter, onFollowUp }) {
   const scrollRef = useRef(null);
   useEffect(() => { scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' }); }, [thread, pending]);
   const Icon = bot.icon;
@@ -186,7 +187,10 @@ function BotPane({ bot, tenant, thread, pending, starters, tailored, generating,
                 m.error ? 'border-rose-400/25 bg-rose-500/10 text-rose-100' : 'border-white/[0.08] bg-panel-2/80 text-fg')}>
                 {m.text}
               </div>
-              {m.meta && <AnswerMeta meta={m.meta} />}
+              {/* Chips only under the latest reply, and not while the next one is on its way. */}
+              {i === thread.length - 1 && !pending && (
+                <FollowUpChips questions={m.meta?.followUps} tone={bot.tone} onPick={onFollowUp} />
+              )}
             </div>
           )
         ))}
@@ -200,16 +204,21 @@ function BotPane({ bot, tenant, thread, pending, starters, tailored, generating,
   );
 }
 
-// How the engine produced the answer: grounded source, a handoff, an outage,
-// or a repeat question served from the answer cache (no model call, no cost).
-function AnswerMeta({ meta }) {
+// Suggested next questions from the API (services/followUps.js), the same
+// ones the embedded widget shows. Clicking one asks it straight away. The
+// transcript carries no scores or engine details: confidence lives on
+// tickets and chat logs, cache savings on the Usage page.
+function FollowUpChips({ questions, tone, onPick }) {
+  if (!questions?.length) return null;
   return (
-    <div className="mt-1.5 flex flex-wrap gap-1.5 pl-1">
-      {meta.cached && <Badge tone="success">Instant · from cache, $0</Badge>}
-      {meta.degraded && <Badge tone="warning">AI unavailable · logged as ticket</Badge>}
-      {!meta.degraded && typeof meta.confidence === 'number' && <Badge tone="warning">Handed off · {Math.round(meta.confidence * 100)}% match</Badge>}
-      {meta.sourceSection && <Badge>Source · {meta.sourceSection}</Badge>}
-      {(meta.keyBenefitsHighlighted || []).map((b) => <Badge key={b} tone="violet">{b}</Badge>)}
+    <div className="mt-2 flex flex-wrap gap-1.5 pl-1" aria-label="Suggested follow-up questions">
+      {questions.map((q) => (
+        <button key={q} type="button" onClick={() => onPick(q)}
+          className={cx('rounded-full border px-3 py-1 text-left text-xs text-fg-2 transition hover:text-fg',
+            tone === 'cyan' ? 'border-cyan-400/25 bg-cyan-400/[0.05] hover:border-cyan-400/50' : 'border-violet-400/25 bg-violet-400/[0.05] hover:border-violet-400/50')}>
+          {q}
+        </button>
+      ))}
     </div>
   );
 }

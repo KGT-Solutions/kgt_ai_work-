@@ -2,6 +2,7 @@ const prisma = require('../lib/prisma');
 const { getEngineAnswer } = require('../engine/chatEngine');
 const { createTenantSupportProfile, createTenantSalesProfile } = require('../domains/tenantProfile');
 const { createIpRateLimiter } = require('../utils/ipRateLimit');
+const { pickFollowUps } = require('./followUps');
 
 // One chat turn for one tenant. Shared by every way a tenant's bots are
 // reached — the embed widget (API key), the client dashboard (client JWT)
@@ -47,7 +48,8 @@ class ChatRequestError extends Error {
 
 /**
  * @param {{ tenant: object, body: object }} args  body: { query, botType? (or bot), sessionId?, externalUserId? }
- * @returns {Promise<object>} the bot's result plus sessionId and the botType that answered
+ * @returns {Promise<object>} the bot's result (without its confidence score) plus followUps
+ *   (0-3 suggested next questions), sessionId and the botType that answered
  * @throws {ChatRequestError} for invalid input (400) or rate limiting (429)
  */
 async function runTenantChat({ tenant, body }) {
@@ -87,14 +89,33 @@ async function runTenantChat({ tenant, body }) {
     ctx: { tenantId: tenant.id, recentTurns: recentTurns.reverse().map((m) => ({ role: m.role, content: m.content })) }
   });
 
+  // Earlier questions in this conversation (so chips don't repeat them) and
+  // this bot's FAQs, read before this turn's messages are written.
+  const [askedRows, faqRow] = await Promise.all([
+    prisma.chatMessage.findMany({
+      where: { sessionId: session.id, role: 'user' }, orderBy: { createdAt: 'desc' }, take: 50, select: { content: true }
+    }),
+    prisma.tenantFaq.findUnique({ where: { tenantId: tenant.id }, select: { supportFaqs: true, salesFaqs: true } })
+  ]);
+
+  // The confidence score is stored here (and on tickets) for staff and
+  // tenant review, never sent to the chat client.
+  const { confidence, ...reply } = result;
   await prisma.chatMessage.createMany({
     data: [
       { sessionId: session.id, role: 'user', content: query, botType },
-      { sessionId: session.id, role: 'assistant', content: result.answer, confidence: result.confidence ?? null, botType }
+      { sessionId: session.id, role: 'assistant', content: reply.answer, confidence: confidence ?? null, botType }
     ]
   });
 
-  return { ...result, sessionId: session.id, botType };
+  const followUps = pickFollowUps({
+    botType,
+    faqs: faqRow?.[botType === 'sales' ? 'salesFaqs' : 'supportFaqs'] || [],
+    asked: askedRows.map((m) => m.content),
+    query,
+    answer: reply.answer
+  });
+  return { ...reply, followUps, sessionId: session.id, botType };
 }
 
 // Express helper: run a turn and map input errors to their status codes.
