@@ -2,8 +2,8 @@ import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { clientLayout, useSession } from '../../components/shell/DashboardShell';
 import Overview from '../../components/workspace/Overview';
-import { Card, CodeBlock, PageHeader, SecretField } from '../../components/ui';
-import { embedSnippet } from '../../lib/api';
+import EmbedSnippets from '../../components/workspace/EmbedSnippets';
+import { Card, PageHeader, SecretField } from '../../components/ui';
 import { takeSignupHandoff } from '../../lib/signupHandoff';
 
 export default function DashboardOverview() {
@@ -24,9 +24,9 @@ export default function DashboardOverview() {
       {welcome && (
         <Card className="mb-6 space-y-4 border-cyan-400/25 p-5 shadow-glow">
           <SecretField value={welcome.apiKey} label="Your API key" />
-          <CodeBlock filename="index.html" code={embedSnippet(welcome.slug, welcome.apiKey)} />
+          <EmbedSnippets slug={welcome.slug} apiKey={welcome.apiKey} />
           <p className="text-[13px] text-fg-3">
-            Paste the snippet before <code className="text-fg-2">{'</body>'}</code> on your site. Lost it later? Issue a new key in{' '}
+            Lost your key later? Issue a new one in{' '}
             <Link href="/dashboard/keys" className="text-cyan-300 hover:underline">API keys</Link>.
           </p>
         </Card>

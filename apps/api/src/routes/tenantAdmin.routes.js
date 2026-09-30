@@ -2,6 +2,8 @@ const express = require('express');
 const prisma = require('../lib/prisma');
 const { issueApiKey } = require('../utils/tenantApiKeys');
 const workspaceRoutes = require('./tenantWorkspace.routes');
+const { usageBreakdowns } = require('../services/usageStats');
+const { answerCache } = require('../engine/answerCache');
 
 // KGT staff only — mounted behind requireOperator in app.js. The master
 // view across every client company, plus create / inspect / activate /
@@ -23,34 +25,37 @@ const TENANT_FIELDS = {
 // grouped queries rather than one query per tenant.
 async function tenantMetrics(tenantIds) {
   const where = { tenantId: { in: tenantIds } };
-  const [docs, keys, usage, sessions, questions, users] = await Promise.all([
+  const [docs, keys, lastUsage, sessions, users, breakdownFor] = await Promise.all([
     prisma.tenantDocument.groupBy({ by: ['tenantId'], where, _count: { _all: true } }),
     prisma.tenantApiKey.groupBy({ by: ['tenantId'], where: { ...where, revokedAt: null }, _count: { _all: true }, _max: { lastUsedAt: true } }),
-    prisma.usageLog.groupBy({ by: ['tenantId'], where, _count: { _all: true }, _sum: { estimatedCostUsd: true }, _max: { createdAt: true } }),
+    prisma.usageLog.groupBy({ by: ['tenantId'], where, _max: { createdAt: true } }),
     prisma.chatSession.groupBy({ by: ['tenantId'], where, _count: { _all: true } }),
-    tenantIds.length
-      ? prisma.$queryRaw`SELECT s."tenantId" AS "tenantId", COUNT(*)::int AS n
-          FROM "ChatMessage" m JOIN "ChatSession" s ON s.id = m."sessionId"
-          WHERE m.role = 'user' AND s."tenantId" = ANY(${tenantIds}) GROUP BY s."tenantId"`
-      : [],
-    prisma.tenantUser.findMany({ where, select: { tenantId: true, email: true, name: true, lastLoginAt: true }, orderBy: { createdAt: 'asc' } })
+    prisma.tenantUser.findMany({ where, select: { tenantId: true, email: true, name: true, lastLoginAt: true }, orderBy: { createdAt: 'asc' } }),
+    usageBreakdowns(tenantIds)
   ]);
   const by = (rows) => Object.fromEntries(rows.map((r) => [r.tenantId, r]));
-  const docsBy = by(docs); const keysBy = by(keys); const usageBy = by(usage); const sessionsBy = by(sessions);
-  const questionsBy = Object.fromEntries(questions.map((q) => [q.tenantId, q.n]));
+  const docsBy = by(docs); const keysBy = by(keys); const lastUsageBy = by(lastUsage); const sessionsBy = by(sessions);
   const usersBy = users.reduce((m, u) => ({ ...m, [u.tenantId]: [...(m[u.tenantId] || []), u] }), {});
 
-  return (id) => ({
-    documents: docsBy[id]?._count._all || 0,
-    activeKeys: keysBy[id]?._count._all || 0,
-    keyLastUsedAt: keysBy[id]?._max.lastUsedAt || null,
-    llmCalls: usageBy[id]?._count._all || 0,
-    estimatedCostUsd: usageBy[id]?._sum.estimatedCostUsd || 0,
-    lastActivityAt: usageBy[id]?._max.createdAt || null,
-    conversations: sessionsBy[id]?._count._all || 0,
-    questions: questionsBy[id] || 0,
-    accounts: (usersBy[id] || []).map(({ email, name, lastLoginAt }) => ({ email, name, lastLoginAt }))
-  });
+  return (id) => {
+    const { totals, ...byBot } = breakdownFor(id);
+    return {
+      documents: docsBy[id]?._count._all || 0,
+      activeKeys: keysBy[id]?._count._all || 0,
+      keyLastUsedAt: keysBy[id]?._max.lastUsedAt || null,
+      llmCalls: totals.aiAnswers, // real LLM calls; cache hits are in cacheHits
+      cacheHits: totals.cacheHits,
+      estimatedCostUsd: totals.costUsd,
+      savedCostUsd: totals.savedCostUsd,
+      tokens: totals.tokens,
+      tokensPerDay: totals.tokensPerDay,
+      lastActivityAt: lastUsageBy[id]?._max.createdAt || null,
+      conversations: sessionsBy[id]?._count._all || 0,
+      questions: totals.questions,
+      byBot, // { support, sales, other } — see services/usageStats.js
+      accounts: (usersBy[id] || []).map(({ email, name, lastLoginAt }) => ({ email, name, lastLoginAt }))
+    };
+  };
 }
 
 // POST /api/v1/tenants — staff-provisioned tenant (no client login; the
@@ -113,7 +118,10 @@ router.patch('/:tenantId', async (req, res) => {
   }
   if (req.body?.outOfScopeMessage !== undefined) data.outOfScopeMessage = String(req.body.outOfScopeMessage).slice(0, 500);
 
-  res.json(await prisma.tenant.update({ where: { id: tenant.id }, data, select: TENANT_FIELDS }));
+  const updated = await prisma.tenant.update({ where: { id: tenant.id }, data, select: TENANT_FIELDS });
+  // persona is part of both bots' prompts: answers cached under the old one are stale.
+  answerCache.invalidateTenant(tenant.id);
+  res.json(updated);
 });
 
 // Staff acting inside one tenant: resolve it from the URL, then hand off to

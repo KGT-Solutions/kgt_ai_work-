@@ -4,7 +4,7 @@ import { staffLayout } from '../../components/shell/DashboardShell';
 import { Badge, Button, ButtonLink, Card, EmptyState, Input, PageHeader, Select, Skeleton } from '../../components/ui';
 import { useToast } from '../../components/ui/toast';
 import { IconBuilding, IconPlus, IconSearch } from '../../components/ui/icons';
-import { Stat } from '../../components/workspace/UsagePanel';
+import { Stat, pct, usd } from '../../components/workspace/UsagePanel';
 import { api } from '../../lib/api';
 
 // KGT staff master control: every registered company with its contact,
@@ -36,17 +36,24 @@ export default function StaffCompanies() {
   const visible = (tenants || []).filter((t) => (status === 'all' || (status === 'active') === t.active) &&
     (!q || [t.name, t.slug, t.industryLabel, t.signupEmail, ...t.metrics.accounts.map((a) => a.email)].some((v) => String(v || '').toLowerCase().includes(q))));
   const sum = (f) => (tenants || []).reduce((a, t) => a + f(t), 0);
+  const botSum = (bot, k) => sum((t) => t.metrics.byBot[bot][k]);
+  const platformAnswers = sum((t) => t.metrics.llmCalls + t.metrics.cacheHits);
 
   return (
     <>
       <PageHeader title="Companies" description="Every client on KGT AI Hub — staff only."
         actions={<ButtonLink href="/admin/tenants/new" variant="primary"><IconPlus className="h-4 w-4" />New company</ButtonLink>} />
 
-      <div className="mb-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <Stat label="Companies" value={tenants && tenants.length} sub={tenants && `${tenants.filter((t) => t.active).length} active`} />
-        <Stat label="Training documents" value={tenants && sum((t) => t.metrics.documents)} />
+      <div className="mb-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+        <Stat label="Companies" value={tenants && tenants.length}
+          sub={tenants && `${tenants.filter((t) => t.active).length} active · ${sum((t) => t.metrics.documents).toLocaleString('en-US')} documents`} />
         <Stat label="Questions" value={tenants && sum((t) => t.metrics.questions)} sub={tenants && `${sum((t) => t.metrics.conversations).toLocaleString('en-US')} conversations`} />
-        <Stat label="AI answers" value={tenants && sum((t) => t.metrics.llmCalls)} sub={tenants && `≈ $${sum((t) => t.metrics.estimatedCostUsd).toFixed(2)} LLM cost`} />
+        <Stat label="Support Bot cost" value={tenants && usd(botSum('support', 'costUsd'))}
+          sub={tenants && `${botSum('support', 'aiAnswers').toLocaleString('en-US')} AI answers · ${botSum('support', 'tokensPerDay').toLocaleString('en-US')} tokens/day`} />
+        <Stat label="Sales Bot cost" value={tenants && usd(botSum('sales', 'costUsd'))}
+          sub={tenants && `${botSum('sales', 'aiAnswers').toLocaleString('en-US')} AI answers · ${botSum('sales', 'tokensPerDay').toLocaleString('en-US')} tokens/day`} />
+        <Stat label="Cache savings" value={tenants && usd(sum((t) => t.metrics.savedCostUsd))}
+          sub={tenants && `${pct(platformAnswers ? sum((t) => t.metrics.cacheHits) / platformAnswers : 0)} of answers from cache · total spend ${usd(sum((t) => t.metrics.estimatedCostUsd))}`} />
       </div>
 
       <Card>
@@ -63,12 +70,14 @@ export default function StaffCompanies() {
           <div className="p-6"><EmptyState icon={<IconBuilding className="h-5 w-5" />} title={tenants.length ? 'No companies match' : 'No companies yet'}>They appear here as soon as they finish signup.</EmptyState></div>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[860px] text-left text-sm">
+            <table className="w-full min-w-[1180px] text-left text-sm">
               <thead className="text-xs text-fg-3">
                 <tr className="border-b border-white/[0.06]">
                   <th className="px-4 py-3 font-medium">Company</th><th className="px-4 py-3 font-medium">Contact</th>
                   <th className="px-4 py-3 text-right font-medium">Docs</th><th className="px-4 py-3 font-medium">Keys</th>
-                  <th className="px-4 py-3 font-medium">Usage</th><th className="px-4 py-3 font-medium">Status</th>
+                  <th className="px-4 py-3 font-medium">Activity</th>
+                  <th className="px-4 py-3 font-medium text-cyan-300/90">Support Bot</th><th className="px-4 py-3 font-medium text-violet-300/90">Sales Bot</th>
+                  <th className="px-4 py-3 text-right font-medium">Total cost</th><th className="px-4 py-3 font-medium">Status</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/[0.05]">
@@ -93,7 +102,14 @@ export default function StaffCompanies() {
                       </td>
                       <td className="px-4 py-3 align-top tabular-nums">
                         <p className="text-fg-2">{m.questions} questions</p>
-                        <p className="text-xs text-fg-3">{m.conversations} conversations · {m.llmCalls} AI answers</p>
+                        <p className="text-xs text-fg-3">{m.conversations} conversations</p>
+                      </td>
+                      <BotCell b={m.byBot.support} />
+                      <BotCell b={m.byBot.sales} />
+                      <td className="px-4 py-3 text-right align-top tabular-nums">
+                        <p className="text-fg">{usd(m.estimatedCostUsd)}</p>
+                        {m.savedCostUsd > 0 && <p className="text-xs text-emerald-300">{usd(m.savedCostUsd)} saved</p>}
+                        <p className="text-xs text-fg-3">{m.tokensPerDay.toLocaleString('en-US')} tokens/day</p>
                       </td>
                       <td className="px-4 py-3 align-top">
                         <div className="flex flex-col items-start gap-1.5">
@@ -113,3 +129,14 @@ export default function StaffCompanies() {
   );
 }
 StaffCompanies.getLayout = staffLayout;
+
+// One bot's all-time ledger for one company. tokens/day is the last-7-day average.
+function BotCell({ b }) {
+  return (
+    <td className="px-4 py-3 align-top tabular-nums">
+      <p className="text-fg-2">{b.aiAnswers.toLocaleString('en-US')} answers · {usd(b.costUsd)}</p>
+      <p className="text-xs text-fg-3">{b.tokens.toLocaleString('en-US')} tokens · {b.tokensPerDay.toLocaleString('en-US')}/day</p>
+      <p className="text-xs text-fg-3">{b.cacheHits ? `${b.cacheHits.toLocaleString('en-US')} cached (${pct(b.cacheHitRate)})` : 'no cache hits'}</p>
+    </td>
+  );
+}

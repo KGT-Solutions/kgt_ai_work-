@@ -15,7 +15,8 @@ const { buildSystemPrompt, buildUserPrompt, parseCitedExcerpt } = require('./pro
 const { tryActions } = require('./actionRegistry');
 const { computeConfidence } = require('./confidence');
 const { fileSupportTicket } = require('./ticketing');
-const { logUsage } = require('./usageTracking');
+const { logUsage, logCacheHit } = require('./usageTracking');
+const { answerCache } = require('./answerCache');
 const {
   generateAnswer,
   formatAttempts,
@@ -73,14 +74,34 @@ async function getEngineAnswer({ profile, query, ctx = {} }) {
     return result;
   }
 
-  // 3. LLM call, guarded by the domain's own persona/rules.
+  // 3. LLM call, guarded by the domain's own persona/rules — unless this
+  //    tenant's same bot answered the same question recently (answerCache.js).
+  //    Only reached after the gate, so a cached answer is re-used exactly
+  //    where a fresh one would have been generated; the formatting, ticketing
+  //    and onResult steps below run the same either way.
+  const cacheable = !!(profile.answerCache && profile.botType && ctx.tenantId);
+  const cached = cacheable ? answerCache.get(ctx.tenantId, profile.botType, query) : null;
   try {
-    const { text, provider, model, usage } = await generateAnswer({
-      systemPrompt: buildSystemPrompt(profile, ctx),
-      userPrompt: buildUserPrompt(profile, query, ranked)
-    });
-
-    if (profile.usageTracking) await logUsage({ profile, ctx, provider, model, usage });
+    let text;
+    if (cached?.value) {
+      ({ text } = cached.value);
+      if (profile.usageTracking) {
+        await logCacheHit({ ctx, botType: profile.botType, model: cached.value.model, usage: cached.value.usage });
+      }
+    } else {
+      const answer = await generateAnswer({
+        systemPrompt: buildSystemPrompt(profile, ctx),
+        userPrompt: buildUserPrompt(profile, query, ranked)
+      });
+      text = answer.text;
+      if (profile.usageTracking) {
+        await logUsage({ ctx, provider: answer.provider, model: answer.model, usage: answer.usage, botType: profile.botType });
+      }
+      if (cacheable) {
+        answerCache.set(ctx.tenantId, profile.botType, query,
+          { text, model: answer.model, usage: answer.usage }, cached.generation);
+      }
+    }
 
     // The model self-reports which excerpt it actually grounded its answer
     // in (see promptBuilder.citationInstruction) — trust that over rank[0]
@@ -92,6 +113,7 @@ async function getEngineAnswer({ profile, query, ctx = {} }) {
     const effectiveRanked =
       citedIndex != null ? [ranked[citedIndex], ...ranked.filter((_, i) => i !== citedIndex)] : ranked;
     const result = noAnswer ? profile.formatFallback(ctx, confidence) : profile.formatSuccess(answerText, effectiveRanked, ctx);
+    if (cached?.value) result.cached = true; // served without an LLM call
     await profile.onResult?.(result, query, ctx);
 
     if (noAnswer && profile.ticketing) {

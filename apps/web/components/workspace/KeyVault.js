@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
-import { embedSnippet } from '../../lib/api';
-import { Badge, Button, Card, CardHeader, CodeBlock, EmptyState, Input, SecretField, Skeleton } from '../ui';
+import { Badge, Button, Card, CardHeader, EmptyState, Input, SecretField, Skeleton } from '../ui';
 import { useToast } from '../ui/toast';
-import { IconAlert, IconKey, IconLock } from '../ui/icons';
+import { IconAlert, IconCode, IconKey, IconLock } from '../ui/icons';
+import EmbedSnippets from './EmbedSnippets';
 
 // Credential vault. Keys are stored only as SHA-256 hashes on the server, so a
 // key's full value exists in exactly one place: this browser tab, right after
@@ -63,10 +63,17 @@ export default function KeyVault({ ws, tenant, freshKey }) {
             description="Shown once. We only keep a fingerprint of it, so copy it somewhere safe before leaving this page." />
           <div className="space-y-4 p-5">
             <SecretField value={issued.apiKey} label="API key" />
-            <div>
-              <p className="mb-2 text-[13px] text-fg-2">Add both bots to your site — paste before <code className="text-fg">{'</body>'}</code>:</p>
-              <CodeBlock filename="index.html" code={embedSnippet(tenant.slug, issued.apiKey)} />
-            </div>
+            <EmbedSnippets slug={tenant.slug} apiKey={issued.apiKey} />
+          </div>
+        </Card>
+      )}
+
+      {!issued && (
+        <Card>
+          <CardHeader icon={<IconCode className="h-4 w-4" />} title="Embed your bots"
+            description="Two widgets, one per bot. Each is locked to its bot, so visitors get the right persona and knowledge on every page." />
+          <div className="p-5">
+            <EmbedSnippets slug={tenant.slug} />
           </div>
         </Card>
       )}

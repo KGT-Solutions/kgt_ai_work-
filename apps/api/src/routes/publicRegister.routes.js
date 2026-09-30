@@ -10,6 +10,7 @@ const { issueApiKey } = require('../utils/tenantApiKeys');
 const { hashPassword } = require('../utils/password');
 const { signClientToken } = require('../middleware/clientAuth');
 const { crawlConsentRecord, hostOf } = require('../services/shared/crawlConsent');
+const { scheduleFaqGeneration } = require('../services/tenantFaqs');
 
 // Public self-serve registration wizard backend (apps/admin-web/pages/register.js).
 // Deliberately unauthenticated — that's the entire point of self-serve — so
@@ -227,6 +228,9 @@ router.post('/complete', async (req, res) => {
   }
   // No invalidateTenantKnowledge call needed — this tenant's knowledge
   // cache has never been populated, so there's nothing stale to clear.
+  // Starter questions are written in the background, usually before the
+  // new client reaches the Test Bots page.
+  scheduleFaqGeneration(created.tenant.id);
 
   res.status(201).json({
     tenantId: created.tenant.id,

@@ -1,17 +1,59 @@
-import { useEffect, useRef, useState } from 'react';
-import { Badge, Button, Card, Segmented, cx } from '../ui';
-import { IconBolt, IconSend, IconShield } from '../ui/icons';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Badge, Button, Card, Segmented, Spinner, cx } from '../ui';
+import { IconBolt, IconSend, IconShield, IconSpark } from '../ui/icons';
 
 // Side-by-side sandbox: one composer, the Support Bot and the Sales Bot
 // answering in their own panes. Runs through ws.chat, i.e. the signed-in
 // session — same engine, knowledge and rate limit as the embedded widget.
+//
+// Starter chips come from ws.getFaqs(): questions an LLM wrote from this
+// tenant's own documents after signup or an import. Until those are ready
+// (or if generation failed) each pane shows the generic starters below.
 
 const BOTS = [
   { id: 'support', name: 'Support Bot', icon: IconShield, tone: 'cyan', blurb: 'Grounded, factual answers. Hands off when unsure.',
-    starters: ['How do I get started?', 'What is your refund policy?'] },
+    faqKey: 'supportFaqs', starters: ['How do I get started?', 'What is your refund policy?'] },
   { id: 'sales', name: 'Sales Bot', icon: IconBolt, tone: 'violet', blurb: 'Persuasive, benefit-led, ends with a next step.',
-    starters: ['Why should we choose you?', 'How does your pricing work?'] }
+    faqKey: 'salesFaqs', starters: ['Why should we choose you?', 'How does your pricing work?'] }
 ];
+
+const FAQ_POLL_MS = 4000;
+const FAQ_POLL_MAX = 30; // ~2 minutes, then settle for the generic starters
+
+// Loads the tenant's starter FAQs, polling while the API reports "pending".
+function useStarterFaqs(ws) {
+  const [faqs, setFaqs] = useState(null);
+  const [polls, setPolls] = useState(0);
+
+  const load = useCallback(async () => {
+    try {
+      setFaqs(await ws.getFaqs());
+    } catch {
+      setFaqs({ status: 'failed', supportFaqs: [], salesFaqs: [] }); // generic starters still work
+    }
+  }, [ws]);
+
+  useEffect(() => { if (ws) { setPolls(0); load(); } }, [ws, load]);
+
+  useEffect(() => {
+    if (faqs?.status !== 'pending' || polls >= FAQ_POLL_MAX) return undefined;
+    const t = setTimeout(() => { setPolls((n) => n + 1); load(); }, FAQ_POLL_MS);
+    return () => clearTimeout(t);
+  }, [faqs, polls, load]);
+
+  const regenerate = async () => {
+    try {
+      await ws.regenerateFaqs();
+      setPolls(0);
+      setFaqs((f) => ({ ...(f || { supportFaqs: [], salesFaqs: [] }), status: 'pending' }));
+    } catch (err) {
+      setFaqs((f) => ({ ...(f || { supportFaqs: [], salesFaqs: [] }), notice: err.message }));
+    }
+  };
+
+  const generating = faqs?.status === 'pending' && polls < FAQ_POLL_MAX;
+  return { faqs, generating, regenerate };
+}
 
 export default function BotSandbox({ ws, tenant }) {
   const [target, setTarget] = useState('both');
@@ -20,6 +62,7 @@ export default function BotSandbox({ ws, tenant }) {
   const [pending, setPending] = useState({ support: false, sales: false });
   const [input, setInput] = useState('');
   const inputRef = useRef(null);
+  const { faqs, generating, regenerate } = useStarterFaqs(ws);
 
   const ask = async (bot, query) => {
     setThreads((t) => ({ ...t, [bot]: [...t[bot], { role: 'user', text: query }] }));
@@ -50,10 +93,14 @@ export default function BotSandbox({ ws, tenant }) {
   return (
     <div className="space-y-4">
       <div className="grid gap-4 lg:grid-cols-2">
-        {BOTS.map((bot) => (
-          <BotPane key={bot.id} bot={bot} tenant={tenant} thread={threads[bot.id]} pending={pending[bot.id]}
-            dimmed={target !== 'both' && target !== bot.id} onStarter={(s) => { setTarget(bot.id); ask(bot.id, s); }} />
-        ))}
+        {BOTS.map((bot) => {
+          const tailored = faqs?.[bot.faqKey] || [];
+          return (
+            <BotPane key={bot.id} bot={bot} tenant={tenant} thread={threads[bot.id]} pending={pending[bot.id]}
+              starters={tailored.length ? tailored : bot.starters} tailored={tailored.length > 0} generating={generating}
+              dimmed={target !== 'both' && target !== bot.id} onStarter={(s) => { setTarget(bot.id); ask(bot.id, s); }} />
+          );
+        })}
       </div>
 
       <Card className="p-3">
@@ -68,12 +115,21 @@ export default function BotSandbox({ ws, tenant }) {
             <Button onClick={reset} variant="ghost" disabled={!threads.support.length && !threads.sales.length}>Clear</Button>
           </div>
         </form>
+        <div className="mt-2 flex flex-wrap items-center justify-between gap-2 px-1 text-[11.5px] text-fg-3">
+          <span>{faqs?.notice || (generating
+            ? 'Writing suggested questions from your content…'
+            : faqs?.status === 'ready' ? 'Suggested questions are written from your documents.' : 'Showing general starter questions.')}</span>
+          <button type="button" onClick={regenerate} disabled={generating}
+            className="rounded px-1 text-fg-2 underline-offset-2 transition hover:text-fg hover:underline disabled:cursor-not-allowed disabled:opacity-45">
+            Refresh suggestions
+          </button>
+        </div>
       </Card>
     </div>
   );
 }
 
-function BotPane({ bot, tenant, thread, pending, dimmed, onStarter }) {
+function BotPane({ bot, tenant, thread, pending, starters, tailored, generating, dimmed, onStarter }) {
   const scrollRef = useRef(null);
   useEffect(() => { scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' }); }, [thread, pending]);
   const Icon = bot.icon;
@@ -96,12 +152,25 @@ function BotPane({ bot, tenant, thread, pending, dimmed, onStarter }) {
 
       <div ref={scrollRef} className="flex flex-1 flex-col gap-3 overflow-y-auto px-4 py-4" aria-live="polite" aria-label={`${bot.name} conversation`}>
         {thread.length === 0 && !pending && (
-          <div className="m-auto max-w-xs text-center">
+          <div className="m-auto max-w-sm text-center">
             <p className="text-sm text-fg-2">Chat with {tenant.name}&apos;s {bot.name}.</p>
+            {tailored && (
+              <p className="mt-1 inline-flex items-center gap-1 text-[11.5px] text-fg-3">
+                <IconSpark className="h-3.5 w-3.5" />Questions your customers are likely to ask
+              </p>
+            )}
+            {!tailored && generating && (
+              <p className="mt-1 inline-flex items-center gap-1.5 text-[11.5px] text-fg-3">
+                <Spinner className="h-3.5 w-3.5" />Tailoring questions to your content…
+              </p>
+            )}
             <div className="mt-3 flex flex-wrap justify-center gap-2">
-              {bot.starters.map((s) => (
+              {starters.map((s) => (
                 <button key={s} type="button" onClick={() => onStarter(s)}
-                  className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-1.5 text-xs text-fg-2 transition hover:border-white/20 hover:text-fg">
+                  className={cx('rounded-full border px-3 py-1.5 text-left text-xs transition hover:text-fg',
+                    tailored
+                      ? (bot.tone === 'cyan' ? 'border-cyan-400/25 bg-cyan-400/[0.06] text-fg hover:border-cyan-400/50' : 'border-violet-400/25 bg-violet-400/[0.06] text-fg hover:border-violet-400/50')
+                      : 'border-white/10 bg-white/[0.03] text-fg-2 hover:border-white/20')}>
                   {s}
                 </button>
               ))}
@@ -131,10 +200,12 @@ function BotPane({ bot, tenant, thread, pending, dimmed, onStarter }) {
   );
 }
 
-// How the engine produced the answer: grounded source, a handoff, or an outage.
+// How the engine produced the answer: grounded source, a handoff, an outage,
+// or a repeat question served from the answer cache (no model call, no cost).
 function AnswerMeta({ meta }) {
   return (
     <div className="mt-1.5 flex flex-wrap gap-1.5 pl-1">
+      {meta.cached && <Badge tone="success">Instant · from cache, $0</Badge>}
       {meta.degraded && <Badge tone="warning">AI unavailable · logged as ticket</Badge>}
       {!meta.degraded && typeof meta.confidence === 'number' && <Badge tone="warning">Handed off · {Math.round(meta.confidence * 100)}% match</Badge>}
       {meta.sourceSection && <Badge>Source · {meta.sourceSection}</Badge>}

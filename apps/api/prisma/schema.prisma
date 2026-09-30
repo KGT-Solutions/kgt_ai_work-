@@ -40,6 +40,24 @@ model Tenant {
   chatSessions ChatSession[]
   tickets      SupportTicket[]
   usageLogs    UsageLog[]
+  starterFaqs  TenantFaq?
+}
+
+// Starter questions for the Test Bots sandbox, written by an LLM from this
+// tenant's own documents (services/tenantFaqs.js) after a website import,
+// PDF upload or signup. One row per tenant; regenerating overwrites it.
+// status: pending (generation queued/running) | ready | failed. A failed
+// regeneration keeps the previous questions, so the sandbox never goes blank.
+model TenantFaq {
+  id          String    @id @default(uuid())
+  tenant      Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantId    String    @unique
+  supportFaqs String[]  @default([])
+  salesFaqs   String[]  @default([])
+  status      String    @default("pending")
+  error       String?   // last failure reason, for staff; never shown to clients
+  generatedAt DateTime? // when the current questions were written
+  updatedAt   DateTime  @updatedAt
 }
 
 // A client company's own login to its dashboard (/dashboard). Belongs to
@@ -163,6 +181,7 @@ model ChatMessage {
   role       String      // user | assistant
   content    String
   confidence Float?      // the gate score behind this assistant reply, if applicable
+  botType    String?     // support | sales — which bot this turn went to; null on rows from before per-bot tracking
   createdAt  DateTime    @default(now())
 
   @@index([sessionId])
@@ -181,16 +200,27 @@ model SupportTicket {
   @@index([tenantId, status])
 }
 
+// One row per answer that would have cost an LLM call: a real call, or a
+// repeat question served from the in-memory answer cache (engine/answerCache.js).
+// A cache hit records 0 tokens and $0, and what the original call cost in
+// savedTokens / savedCostUsd, so dashboards can show what the cache saved.
 model UsageLog {
   id               String   @id @default(uuid())
   tenant           Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   tenantId         String
-  provider         String   // groq | openai | anthropic
+  // support | sales for chat answers; null for platform work done for the
+  // tenant (starter-FAQ generation) and for rows from before per-bot tracking.
+  botType          String?
+  provider         String   // groq | openai | anthropic | cache
   model            String
   promptTokens     Int
   completionTokens Int
   estimatedCostUsd Float    @default(0)
+  cacheHit         Boolean  @default(false)
+  savedTokens      Int      @default(0)
+  savedCostUsd     Float    @default(0)
   createdAt        DateTime @default(now())
 
   @@index([tenantId, createdAt])
+  @@index([tenantId, botType, createdAt])
 }

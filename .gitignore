@@ -86,3 +86,4 @@ uploads/
 # Database dumps contain personal data — never commit them.
 backup_*.sql
 *.dump
+*.sql

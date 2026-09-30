@@ -1,8 +1,9 @@
 import { useState } from 'react';
 import { staffLayout } from '../../../components/shell/DashboardShell';
-import { Button, ButtonLink, Card, CardHeader, CodeBlock, Field, Input, PageHeader, SecretField, Textarea } from '../../../components/ui';
+import { Button, ButtonLink, Card, CardHeader, Field, Input, PageHeader, SecretField, Textarea } from '../../../components/ui';
 import { IconArrowRight, IconKey } from '../../../components/ui/icons';
-import { api, embedSnippet } from '../../../lib/api';
+import EmbedSnippets from '../../../components/workspace/EmbedSnippets';
+import { api } from '../../../lib/api';
 
 // Staff-provisioned company (no client login). Its first API key is shown once.
 export default function NewCompany() {
@@ -39,7 +40,7 @@ export default function NewCompany() {
           <CardHeader icon={<IconKey className="h-4 w-4" />} title="First API key" description={`Sent as X-Tenant-Api-Key to POST /api/v1/tenant-chat/${created.slug}/chat, or used in the embed snippet.`} />
           <div className="space-y-4 p-5">
             <SecretField value={created.apiKey} label="API key" />
-            <CodeBlock filename="index.html" code={embedSnippet(created.slug, created.apiKey)} />
+            <EmbedSnippets slug={created.slug} apiKey={created.apiKey} />
             <ButtonLink href={`/admin/tenants/${created.id}`} variant="primary">Open company <IconArrowRight className="h-4 w-4" /></ButtonLink>
           </div>
         </Card>

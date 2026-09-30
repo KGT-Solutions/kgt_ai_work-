@@ -3,6 +3,7 @@ const { parseIntoChunks } = require('../engine/knowledgeLoader');
 const { conversationalStyleRules } = require('../engine/promptBuilder');
 const { extractTaggedHighlights } = require('../services/shared/tagHighlights');
 const { CATEGORIES, DEFAULT_CATEGORY } = require('../services/shared/documentCategory');
+const { answerCache } = require('../engine/answerCache');
 
 // The generic, industry-agnostic profile pair every resold tenant gets:
 // everything domain-specific comes from the Tenant row itself (name,
@@ -28,8 +29,11 @@ const SALES_SENTINEL = 'NO_ANSWER_IN_TENANT_SALES_KB';
 // tenant, not per bot, since the underlying rows are identical.
 const chunkCacheByTenant = new Map();
 
+// Also drops the tenant's cached answers: an answer written from the old
+// documents must not outlive them.
 function invalidateTenantKnowledge(tenantId) {
   chunkCacheByTenant.delete(tenantId);
+  answerCache.invalidateTenant(tenantId);
 }
 
 async function loadTenantKnowledge(tenantId) {
@@ -161,6 +165,8 @@ ${conversationalStyleRules({ sentinel: SUPPORT_SENTINEL, allowSteps: true })}${p
 function createTenantSupportProfile(tenant) {
   return {
     id: `tenant:${tenant.slug}:support`,
+    botType: 'support',
+    answerCache: true,
     actions: [],
     topK: 3,
     minScore: 0, // the real gate is minConfidence below; don't double-filter
@@ -248,6 +254,8 @@ const SALES_OUT_OF_SCOPE_SUFFIX = ' Would you like to talk to our team about how
 function createTenantSalesProfile(tenant) {
   return {
     id: `tenant:${tenant.slug}:sales`,
+    botType: 'sales',
+    answerCache: true,
     actions: [],
     topK: 3,
     minScore: 0, // no minConfidence set below — see the block comment above

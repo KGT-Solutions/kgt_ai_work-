@@ -7,7 +7,7 @@ import DocumentManager from '../../../components/workspace/DocumentManager';
 import KeyVault from '../../../components/workspace/KeyVault';
 import Overview from '../../../components/workspace/Overview';
 import TicketsList from '../../../components/workspace/TicketsList';
-import UsagePanel from '../../../components/workspace/UsagePanel';
+import UsagePanel, { usd } from '../../../components/workspace/UsagePanel';
 import { Badge, Button, Card, PageHeader, Skeleton, cx } from '../../../components/ui';
 import { useToast } from '../../../components/ui/toast';
 import { IconArrowLeft } from '../../../components/ui/icons';
@@ -59,7 +59,10 @@ export default function StaffTenant() {
           <Fact label="Support confidence gate">{Math.round(tenant.minConfidence * 100)}%</Fact>
           <Fact label="Knowledge">{m.documents} documents</Fact>
           <Fact label="API keys">{m.activeKeys} active{m.keyLastUsedAt ? `, last used ${new Date(m.keyLastUsedAt).toLocaleString()}` : ', not used yet'}</Fact>
-          <Fact label="Usage">{m.conversations} conversations · {m.questions} questions · {m.llmCalls} AI answers (≈ ${m.estimatedCostUsd.toFixed(4)})</Fact>
+          <Fact label="Usage">{m.conversations} conversations · {m.questions} questions · {m.llmCalls} AI answers (≈ {usd(m.estimatedCostUsd)}) · {m.cacheHits} from cache</Fact>
+          <Fact label="Support · Sales">
+            {m.byBot.support.aiAnswers} answers, {usd(m.byBot.support.costUsd)} · {m.byBot.sales.aiAnswers} answers, {usd(m.byBot.sales.costUsd)}
+          </Fact>
         </dl>
       </Card>
 

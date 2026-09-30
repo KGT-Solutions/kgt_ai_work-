@@ -111,6 +111,9 @@ function workspace(base, auth) {
     createApiKey: (label) => r('/api-keys', { method: 'POST', body: { label } }),
     revokeApiKey: (keyId, { force = false } = {}) => r(`/api-keys/${enc(keyId)}${force ? '?force=true' : ''}`, { method: 'DELETE' }),
     chat: (payload) => r('/chat', { method: 'POST', body: payload }),
+    // Starter questions written from this tenant's documents: { status, supportFaqs, salesFaqs, generatedAt }
+    getFaqs: () => r('/faqs'),
+    regenerateFaqs: () => r('/faqs/regenerate', { method: 'POST' }),
     listTickets: () => r('/tickets'),
     getUsage: () => r('/usage'),
     getDailyUsage: (days = 30) => r(`/usage/daily?days=${days}`)
@@ -120,5 +123,11 @@ function workspace(base, auth) {
 export const clientWorkspace = () => workspace('/api/v1/client/workspace', 'client');
 export const staffWorkspace = (tenantId) => workspace(`/api/v1/tenants/${enc(tenantId)}`, 'operator');
 
-export const embedSnippet = (slug, apiKey) =>
-  `<script src="${BASE_URL}/widgets/tenant-chat-widget.js" data-tenant-id="${slug}" data-api-key="${apiKey}" defer></script>`;
+// Stand-in for the key in snippets shown after the real key is gone (keys
+// are stored hashed and can't be read back).
+export const API_KEY_PLACEHOLDER = 'YOUR_API_KEY';
+
+// bot: 'sales' | 'support' — the widget sends it as botType on every message
+// (public/widgets/tenant-chat-widget.js). Without it the widget shows both bots.
+export const embedSnippet = (slug, apiKey, bot) =>
+  `<script src="${BASE_URL}/widgets/tenant-chat-widget.js"\n        data-tenant-id="${slug}"\n        data-api-key="${apiKey || API_KEY_PLACEHOLDER}"${bot ? `\n        data-bot="${bot}"` : ''}\n        defer></script>`;

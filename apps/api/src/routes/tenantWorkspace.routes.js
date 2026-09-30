@@ -9,6 +9,8 @@ const { parseCategory, suggestCategory } = require('../services/shared/documentC
 const { crawlConsentRecord, hostOf } = require('../services/shared/crawlConsent');
 const { createIpRateLimiter } = require('../utils/ipRateLimit');
 const { handleChat } = require('../services/tenantChat');
+const { scheduleFaqGeneration, isFaqGenerationRunning } = require('../services/tenantFaqs');
+const { usageBreakdowns } = require('../services/usageStats');
 const { wrapRouterAsync } = require('../utils/wrapAsync');
 
 // Everything one tenant can do with its own bots: documents, PDF upload,
@@ -33,6 +35,8 @@ const MAX_DOCUMENTS_PER_TENANT = 500;
 
 // Website imports from client dashboards: a few per hour per tenant.
 const isClientCrawlLimited = createIpRateLimiter({ max: 5, windowMs: 60 * 60 * 1000 });
+// Manual starter-FAQ refreshes: each one is an LLM call, so a few per hour per tenant.
+const isFaqRegenLimited = createIpRateLimiter({ max: 5, windowMs: 60 * 60 * 1000 });
 
 // ── PDF upload (same parser and 10MB limit as the signup wizard)
 const MAX_PDF_BYTES = 10 * 1024 * 1024;
@@ -121,6 +125,7 @@ router.post('/documents/pdf', pdfUploadMiddleware, async (req, res) => {
   }));
   await prisma.tenantDocument.createMany({ data: docs });
   invalidateTenantKnowledge(req.tenant.id);
+  scheduleFaqGeneration(req.tenant.id); // new content -> fresh sandbox starter questions
 
   res.status(201).json({
     fileName: req.file.originalname,
@@ -215,6 +220,7 @@ router.post('/scrape', async (req, res) => {
     })));
   });
   invalidateTenantKnowledge(req.tenant.id);
+  scheduleFaqGeneration(req.tenant.id);
 
   res.status(201).json({
     message:
@@ -226,6 +232,44 @@ router.post('/scrape', async (req, res) => {
     rendered: result.rendered,
     documents: created
   });
+});
+
+// ── Starter FAQs: questions generated from this tenant's own documents
+// (services/tenantFaqs.js), shown as one-click chips in the Test Bots sandbox.
+// status: none (no documents yet) | pending | ready | failed. After a failed
+// refresh the previous questions, if any, are still returned.
+router.get('/faqs', async (req, res) => {
+  const row = await prisma.tenantFaq.findUnique({ where: { tenantId: req.tenant.id } });
+  let status = row?.status || 'none';
+
+  // No row yet (a tenant from before this feature, or one whose only content
+  // was typed in by hand), or a run lost to a restart: start one now.
+  const stale = status === 'pending' && !isFaqGenerationRunning(req.tenant.id);
+  if ((status === 'none' || stale) && await prisma.tenantDocument.count({ where: { tenantId: req.tenant.id } })) {
+    scheduleFaqGeneration(req.tenant.id);
+    status = 'pending';
+  }
+
+  res.json({
+    status,
+    supportFaqs: row?.supportFaqs || [],
+    salesFaqs: row?.salesFaqs || [],
+    generatedAt: row?.generatedAt || null,
+    // The failure reason names providers and config: staff only.
+    ...(req.actor === 'operator' && row?.error ? { error: row.error } : {})
+  });
+});
+
+router.post('/faqs/regenerate', async (req, res) => {
+  if (isFaqGenerationRunning(req.tenant.id)) return res.status(202).json({ status: 'pending' });
+  if (!(await prisma.tenantDocument.count({ where: { tenantId: req.tenant.id } }))) {
+    return res.status(409).json({ error: 'Add a document or import a website first — questions are written from your content.' });
+  }
+  if (isFaqRegenLimited(req.tenant.id)) {
+    return res.status(429).json({ error: 'Suggested questions were refreshed several times recently. Please try again in an hour.' });
+  }
+  scheduleFaqGeneration(req.tenant.id);
+  res.status(202).json({ status: 'pending' });
 });
 
 // ── API keys. Plaintext is returned only by the POST that issues a key;
@@ -281,29 +325,34 @@ router.get('/tickets', async (req, res) => {
   }));
 });
 
+// All-time totals plus the per-bot breakdown (services/usageStats.js):
+// byBot.support / byBot.sales / byBot.other, each with questions, AI answers,
+// cache hits, tokens, cost, cache savings and 7-day burn.
 router.get('/usage', async (req, res) => {
-  const [llm, conversations, messages] = await Promise.all([
-    prisma.usageLog.aggregate({
-      where: { tenantId: req.tenant.id },
-      _count: { _all: true },
-      _sum: { promptTokens: true, completionTokens: true, estimatedCostUsd: true }
-    }),
-    prisma.chatSession.count({ where: { tenantId: req.tenant.id } }),
-    prisma.chatMessage.count({ where: { role: 'user', session: { tenantId: req.tenant.id } } })
+  const [breakdownFor, conversations] = await Promise.all([
+    usageBreakdowns([req.tenant.id]),
+    prisma.chatSession.count({ where: { tenantId: req.tenant.id } })
   ]);
+  const { totals, ...byBot } = breakdownFor(req.tenant.id);
   res.json({
-    calls: llm._count._all,
-    promptTokens: llm._sum.promptTokens || 0,
-    completionTokens: llm._sum.completionTokens || 0,
-    estimatedCostUsd: llm._sum.estimatedCostUsd || 0,
+    calls: totals.aiAnswers, // real LLM calls; cache hits are counted separately
+    cacheHits: totals.cacheHits,
+    cacheHitRate: totals.cacheHitRate,
+    promptTokens: totals.promptTokens,
+    completionTokens: totals.completionTokens,
+    estimatedCostUsd: totals.costUsd,
+    savedTokens: totals.savedTokens,
+    savedCostUsd: totals.savedCostUsd,
     conversations,
-    questions: messages
+    questions: totals.questions,
+    byBot
   });
 });
 
 // GET /usage/daily?days=30 — one row per UTC day (7–90 days, oldest first),
 // zero-filled so charts have no gaps: questions asked, conversations started,
-// AI answers generated, tokens used, and tickets filed.
+// AI answers generated (real LLM calls), cache hits, tokens used, and
+// tickets filed — plus the answers, tokens and cost for each bot.
 router.get('/usage/daily', async (req, res) => {
   const days = Math.min(90, Math.max(7, Number.parseInt(req.query.days, 10) || 30));
   const tenantId = req.tenant.id;
@@ -317,14 +366,26 @@ router.get('/usage/daily', async (req, res) => {
           WHERE s."tenantId" = ${tenantId} AND m.role = 'user' GROUP BY 1),
     c AS (SELECT ("startedAt" AT TIME ZONE 'UTC')::date AS day, COUNT(*)::int AS n
           FROM "ChatSession" WHERE "tenantId" = ${tenantId} GROUP BY 1),
-    u AS (SELECT ("createdAt" AT TIME ZONE 'UTC')::date AS day, COUNT(*)::int AS n,
-                 SUM("promptTokens" + "completionTokens")::int AS tokens
+    u AS (SELECT ("createdAt" AT TIME ZONE 'UTC')::date AS day,
+                 COUNT(*) FILTER (WHERE NOT "cacheHit")::int AS n,
+                 COUNT(*) FILTER (WHERE "cacheHit")::int AS hits,
+                 SUM("promptTokens" + "completionTokens")::int AS tokens,
+                 COUNT(*) FILTER (WHERE NOT "cacheHit" AND "botType" = 'support')::int AS support_n,
+                 COUNT(*) FILTER (WHERE NOT "cacheHit" AND "botType" = 'sales')::int AS sales_n,
+                 COALESCE(SUM("promptTokens" + "completionTokens") FILTER (WHERE "botType" = 'support'), 0)::int AS support_tokens,
+                 COALESCE(SUM("promptTokens" + "completionTokens") FILTER (WHERE "botType" = 'sales'), 0)::int AS sales_tokens,
+                 COALESCE(SUM("estimatedCostUsd") FILTER (WHERE "botType" = 'support'), 0)::float AS support_cost,
+                 COALESCE(SUM("estimatedCostUsd") FILTER (WHERE "botType" = 'sales'), 0)::float AS sales_cost
           FROM "UsageLog" WHERE "tenantId" = ${tenantId} GROUP BY 1),
     t AS (SELECT ("createdAt" AT TIME ZONE 'UTC')::date AS day, COUNT(*)::int AS n
           FROM "SupportTicket" WHERE "tenantId" = ${tenantId} GROUP BY 1)
     SELECT to_char(d.day, 'YYYY-MM-DD') AS date,
            COALESCE(q.n, 0) AS questions, COALESCE(c.n, 0) AS conversations,
-           COALESCE(u.n, 0) AS "aiAnswers", COALESCE(u.tokens, 0) AS tokens, COALESCE(t.n, 0) AS tickets
+           COALESCE(u.n, 0) AS "aiAnswers", COALESCE(u.hits, 0) AS "cacheHits",
+           COALESCE(u.tokens, 0) AS tokens, COALESCE(t.n, 0) AS tickets,
+           COALESCE(u.support_n, 0) AS "supportAnswers", COALESCE(u.sales_n, 0) AS "salesAnswers",
+           COALESCE(u.support_tokens, 0) AS "supportTokens", COALESCE(u.sales_tokens, 0) AS "salesTokens",
+           COALESCE(u.support_cost, 0) AS "supportCostUsd", COALESCE(u.sales_cost, 0) AS "salesCostUsd"
     FROM d LEFT JOIN q USING (day) LEFT JOIN c USING (day) LEFT JOIN u USING (day) LEFT JOIN t USING (day)
     ORDER BY d.day`;
   res.json({ days, series: rows });

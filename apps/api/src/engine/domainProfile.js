@@ -19,7 +19,9 @@
 // @property {(ctx: object) => Promise<array>} [resolveKnowledge] - alternative to knowledgeBasePath: DB-backed (or any other dynamic) chunk source
 // @property {number} [minConfidence] - 0-1 gate on top of minScore (Pillar 4); unset = old zero-chunks-only gate, unchanged behavior
 // @property {boolean} [ticketing] - file a SupportTicket (engine/ticketing.js) when the gate fails or the model can't answer; requires ctx.tenantId
-// @property {boolean} [usageTracking] - log a UsageLog (engine/usageTracking.js) on every real LLM call; requires ctx.tenantId
+// @property {boolean} [usageTracking] - log a UsageLog (engine/usageTracking.js) on every real LLM call and cache hit; requires ctx.tenantId
+// @property {'support'|'sales'} [botType] - which bot this profile is; recorded on UsageLog rows and part of the answer-cache key
+// @property {boolean} [answerCache] - re-use a recent answer to the same question (engine/answerCache.js); requires botType and ctx.tenantId
 // @property {(ctx: object) => object} formatFallback            - out-of-scope / gate-failed response shape
 // @property {(rawAnswer: string, rankedChunks: array, ctx: object) => object} formatSuccess
 //   NOTE: rankedChunks is [] when the result came from an action handler

@@ -20,6 +20,24 @@ const isTenantRateLimited = createIpRateLimiter({
   windowMs: Number(process.env.TENANT_CHAT_RATE_LIMIT_WINDOW_MIN || 10) * 60 * 1000
 });
 
+const BOT_TYPES = Object.keys(BOT_PROFILE_FACTORIES);
+
+/**
+ * Which bot a request is for. Accepts botType, or bot (the widget's
+ * data-bot attribute name), case-insensitively; omitted means support.
+ * An unrecognised value is an error rather than a silent fallback, so a
+ * pricing page with a typo in its snippet doesn't quietly get the support persona.
+ * @returns {{ ok: true, value: string } | { ok: false, error: string }}
+ */
+function parseBotType(body) {
+  const raw = body?.botType ?? body?.bot;
+  if (raw === undefined || raw === null || raw === '') return { ok: true, value: 'support' };
+  const value = String(raw).trim().toLowerCase();
+  return BOT_TYPES.includes(value)
+    ? { ok: true, value }
+    : { ok: false, error: `botType must be one of: ${BOT_TYPES.join(', ')}` };
+}
+
 class ChatRequestError extends Error {
   constructor(message, statusCode) {
     super(message);
@@ -28,8 +46,8 @@ class ChatRequestError extends Error {
 }
 
 /**
- * @param {{ tenant: object, body: object }} args  body: { query, botType?, sessionId?, externalUserId? }
- * @returns {Promise<object>} the bot's result plus sessionId
+ * @param {{ tenant: object, body: object }} args  body: { query, botType? (or bot), sessionId?, externalUserId? }
+ * @returns {Promise<object>} the bot's result plus sessionId and the botType that answered
  * @throws {ChatRequestError} for invalid input (400) or rate limiting (429)
  */
 async function runTenantChat({ tenant, body }) {
@@ -39,7 +57,9 @@ async function runTenantChat({ tenant, body }) {
 
   // Same tenant, same knowledge base, different persona/gating per bot —
   // see domains/tenantProfile.js. Defaults to support.
-  const botType = ['support', 'sales'].includes(body?.botType) ? body.botType : 'support';
+  const bot = parseBotType(body);
+  if (!bot.ok) throw new ChatRequestError(bot.error, 400);
+  const botType = bot.value;
 
   if (isTenantRateLimited(tenant.id)) {
     throw new ChatRequestError('Too many chat requests. Please wait a few minutes and try again.', 429);
@@ -69,12 +89,12 @@ async function runTenantChat({ tenant, body }) {
 
   await prisma.chatMessage.createMany({
     data: [
-      { sessionId: session.id, role: 'user', content: query },
-      { sessionId: session.id, role: 'assistant', content: result.answer, confidence: result.confidence ?? null }
+      { sessionId: session.id, role: 'user', content: query, botType },
+      { sessionId: session.id, role: 'assistant', content: result.answer, confidence: result.confidence ?? null, botType }
     ]
   });
 
-  return { ...result, sessionId: session.id };
+  return { ...result, sessionId: session.id, botType };
 }
 
 // Express helper: run a turn and map input errors to their status codes.
@@ -87,4 +107,4 @@ async function handleChat(req, res, next) {
   }
 }
 
-module.exports = { runTenantChat, handleChat, ChatRequestError, MAX_QUERY_LEN };
+module.exports = { runTenantChat, handleChat, parseBotType, ChatRequestError, MAX_QUERY_LEN, BOT_TYPES };

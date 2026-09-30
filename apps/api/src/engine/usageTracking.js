@@ -20,26 +20,56 @@ function estimateCostUsd(model, usage) {
   return (usage.promptTokens / 1000) * rate.prompt + (usage.completionTokens / 1000) * rate.completion;
 }
 
-/**
- * @param {{ profile: object, ctx: object, provider: string, model: string, usage: { promptTokens: number, completionTokens: number } }} params
- */
-async function logUsage({ ctx, provider, model, usage }) {
-  if (!ctx.tenantId) return null; // usage tracking requires a tenant to bill against
+const BOT_TYPES = ['support', 'sales'];
+const botTypeOrNull = (botType) => (BOT_TYPES.includes(botType) ? botType : null);
+
+async function writeUsage(data) {
   try {
-    return await prisma.usageLog.create({
-      data: {
-        tenantId: ctx.tenantId,
-        provider,
-        model,
-        promptTokens: usage.promptTokens,
-        completionTokens: usage.completionTokens,
-        estimatedCostUsd: estimateCostUsd(model, usage)
-      }
-    });
+    return await prisma.usageLog.create({ data });
   } catch (err) {
     console.error('[usageTracking] logUsage failed:', err.message);
     return null; // never let logging failure break the chat response
   }
 }
 
-module.exports = { logUsage, estimateCostUsd };
+/**
+ * One real LLM call.
+ * @param {{ ctx: object, provider: string, model: string, usage: { promptTokens: number, completionTokens: number }, botType?: string }} params
+ *   botType: 'support' | 'sales' for a chat answer; omitted for platform work (e.g. starter FAQs).
+ */
+async function logUsage({ ctx, provider, model, usage, botType }) {
+  if (!ctx.tenantId) return null; // usage tracking requires a tenant to bill against
+  return writeUsage({
+    tenantId: ctx.tenantId,
+    botType: botTypeOrNull(botType),
+    provider,
+    model,
+    promptTokens: usage.promptTokens,
+    completionTokens: usage.completionTokens,
+    estimatedCostUsd: estimateCostUsd(model, usage)
+  });
+}
+
+/**
+ * An answer served from the answer cache: 0 tokens and $0 spent, with the
+ * original call's tokens and cost recorded as saved.
+ * @param {{ ctx: object, botType: string, model: string, usage: { promptTokens: number, completionTokens: number } }} params
+ *   model/usage: those of the call that produced the cached answer.
+ */
+async function logCacheHit({ ctx, botType, model, usage }) {
+  if (!ctx.tenantId) return null;
+  return writeUsage({
+    tenantId: ctx.tenantId,
+    botType: botTypeOrNull(botType),
+    provider: 'cache',
+    model,
+    promptTokens: 0,
+    completionTokens: 0,
+    estimatedCostUsd: 0,
+    cacheHit: true,
+    savedTokens: (usage.promptTokens || 0) + (usage.completionTokens || 0),
+    savedCostUsd: estimateCostUsd(model, usage)
+  });
+}
+
+module.exports = { logUsage, logCacheHit, estimateCostUsd };
