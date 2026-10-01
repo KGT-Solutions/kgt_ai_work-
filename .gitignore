@@ -89,3 +89,7 @@ backup_*.sql
 *.sql
 # ...but Prisma migrations are schema, not data, and must be committed.
 !apps/api/prisma/migrations/*/migration.sql
+
+# Local tunnel/widget experiments — never commit (test pages embed live API keys)
+*.deb
+/test.html
