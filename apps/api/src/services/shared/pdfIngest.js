@@ -330,7 +330,21 @@ function titleFromFilename(filename) {
 async function pdfToDocuments(buffer, filename) {
   if (!isPdfBuffer(buffer)) throw new PdfIngestError('That file is not a PDF', 400);
 
-  const extracted = await extractPdfLines(buffer);
+  // pdf.js already skips damaged pages on its own (an unreadable stream, a
+  // missing object); this only catches a failure it doesn't anticipate, so
+  // the caller still gets a clear message instead of a 500.
+  let extracted;
+  try {
+    extracted = await extractPdfLines(buffer);
+  } catch (err) {
+    if (err instanceof PdfIngestError) throw err;
+    console.error('[pdfIngest] unexpected pdf.js failure:', err);
+    throw new PdfIngestError(
+      'That PDF could not be read — it may be damaged or saved in an unusual format. ' +
+        'Try re-saving it (File > Print > Save as PDF) and uploading it again.',
+      422
+    );
+  }
   const title = (extracted.title && extracted.title.length <= 120 ? extracted.title : '') || titleFromFilename(filename);
   const sections = linesToSections(extracted.pages, title);
   if (!sections.length) {

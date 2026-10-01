@@ -7,8 +7,14 @@
 
 const RESEND_URL = 'https://api.resend.com/emails';
 
+// Sender address. EMAIL_FROM is accepted too: it's the name this project's
+// older .env files use, and with only that set no mail was ever sent.
+function mailFrom() {
+  return String(process.env.MAIL_FROM || process.env.EMAIL_FROM || '').trim();
+}
+
 function mailConfigured() {
-  return !!(String(process.env.RESEND_API_KEY || '').trim() && String(process.env.MAIL_FROM || '').trim());
+  return !!(String(process.env.RESEND_API_KEY || '').trim() && mailFrom());
 }
 
 /**
@@ -25,7 +31,7 @@ async function sendMail({ to, subject, text, html, devSummary }) {
           authorization: `Bearer ${process.env.RESEND_API_KEY.trim()}`,
           'content-type': 'application/json'
         },
-        body: JSON.stringify({ from: process.env.MAIL_FROM.trim(), to: [to], subject, text, ...(html ? { html } : {}) })
+        body: JSON.stringify({ from: mailFrom(), to: [to], subject, text, ...(html ? { html } : {}) })
       });
       if (!res.ok) {
         const body = await res.text().catch(() => '');
@@ -40,11 +46,11 @@ async function sendMail({ to, subject, text, html, devSummary }) {
   }
 
   if (process.env.DEPLOY_ENV === 'production') {
-    console.error('[mailer] RESEND_API_KEY / MAIL_FROM not set — email not sent.');
+    console.error('[mailer] RESEND_API_KEY / MAIL_FROM (or EMAIL_FROM) not set — email not sent.');
     return { sent: false, via: 'none', error: 'Email is not configured' };
   }
   console.log(`[mailer:dev] to=${to} subject="${subject}" ${devSummary || text}`);
   return { sent: true, via: 'dev-log' };
 }
 
-module.exports = { sendMail, mailConfigured };
+module.exports = { sendMail, mailConfigured, mailFrom };

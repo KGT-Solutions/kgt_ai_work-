@@ -73,6 +73,12 @@ export default function DashboardShell({ audience, children }) {
     config.me()
       .then((s) => { if (alive) setSession(s); })
       .catch((err) => {
+        // Only a rejected session signs the user out. A network failure or
+        // server error (the API restarting) keeps the token: reloading works.
+        if (err.status !== 401 && err.status !== 403) {
+          toast.error(`${err.message} Reload the page to retry.`);
+          return;
+        }
         if (err.status === 403) toast.error(err.message);
         setToken(config.tokenKind, null);
         router.replace(`${config.loginPath}?next=${encodeURIComponent(router.asPath)}`);

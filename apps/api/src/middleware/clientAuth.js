@@ -28,8 +28,10 @@ async function requireClient(req, res, next) {
     });
     if (!user) return res.status(401).json({ error: 'Invalid token' });
     // Issued before the last password change (a reset elsewhere): sign in again.
-    // JWT iat has 1-second resolution, so compare in whole seconds.
-    if (user.passwordChangedAt && claims.iat < Math.floor(user.passwordChangedAt.getTime() / 1000)) {
+    // JWT iat has 1-second resolution, so compare in whole seconds — and a
+    // token from the reset's own second counts as before it, so no session
+    // can slip through by being minted in the same second.
+    if (user.passwordChangedAt && claims.iat <= Math.floor(user.passwordChangedAt.getTime() / 1000)) {
       return res.status(401).json({ error: 'Your password was changed — please sign in again.' });
     }
     if (!user.tenant.active) {

@@ -164,6 +164,25 @@ describe('pdfIngest: pdfToDocuments (real pdf.js extraction)', () => {
     });
   });
 
+  test('a damaged page is skipped and the rest of the PDF still imports', async () => {
+    const body = (topic) => `${topic} details: residents raise requests in the app and the office resolves them within two working days.`;
+    const healthy = makePdf([
+      page(['Getting started', 18], [body('Getting started')]),
+      page(['Billing', 18], [body('Billing')]),
+      page(['Complaints', 18], [body('Complaints')])
+    ]).toString('latin1');
+    // Page 2's content (object 6) now points at the catalog, which isn't a stream.
+    // Same byte length, so every xref offset stays valid.
+    const damaged = Buffer.from(healthy.replace('/Contents 6 0 R', '/Contents 1 0 R'), 'latin1');
+    assert.notEqual(damaged.toString('latin1'), healthy);
+
+    const result = await pdfToDocuments(damaged, 'manual.pdf');
+    const text = result.pages.map((p) => p.markdown).join('\n');
+    assert.match(text, /## Getting started/);
+    assert.match(text, /## Complaints/);
+    assert.doesNotMatch(text, /Billing details/);
+  });
+
   test('rejects a non-PDF buffer before touching pdf.js', async () => {
     assert.equal(isPdfBuffer(Buffer.from('hello')), false);
     await assert.rejects(() => pdfToDocuments(Buffer.from('<html>not a pdf</html>'), 'x.pdf'), PdfIngestError);

@@ -125,14 +125,19 @@ router.post('/password/verify', async (req, res) => {
     orderBy: { createdAt: 'desc' }
   });
   if (!pending) return res.status(400).json(INVALID);
-  if (pending.attempts >= MAX_CODE_ATTEMPTS) {
+  // Claim one of the code's attempts BEFORE comparing, in a single
+  // conditional update. Reading the count and incrementing afterwards let
+  // guesses sent in parallel all see the same count and all be checked —
+  // far more than MAX_CODE_ATTEMPTS against one code.
+  const { count: claimed } = await prisma.passwordResetCode.updateMany({
+    where: { id: pending.id, attempts: { lt: MAX_CODE_ATTEMPTS } },
+    data: { attempts: { increment: 1 } }
+  });
+  if (!claimed) {
     return res.status(429).json({ error: 'Too many wrong codes. Request a new code.' });
   }
   if (!sameHash(pending.codeHash, hashCode(user.id, code))) {
-    const { attempts } = await prisma.passwordResetCode.update({
-      where: { id: pending.id }, data: { attempts: { increment: 1 } }, select: { attempts: true }
-    });
-    const left = MAX_CODE_ATTEMPTS - attempts;
+    const left = Math.max(0, MAX_CODE_ATTEMPTS - (pending.attempts + 1));
     return res.status(400).json({
       error: left > 0 ? `That code isn't right. ${left} attempt${left === 1 ? '' : 's'} left.` : 'Too many wrong codes. Request a new code.'
     });

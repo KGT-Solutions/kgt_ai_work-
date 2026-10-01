@@ -25,12 +25,32 @@ export function setToken(kind, token) {
   }
 }
 
+// What to say when a failed response has no JSON { error } from the API:
+// it came from something in between (a proxy or tunnel) or the API is down.
+function fallbackMessage(status) {
+  if (status === 413) return 'That upload is too large for the server to accept. Try a smaller file.';
+  if (status === 429) return 'Too many requests. Please wait a minute and try again.';
+  if ([502, 503, 504, 522, 524].includes(status)) {
+    return 'The server took too long to respond or is unavailable. Please try again in a moment.';
+  }
+  return `Something went wrong (HTTP ${status}). Please try again.`;
+}
+
 async function send(path, init) {
-  const res = await fetch(`${BASE_URL}${path}`, init);
+  let res;
+  try {
+    res = await fetch(`${BASE_URL}${path}`, init);
+  } catch {
+    // The browser's own "Failed to fetch": no response could be read at all
+    // (offline, server down or restarting, or a response blocked by CORS).
+    const err = new Error("Couldn't reach the server. Check your connection and try again — if it keeps happening, the server may be restarting.");
+    err.status = 0;
+    throw err;
+  }
   if (res.status === 204) return null;
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const err = new Error(data.error || 'Request failed');
+    const err = new Error(data.error || fallbackMessage(res.status));
     err.status = res.status;
     throw err;
   }

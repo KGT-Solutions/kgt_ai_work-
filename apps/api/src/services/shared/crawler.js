@@ -27,7 +27,17 @@ const TOTAL_BUDGET_MS = 30000;
 const CONCURRENCY = 3;
 const MAX_REDIRECTS = 3;
 const MIN_WORDS_PER_PAGE = 30; // below this, treat as a stub/redirect page, not real content
-const USER_AGENT = 'KGTAIHubBot/1.0';
+// The conventional form for an honest crawler ("Mozilla/5.0 (compatible;
+// <bot>)", like Googlebot's): many CDNs reject any user agent that doesn't
+// start with Mozilla/5.0, while this one still names the bot. It never
+// pretends to be a browser — sites that deliberately block bots stay
+// blocked, and crawlSite says so (see describeStartFailure).
+const USER_AGENT = 'Mozilla/5.0 (compatible; KGTAIHubBot/1.0)';
+const REQUEST_HEADERS = {
+  'user-agent': USER_AGENT,
+  accept: 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.5',
+  'accept-language': 'en-US,en;q=0.9'
+};
 
 // Same-domain links whose href/anchor text mention these are crawled before
 // any other discovered link — the pages the prospect's admin actually wants
@@ -190,13 +200,15 @@ async function fetchSafe(urlString, { timeoutMs = PER_REQUEST_TIMEOUT_MS } = {})
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     let res;
     try {
-      res = await fetch(current.toString(), {
-        redirect: 'manual',
-        signal: controller.signal,
-        headers: { 'user-agent': USER_AGENT, accept: 'text/html,application/xhtml+xml' }
-      });
+      res = await fetch(current.toString(), { redirect: 'manual', signal: controller.signal, headers: REQUEST_HEADERS });
     } catch (err) {
-      throw new CrawlerError(`Could not reach ${current.hostname}: ${err.message}`, 502);
+      const timedOut = controller.signal.aborted;
+      const failure = new CrawlerError(
+        timedOut ? `${current.hostname} did not respond within ${timeoutMs / 1000} seconds` : `Could not reach ${current.hostname}: ${err.message}`,
+        502
+      );
+      failure.kind = timedOut ? 'timeout' : 'unreachable'; // read by describeStartFailure
+      throw failure;
     } finally {
       clearTimeout(timer);
     }
@@ -397,6 +409,29 @@ function siteKey(hostname) {
  *   crawled: number, skipped: number, rendered: number, baseHost: string
  * }>}
  */
+const PDF_HINT = 'Upload a PDF of the content or add it as a document instead.';
+
+/**
+ * The user-facing reason a crawl found nothing, from what happened to its
+ * start page. Pure, so it's tested directly.
+ * @param {string} host
+ * @param {{ failure?: { httpStatus?: number, kind?: string } | null, outcome?: 'thin'|'offsite'|null, usedBrowser?: boolean }} info
+ */
+function describeStartFailure(host, { failure = null, outcome = null, usedBrowser = false } = {}) {
+  const status = failure?.httpStatus;
+  if (status === 429) return `${host} is limiting automated requests right now (HTTP 429). Try again in a few minutes. ${PDF_HINT}`;
+  if ([401, 403, 406, 503].includes(status)) return `${host} blocks automated readers (HTTP ${status}), so its pages can't be imported. ${PDF_HINT}`;
+  if (status === 404 || status === 410) return `That page wasn't found on ${host} (HTTP ${status}). Check the address and try again.`;
+  if (status >= 500) return `${host} returned a server error (HTTP ${status}). Try again later. ${PDF_HINT}`;
+  if (failure?.kind === 'timeout') return `${host} took too long to respond. Try again later. ${PDF_HINT}`;
+  if (failure?.kind === 'unreachable') return `Couldn't connect to ${host}. Check the address and try again. ${PDF_HINT}`;
+  if (outcome === 'offsite') return `${host} redirects to a different website, so there was nothing on it to import. Enter the address it redirects to instead.`;
+  if (outcome === 'thin' && !usedBrowser) {
+    return `${host} builds its pages with JavaScript, so there was no readable text to import. ${PDF_HINT}`;
+  }
+  return `No readable content could be extracted from ${host}. ${PDF_HINT}`;
+}
+
 async function crawlSite(baseUrlString, opts = {}) {
   const maxPages = Math.max(1, Math.min(opts.maxPages || MAX_PAGES, MAX_PAGES));
   const maxDepth = Math.max(0, Math.min(opts.maxDepth ?? MAX_DEPTH, MAX_DEPTH));
@@ -427,6 +462,22 @@ async function crawlSite(baseUrlString, opts = {}) {
 
   const sameSite = (urlObj) => siteKey(urlObj.hostname) === siteKey(base.hostname);
 
+  // Why the start page gave nothing, for the error if the whole crawl does.
+  let startFailure = null; // the CrawlerError from fetching it
+  let startOutcome = null; // 'thin' | 'offsite' when it loaded but couldn't be used
+
+  // The start page gets one retry after a dropped connection or a gateway
+  // error (a cold server, a CDN hiccup): it's the one page every crawl needs.
+  async function fetchPage(item) {
+    try {
+      return await fetchSafe(item.url.toString());
+    } catch (err) {
+      const transient = err.kind === 'unreachable' || err.httpStatus === 502 || err.httpStatus === 504;
+      if (item.depth !== 0 || !transient || deadline - Date.now() < PER_REQUEST_TIMEOUT_MS) throw err;
+      return fetchSafe(item.url.toString());
+    }
+  }
+
   async function tryRender(item) {
     if (!renderer || rendersStarted >= MAX_RENDERS_PER_CRAWL) return null;
     const timeoutMs = Math.min(15000, deadline - Date.now());
@@ -452,10 +503,11 @@ async function crawlSite(baseUrlString, opts = {}) {
 
     let staticResult = null;
     try {
-      const fetched = await fetchSafe(item.url.toString());
+      const fetched = await fetchPage(item);
       if (!fetched) return null; // non-HTML content-type — a browser won't make it a page
       staticResult = { item, page: extractPage(fetched.html, fetched.finalUrl), finalUrl: fetched.finalUrl, rendered: false };
     } catch (err) {
+      if (item.depth === 0) startFailure = err;
       // Only an HTTP-level block is worth a browser retry; SSRF refusals,
       // DNS failures, 404s and timeouts are not.
       if (!BROWSER_RETRY_STATUSES.has(err.httpStatus)) return renderedResult;
@@ -507,6 +559,7 @@ async function crawlSite(baseUrlString, opts = {}) {
       // this site, and not a page already saved under another link (e.g.
       // "/" and "/en" both landing on "/en").
       if (!sameSite(finalUrl) || savedUrls.has(dedupeKey(finalUrl))) {
+        if (item.depth === 0 && !sameSite(finalUrl)) startOutcome = 'offsite';
         skipped += 1;
         continue;
       }
@@ -516,6 +569,7 @@ async function crawlSite(baseUrlString, opts = {}) {
         pages.push({ title: page.title, markdown: page.markdown, url: finalUrl.toString(), rendered });
         if (rendered) renderedCount += 1;
       } else {
+        if (item.depth === 0) startOutcome = 'thin';
         skipped += 1;
       }
 
@@ -539,12 +593,15 @@ async function crawlSite(baseUrlString, opts = {}) {
   }
 
   if (!pages.length) {
-    throw new CrawlerError('No readable content could be extracted from that site', 422);
+    throw new CrawlerError(
+      describeStartFailure(base.hostname, { failure: startFailure, outcome: startOutcome, usedBrowser: !!renderer }),
+      422
+    );
   }
 
   return { pages, crawled: pages.length, skipped, rendered: renderedCount, baseHost: base.hostname };
 }
 
 module.exports = {
-  crawlSite, CrawlerError, extractPage, isPrivateIPv4, isPrivateIPv6, isBoilerplateLine, assertPublicHost, MIN_WORDS_PER_PAGE
+  crawlSite, CrawlerError, extractPage, isPrivateIPv4, isPrivateIPv6, isBoilerplateLine, assertPublicHost, describeStartFailure, MIN_WORDS_PER_PAGE
 };
