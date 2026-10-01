@@ -27,7 +27,7 @@ model Tenant {
   name              String
   industryLabel     String   // e.g. "Retail Customer Support", "IT Helpdesk" — shown to the model as its role
   persona           String?  // optional extra tone/rules text layered onto the generic template
-  outOfScopeMessage String   @default("I don't have this info yet. Let me connect you with support.")
+  outOfScopeMessage String   @default("I'm your dedicated assistant here, and I want to make sure you get the very best care for this particular request. Would you like me to drop a quick note for our team so they can follow up with you directly?")
   minConfidence     Float    @default(0.30)
   active            Boolean  @default(true)
   signupEmail       String?  // set when provisioned via the public self-serve wizard; null for an admin-created tenant
@@ -193,13 +193,20 @@ model SupportTicket {
   id         String   @id @default(uuid())
   tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   tenantId   String
-  query      String
-  transcript Json     // recent turns, for whoever picks this up
-  confidence Float    // the score that failed the gate
-  status     String   @default("open")
-  createdAt  DateTime @default(now())
+  query        String
+  transcript   Json     // recent turns, for whoever picks this up
+  confidence   Float?   // the score below the handoff threshold; null for requests (demo, human, contact)
+  // unanswered | outage | human_request | demo_request | contact_request
+  // (CHECK constraint in migration 20261002120000_conversational_handoffs)
+  kind         String   @default("unanswered")
+  botType      String?  // support | sales
+  sessionId    String?  // the conversation, so an email left later attaches here
+  contactEmail String?  // left by the visitor in the chat
+  status       String   @default("open")
+  createdAt    DateTime @default(now())
 
   @@index([tenantId, status])
+  @@index([tenantId, sessionId])
 }
 
 // One row per answer that would have cost an LLM call: a real call, or a

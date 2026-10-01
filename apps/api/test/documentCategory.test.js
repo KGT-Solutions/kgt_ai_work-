@@ -166,10 +166,15 @@ describe('tenant bots: category-weighted retrieval through the real engine', () 
     assert.equal(seen, computeConfidence('power button', raw));
   });
 
-  test('a question matching nothing never reaches the LLM — for sales too, which has no confidence gate', async () => {
+  test('a question matching nothing is never answered from documents — for sales too, which has no confidence gate', async () => {
     const result = await getEngineAnswer({ profile: createTenantSalesProfile(TENANT), query: 'zebra quantum saxophone', ctx: {} });
-    assert.equal(generateAnswerMock.mock.callCount(), 0);
-    assert.match(result.answer, /talk to our team/);
+    // At most the contextual can't-answer reply is written, and it never sees any excerpts.
+    assert.ok(generateAnswerMock.mock.callCount() <= 1);
+    for (const call of generateAnswerMock.mock.calls) {
+      assert.doesNotMatch(call.arguments[0].userPrompt, /KNOWLEDGE BASE EXCERPTS/);
+    }
+    assert.match(result.answer, /quick note for our team/i);
+    assert.equal(result.handoff, true);
   });
 });
 

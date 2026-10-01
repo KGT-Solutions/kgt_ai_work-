@@ -17,6 +17,7 @@ const { computeConfidence } = require('./confidence');
 const { fileSupportTicket } = require('./ticketing');
 const { logUsage, logCacheHit } = require('./usageTracking');
 const { answerCache } = require('./answerCache');
+const { composeBridgeReply } = require('./bridgeReply');
 const {
   generateAnswer,
   formatAttempts,
@@ -27,6 +28,7 @@ const {
 
 // Handoff threshold for profiles that set neither handoffBelow nor minConfidence.
 const DEFAULT_HANDOFF_BELOW = 0.3;
+const RESULT_FLAGS = ['handoff', 'awaitingContact', 'contactCaptured'];
 
 /**
  * @param {{ profile: import('./domainProfile').DomainProfile, query: string, ctx?: object }} params
@@ -39,6 +41,10 @@ async function getEngineAnswer({ profile, query, ctx = {} }) {
   const actionResult = await tryActions(profile, query, ctx);
   if (actionResult) {
     const result = profile.formatSuccess(actionResult.answer, [], { ...ctx, actionId: actionResult.actionId });
+    // Conversation-state flags an action can set (domains/handoffActions.js):
+    // handoff (a person will follow up), awaitingContact (the reply asks for
+    // an email), contactCaptured (one was just left).
+    for (const flag of RESULT_FLAGS) if (actionResult[flag]) result[flag] = true;
     await profile.onResult?.(result, query, ctx);
     return result;
   }
@@ -84,7 +90,16 @@ async function getEngineAnswer({ profile, query, ctx = {} }) {
 
   if (gateFailed) {
     const result = profile.formatFallback(ctx, confidence);
+    const bridge = await composeBridgeReply({ profile, query, ctx }); // contextual, or null for the fixed message
+    if (bridge) result.answer = bridge.text;
+    if (bridge?.offTopic) {
+      // Off-topic ("what's the capital of France?"): a kind redirect, not a
+      // knowledge gap — no handoff, no ticket.
+      await profile.onResult?.(result, query, ctx);
+      return result;
+    }
     result.handoff = true;
+    if (profile.ticketing) result.awaitingContact = true; // an email left next attaches to this ticket
     await profile.onResult?.(result, query, ctx);
     if (profile.ticketing) await fileSupportTicket({ profile, query, confidence, ctx });
     return result;
@@ -133,12 +148,19 @@ async function getEngineAnswer({ profile, query, ctx = {} }) {
     // so the bot asks for a rephrase instead of promising a person and filing
     // a ticket. That reply still carries the confidence, which tenantChat.js
     // stores on the ChatMessage for review.
-    const handoff = noAnswer && lowConfidence;
+    // Instead of a fixed message, a contextual one when it passes the checks
+    // (engine/bridgeReply.js); an off-topic message is redirected, never a handoff.
+    const bridge = noAnswer ? await composeBridgeReply({ profile, query, ctx }) : null;
+    const handoff = noAnswer && lowConfidence && !bridge?.offTopic;
     let result;
     if (!noAnswer) result = profile.formatSuccess(answerText, effectiveRanked, ctx);
     else if (handoff || !profile.formatNoAnswer) result = profile.formatFallback(ctx, confidence);
     else result = profile.formatNoAnswer(ctx, confidence);
-    if (handoff) result.handoff = true;
+    if (bridge) result.answer = bridge.text;
+    if (handoff) {
+      result.handoff = true;
+      if (profile.ticketing) result.awaitingContact = true;
+    }
     if (cached?.value) result.cached = true; // served without an LLM call
     await profile.onResult?.(result, query, ctx);
 
@@ -168,7 +190,7 @@ async function getEngineAnswer({ profile, query, ctx = {} }) {
       // confidence, since nothing else would capture it.
       if (profile.ticketing) result.handoff = true;
       await profile.onResult?.(result, query, ctx);
-      if (profile.ticketing) await fileSupportTicket({ profile, query, confidence, ctx });
+      if (profile.ticketing) await fileSupportTicket({ profile, query, confidence, ctx, kind: 'outage' });
       return result;
     }
     throw err;

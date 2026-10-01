@@ -321,7 +321,7 @@ router.get('/tickets', async (req, res) => {
     where: { tenantId: req.tenant.id },
     orderBy: { createdAt: 'desc' },
     take: 100,
-    select: { id: true, query: true, confidence: true, status: true, createdAt: true }
+    select: { id: true, query: true, confidence: true, kind: true, botType: true, contactEmail: true, status: true, createdAt: true }
   }));
 });
 

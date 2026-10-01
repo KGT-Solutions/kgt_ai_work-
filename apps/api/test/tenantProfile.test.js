@@ -29,7 +29,7 @@ const TENANT = {
   name: 'Acme Retail',
   industryLabel: 'Retail',
   persona: null,
-  outOfScopeMessage: "I don't have this info yet. Let me connect you with support.",
+  outOfScopeMessage: 'I want to make sure you get the exact right answer for that, so let me connect you with our team. Would you like to leave your email so we can reach out?',
   minConfidence: 0.3
 };
 
@@ -70,8 +70,8 @@ describe('tenantProfile — support vs. sales identity (no cross-contamination)'
 
   test('the sales prompt instructs objection-handling and forbids fabricated discounts/meetings; the support prompt does not mention either', () => {
     const salesPrompt = createTenantSalesProfile(TENANT).systemPrompt({});
-    assert.match(salesPrompt, /address any objection.*directly/i);
-    assert.match(salesPrompt, /never fabricate a specific meeting time or discount/i);
+    assert.match(salesPrompt, /handle objections head-on/i);
+    assert.match(salesPrompt, /never fabricate a specific meeting time, booking link or discount/i);
 
     const supportPrompt = createTenantSupportProfile(TENANT).systemPrompt({});
     assert.doesNotMatch(supportPrompt, /discount/i);
@@ -95,12 +95,15 @@ describe('tenantProfile — response shape differs per bot, same underlying chun
     assert.equal('sourceSection' in result, false);
   });
 
-  test('sales.formatFallback appends a generic next-step CTA the support fallback never adds', () => {
+  test("support's handoff is the tenant's own message; sales has its own warm one that offers a follow-up", () => {
     const supportFallback = createTenantSupportProfile(TENANT).formatFallback({}, 0.1);
     const salesFallback = createTenantSalesProfile(TENANT).formatFallback({}, 0.1);
     assert.equal(supportFallback.answer, TENANT.outOfScopeMessage);
-    assert.match(salesFallback.answer, /talk to our team/i);
-    assert.ok(salesFallback.answer.startsWith(TENANT.outOfScopeMessage));
+    assert.match(salesFallback.answer, /quick note for our team/i);
+    assert.notEqual(salesFallback.answer, supportFallback.answer);
+    for (const r of [supportFallback, salesFallback]) {
+      assert.doesNotMatch(r.answer, /I don't have this info|don't have the specifics/i);
+    }
   });
 });
 

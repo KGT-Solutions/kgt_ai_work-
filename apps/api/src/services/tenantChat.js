@@ -86,7 +86,11 @@ async function runTenantChat({ tenant, body }) {
   const result = await getEngineAnswer({
     profile: BOT_PROFILE_FACTORIES[botType](tenant),
     query,
-    ctx: { tenantId: tenant.id, recentTurns: recentTurns.reverse().map((m) => ({ role: m.role, content: m.content })) }
+    ctx: {
+      tenantId: tenant.id,
+      sessionId: session.id, // tickets and an email left later are tied to this conversation
+      recentTurns: recentTurns.reverse().map((m) => ({ role: m.role, content: m.content }))
+    }
   });
 
   // Earlier questions in this conversation (so chips don't repeat them) and
@@ -108,7 +112,9 @@ async function runTenantChat({ tenant, body }) {
     ]
   });
 
-  const followUps = pickFollowUps({
+  // No suggested questions while the bot is waiting for an email: the reply
+  // just asked for one, and chips would pull the visitor away from answering.
+  const followUps = reply.awaitingContact ? [] : pickFollowUps({
     botType,
     faqs: faqRow?.[botType === 'sales' ? 'salesFaqs' : 'supportFaqs'] || [],
     asked: askedRows.map((m) => m.content),
