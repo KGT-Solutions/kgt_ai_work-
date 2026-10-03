@@ -46,10 +46,10 @@ function Hero() {
   return (
     <section className="relative">
       <div className="bg-grid pointer-events-none absolute inset-0" aria-hidden="true" />
-      <div className="pointer-events-none absolute left-1/2 top-[-10rem] h-[30rem] w-[60rem] -translate-x-1/2 rounded-full bg-gradient-to-r from-cyan-500/20 via-sky-500/10 to-violet-500/25 blur-3xl" aria-hidden="true" />
+      <div className="pointer-events-none absolute left-1/2 top-[-10rem] h-[30rem] w-[60rem] -translate-x-1/2 rounded-full bg-gradient-to-r from-brand-500/20 via-brand-500/10 to-green-500/25 blur-3xl" aria-hidden="true" />
       <div className="relative mx-auto grid max-w-6xl items-center gap-14 px-5 pb-20 pt-16 lg:grid-cols-[1.1fr_1fr] lg:pt-24">
         <div className="animate-fade-up">
-          <Badge tone="cyan" className="mb-5"><IconSpark className="h-3 w-3" />Support + Sales, one knowledge base</Badge>
+          <Badge tone="blue" className="mb-5"><IconSpark className="h-3 w-3" />Support + Sales, one knowledge base</Badge>
           <h1 className="text-balance text-4xl font-semibold leading-[1.05] tracking-tight text-fg sm:text-5xl lg:text-[3.4rem]">
             Deploy grounded <span className="text-gradient">Support & Sales AI bots</span> on your website in minutes.
           </h1>
@@ -63,7 +63,7 @@ function Hero() {
           </div>
           <ul className="mt-8 flex flex-wrap gap-x-6 gap-y-2 text-sm text-fg-3">
             {['No code to write', 'Website + PDF training', 'Keys stored as hashes'].map((t) => (
-              <li key={t} className="flex items-center gap-2"><IconCheck className="h-4 w-4 text-cyan-300" />{t}</li>
+              <li key={t} className="flex items-center gap-2"><IconCheck className="h-4 w-4 text-brand-300" />{t}</li>
             ))}
           </ul>
         </div>
@@ -100,11 +100,11 @@ function WidgetPreview() {
 
   return (
     <div className="relative mx-auto w-full max-w-md animate-fade-up [animation-delay:120ms]">
-      <div className={cx('absolute -inset-6 rounded-[2rem] blur-2xl transition-colors duration-700', isSales ? 'bg-violet-500/15' : 'bg-cyan-500/15')} aria-hidden="true" />
+      <div className={cx('absolute -inset-6 rounded-[2rem] blur-2xl transition-colors duration-700', isSales ? 'bg-green-500/15' : 'bg-brand-500/15')} aria-hidden="true" />
       <div className="glass relative overflow-hidden" aria-label="Preview of the chat widget">
         <div className="flex items-center justify-between border-b border-white/[0.06] px-4 py-3">
           <div className="flex items-center gap-2.5">
-            <span className={cx('flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-obsidian/70', isSales ? 'text-violet-300' : 'text-cyan-300')}>
+            <span className={cx('flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-obsidian/70', isSales ? 'text-green-300' : 'text-brand-300')}>
               {isSales ? <IconBolt className="h-4 w-4" /> : <IconShield className="h-4 w-4" />}
             </span>
             <div>
@@ -125,7 +125,7 @@ function WidgetPreview() {
           ) : (
             <div key={`${bot}-${i}`} className="max-w-[88%] animate-fade-up">
               <div className="rounded-2xl rounded-bl-md border border-white/[0.08] bg-panel-2/80 px-3.5 py-2.5 text-sm leading-relaxed text-fg">{m.text}</div>
-              <p className={cx('mt-1.5 pl-1 text-[11px]', isSales ? 'text-violet-300' : 'text-cyan-300')}>{m.meta}</p>
+              <p className={cx('mt-1.5 pl-1 text-[11px]', isSales ? 'text-green-300' : 'text-brand-300')}>{m.meta}</p>
             </div>
           ))}
           {shown === 1 && (
@@ -157,17 +157,17 @@ function DeveloperPreview() {
     <section id="developers" className="relative border-y border-white/[0.06] bg-panel/40">
       <div className="mx-auto grid max-w-6xl items-center gap-12 px-5 py-20 lg:grid-cols-2">
         <div>
-          <p className="font-mono text-xs uppercase tracking-[0.16em] text-cyan-300">Developers</p>
+          <p className="font-mono text-xs uppercase tracking-[0.16em] text-brand-300">Developers</p>
           <h2 className="mt-3 text-balance text-3xl font-semibold tracking-tight text-fg">One key. One script tag. Both bots.</h2>
           <p className="mt-4 text-fg-2">
-            Every company gets its own <code className="rounded bg-white/[0.06] px-1.5 py-0.5 text-[13px] text-cyan-100">tk_…</code> key. Drop the
+            Every company gets its own <code className="rounded bg-white/[0.06] px-1.5 py-0.5 text-[13px] text-brand-100">tk_…</code> key. Drop the
             snippet into your site and visitors can switch between Support and Sales — or call the same endpoint from your own app.
           </p>
           <ul className="mt-6 space-y-3 text-sm text-fg-2">
             {[[IconKey, 'Keys shown once, stored as SHA-256 fingerprints, revocable instantly.'],
               [IconCode, 'Plain HTTPS + JSON — no SDK required.'],
               [IconLock, 'A key only ever reaches the company that owns it.']].map(([Icon, t]) => (
-              <li key={t} className="flex gap-3"><Icon className="mt-0.5 h-4 w-4 shrink-0 text-cyan-300" />{t}</li>
+              <li key={t} className="flex gap-3"><Icon className="mt-0.5 h-4 w-4 shrink-0 text-brand-300" />{t}</li>
             ))}
           </ul>
         </div>
@@ -185,7 +185,7 @@ function DeveloperPreview() {
             <span className="h-2.5 w-2.5 rounded-full bg-white/10" /><span className="h-2.5 w-2.5 rounded-full bg-white/10" /><span className="h-2.5 w-2.5 rounded-full bg-white/10" />
             <span className="ml-2 font-mono text-[11px] text-fg-3">{s.file}</span>
           </div>
-          <pre className="overflow-x-auto p-4 pt-3 text-[12.5px] leading-relaxed text-cyan-50/90"><code>{s.code}</code></pre>
+          <pre className="overflow-x-auto p-4 pt-3 text-[12.5px] leading-relaxed text-brand-50/90"><code>{s.code}</code></pre>
         </div>
       </div>
     </section>
@@ -193,17 +193,17 @@ function DeveloperPreview() {
 }
 
 const FEATURES = [
-  { icon: IconGlobe, title: 'Two-tier website scraping', tone: 'text-cyan-300',
+  { icon: IconGlobe, title: 'Two-tier website scraping', tone: 'text-brand-300',
     body: 'A fast static crawler reads your public pages, strips menus, footers and cookie banners, and files each page as Overview, FAQ or Policy. JavaScript-heavy sites fall back to a sandboxed headless browser.' },
-  { icon: IconShield, title: 'Zero-guess support gate', tone: 'text-cyan-300',
+  { icon: IconShield, title: 'Zero-guess support gate', tone: 'text-brand-300',
     body: 'The Support Bot answers only from your documents. When a question doesn’t clear its confidence gate it says so, hands off politely, and files a ticket instead of making something up.' },
-  { icon: IconBolt, title: 'Conversion-focused sales', tone: 'text-violet-300',
+  { icon: IconBolt, title: 'Conversion-focused sales', tone: 'text-green-300',
     body: 'The Sales Bot leads with the benefit that matters to each visitor, handles price and competitor objections from your own material, and ends every answer with a next step.' },
-  { icon: IconLock, title: 'Strict tenant isolation', tone: 'text-violet-300',
+  { icon: IconLock, title: 'Strict tenant isolation', tone: 'text-green-300',
     body: 'Every company’s documents, keys, chats and usage are walled off. Sessions and API keys are scoped server-side, so one company’s data can never reach another’s bots.' },
-  { icon: IconUpload, title: 'PDF, .txt and .md ingestion', tone: 'text-cyan-300',
+  { icon: IconUpload, title: 'PDF, .txt and .md ingestion', tone: 'text-brand-300',
     body: 'Drag in manuals, FAQs and price lists. Headings become separate, searchable sections — typos in questions are corrected against your own vocabulary.' },
-  { icon: IconLayers, title: 'One knowledge base, two personas', tone: 'text-violet-300',
+  { icon: IconLayers, title: 'One knowledge base, two personas', tone: 'text-green-300',
     body: 'Both bots share the same documents but weigh them differently: FAQs first for support, your positioning first for sales, policies always authoritative.' }
 ];
 
@@ -211,7 +211,7 @@ function Features() {
   return (
     <section id="features" className="mx-auto max-w-6xl px-5 py-24">
       <div className="max-w-2xl">
-        <p className="font-mono text-xs uppercase tracking-[0.16em] text-violet-300">Platform</p>
+        <p className="font-mono text-xs uppercase tracking-[0.16em] text-green-300">Platform</p>
         <h2 className="mt-3 text-balance text-3xl font-semibold tracking-tight text-fg">Built to be trusted with your customers.</h2>
       </div>
       <div className="mt-12 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -242,7 +242,7 @@ function HowItWorks() {
             <li key={s.title} className="glass p-6">
               <div className="flex items-center gap-3">
                 <span className="font-mono text-xs text-fg-3">0{i + 1}</span>
-                <s.icon className="h-5 w-5 text-cyan-300" />
+                <s.icon className="h-5 w-5 text-brand-300" />
               </div>
               <h3 className="mt-4 text-base font-semibold text-fg">{s.title}</h3>
               <p className="mt-2 text-sm leading-relaxed text-fg-2">{s.body}</p>
@@ -257,7 +257,7 @@ function HowItWorks() {
 function FinalCta() {
   return (
     <section className="px-5 pb-24">
-      <div className="relative mx-auto max-w-6xl overflow-hidden rounded-3xl border border-white/10 bg-gradient-to-br from-cyan-500/[0.12] via-panel to-violet-500/[0.14] px-8 py-14 text-center">
+      <div className="relative mx-auto max-w-6xl overflow-hidden rounded-3xl border border-white/10 bg-gradient-to-br from-brand-500/[0.12] via-panel to-green-500/[0.14] px-8 py-14 text-center">
         <div className="bg-grid pointer-events-none absolute inset-0 opacity-60" aria-hidden="true" />
         <h2 className="relative text-balance text-3xl font-semibold tracking-tight text-fg">Give every visitor an answer — and a reason to buy.</h2>
         <p className="relative mx-auto mt-3 max-w-xl text-fg-2">Set up takes minutes. Your data trains only your bots.</p>

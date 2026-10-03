@@ -9,7 +9,7 @@ export default function AuthShell({ title, heading, subheading, children, footer
     <div className="relative min-h-screen overflow-hidden bg-obsidian">
       <Head><title>{`${title} — KGT AI Hub`}</title></Head>
       <div className="bg-grid pointer-events-none absolute inset-0" aria-hidden="true" />
-      <div className="pointer-events-none absolute left-1/2 top-[-12rem] h-[28rem] w-[48rem] -translate-x-1/2 rounded-full bg-gradient-to-r from-cyan-500/20 via-sky-500/10 to-violet-500/20 blur-3xl" aria-hidden="true" />
+      <div className="pointer-events-none absolute left-1/2 top-[-12rem] h-[28rem] w-[48rem] -translate-x-1/2 rounded-full bg-gradient-to-r from-brand-500/20 via-brand-500/10 to-green-500/20 blur-3xl" aria-hidden="true" />
 
       <header className="relative mx-auto flex max-w-6xl items-center justify-between px-6 py-5">
         <Link href="/" aria-label="KGT AI Hub home"><Logo /></Link>

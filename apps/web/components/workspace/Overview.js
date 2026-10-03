@@ -33,10 +33,10 @@ export default function Overview({ ws, tenant, base }) {
   return (
     <div className="space-y-6">
       <Card className="relative overflow-hidden p-5">
-        <div className="pointer-events-none absolute -right-20 -top-24 h-64 w-64 rounded-full bg-cyan-400/10 blur-3xl" />
+        <div className="pointer-events-none absolute -right-20 -top-24 h-64 w-64 rounded-full bg-brand-400/10 blur-3xl" />
         <div className="relative flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-4">
-            <span className="flex h-12 w-12 items-center justify-center rounded-xl border border-white/10 bg-obsidian/60 text-cyan-300"><IconBot className="h-6 w-6" /></span>
+            <span className="flex h-12 w-12 items-center justify-center rounded-xl border border-white/10 bg-obsidian/60 text-brand-300"><IconBot className="h-6 w-6" /></span>
             <div>
               <div className="flex items-center gap-2">
                 <h2 className="text-lg font-semibold text-fg">Support & Sales bots</h2>
@@ -45,7 +45,7 @@ export default function Overview({ ws, tenant, base }) {
               <p className="mt-0.5 text-sm text-fg-2">{tenant.industryLabel} · <span className="font-mono text-xs text-fg-3">{tenant.slug}</span></p>
             </div>
           </div>
-          {base && <Link href={`${base}/bots`} className="inline-flex items-center gap-1.5 text-sm font-medium text-cyan-300 hover:text-cyan-200">Test the bots <IconArrowRight className="h-4 w-4" /></Link>}
+          {base && <Link href={`${base}/bots`} className="inline-flex items-center gap-1.5 text-sm font-medium text-brand-300 hover:text-brand-200">Test the bots <IconArrowRight className="h-4 w-4" /></Link>}
         </div>
       </Card>
 
@@ -60,7 +60,7 @@ export default function Overview({ ws, tenant, base }) {
         <Card>
           <CardHeader title="Questions per day" description="Last 30 days, all channels (widget and dashboard tests)." />
           <div className="p-5">
-            {data ? <TimeSeriesChart title="Questions per day" data={data.daily} series={[{ key: 'questions', label: 'Questions', color: SERIES.cyan }]} height={200} />
+            {data ? <TimeSeriesChart title="Questions per day" data={data.daily} series={[{ key: 'questions', label: 'Questions', color: SERIES.blue }]} height={200} />
               : <Skeleton className="h-[220px]" />}
           </div>
         </Card>

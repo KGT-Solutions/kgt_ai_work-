@@ -58,7 +58,7 @@ export default function KeyVault({ ws, tenant, freshKey }) {
   return (
     <div className="space-y-6">
       {issued && (
-        <Card className="border-cyan-400/25 shadow-glow">
+        <Card className="border-brand-400/25 shadow-glow">
           <CardHeader icon={<IconKey className="h-4 w-4" />} title={`New key${issued.label ? ` · ${issued.label}` : ''}`}
             description="Shown once. We only keep a fingerprint of it, so copy it somewhere safe before leaving this page." />
           <div className="space-y-4 p-5">

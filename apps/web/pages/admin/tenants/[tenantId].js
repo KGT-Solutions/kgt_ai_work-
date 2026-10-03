@@ -71,7 +71,7 @@ export default function StaffTenant() {
           <button key={t} type="button" role="tab" aria-selected={tab === t} onClick={() => setTab(t)}
             className={cx('relative whitespace-nowrap px-3 py-2.5 text-sm font-medium transition', tab === t ? 'text-fg' : 'text-fg-3 hover:text-fg-2')}>
             {t}
-            {tab === t && <span className="absolute inset-x-2 -bottom-px h-0.5 rounded-full bg-cyan-400" />}
+            {tab === t && <span className="absolute inset-x-2 -bottom-px h-0.5 rounded-full bg-brand-400" />}
           </button>
         ))}
       </div>

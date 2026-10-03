@@ -14,7 +14,11 @@ const MAX_FOLLOW_UPS = 3;
 
 const GENERIC_FOLLOW_UPS = Object.freeze({
   support: ['How do I update my payment method?', 'What if my ticket is delayed?', 'How do I contact your support team?'],
-  sales: ['Can I schedule a demo?', 'What are the enterprise pricing tiers?', 'How do I get started?']
+  // Every one of these is safe for any tenant: the first and last are handoff
+  // requests (domains/handoffActions.js), never a question about facts a
+  // tenant's documents may not have (an earlier "What are the enterprise
+  // pricing tiers?" invited exactly that).
+  sales: ['Can I schedule a demo?', 'How do I get started?', 'Can I talk to someone on your team?']
 });
 
 /**

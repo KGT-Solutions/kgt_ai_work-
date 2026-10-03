@@ -14,7 +14,7 @@ const SNIPPETS = [
     bot: 'sales',
     title: 'Public Sales widget',
     icon: IconBolt,
-    tone: 'text-violet-300',
+    tone: 'text-green-300',
     filename: 'sales-widget.html',
     where: 'For your landing, pricing and product pages, and anywhere prospects browse. It answers questions about value, plans, pricing and features, and ends with a next step.'
   },
@@ -22,7 +22,7 @@ const SNIPPETS = [
     bot: 'support',
     title: 'Member Support widget',
     icon: IconShield,
-    tone: 'text-cyan-300',
+    tone: 'text-brand-300',
     filename: 'support-widget.html',
     where: 'For logged-in customer dashboards, member or resident portals, and help centers. It gives grounded, step-by-step answers and hands off to your team when unsure.'
   }

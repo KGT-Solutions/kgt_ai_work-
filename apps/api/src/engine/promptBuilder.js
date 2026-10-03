@@ -11,26 +11,36 @@ const { CATEGORY_PROMPT_LABELS } = require('../services/shared/documentCategory'
  * Always placed AFTER the profile's grounding rules and explicitly
  * subordinate to them: tone governs how an answer is phrased, never whether
  * one is given or what facts it contains.
- * @param {{ sentinel: string, allowSteps?: boolean }} opts
- *   allowSteps: permit a short numbered sequence when the excerpts describe
- *   an ordered procedure (support troubleshooting); off for sales.
+ *
+ * Replies may use a small chat-formatting subset — paragraphs, "- " bullets,
+ * "1." steps and **bold** — which the widget (public/widgets/
+ * tenant-chat-widget.js) and the Test Bots sandbox (apps/web
+ * components/ui/ChatText.js) render. Anything outside it (headings, tables,
+ * code, links) would show literally, so it stays forbidden.
+ * @param {{ sentinel: string }} opts
  */
-function conversationalStyleRules({ sentinel, allowSteps = false }) {
-  const structure = allowSteps
-    ? `- Prefer flowing sentences. The one exception: when the excerpts describe an ordered procedure
-  (setup, troubleshooting, a return process), give it as a short numbered sequence — "1.", "2." —
-  with one plain sentence per step.`
-    : '- Write in flowing sentences, never lists. Weave two or three relevant points into one natural reply.';
-
+function conversationalStyleRules({ sentinel }) {
   return `HOW TO SOUND (these shape phrasing only — they never override the rules above):
 - Talk like a knowledgeable, friendly person on the team, not a search engine. Warm, clear, and
   direct; empathetic when the person is frustrated or stuck ("That's annoying — here's how to fix it").
 - Synthesize: read the excerpts, work out what actually answers the question, and say that in your
-  own words. Never paste excerpt text verbatim, dump everything you were given, or answer with
-  headings.
-${structure}
-- Plain text only: no markdown (#, **, backticks, tables) and no "-" or "*" bullet markers — the
-  reply is shown as a chat message, where those symbols appear literally.
+  own words. Never paste excerpt text verbatim or dump everything you were given.
+
+HOW TO LAY IT OUT (the reply is shown in a small chat window, so it must be easy to scan):
+- Open with one short sentence that answers the question directly.
+- When the answer covers two or more distinct points (features, options, benefits, requirements),
+  put them in a bulleted list: one line per point, each starting with "- ". Begin each bullet
+  with a 1-3 word label in **bold**, then a colon and one plain sentence, e.g.
+  "- **Visitor approvals:** residents let guests in from their phone."
+- For an ordered procedure (setup, troubleshooting, a return process), use numbered steps
+  "1.", "2.", "3." instead, one short sentence each.
+- At most 5 bullets or steps; pick the ones that matter most to this person.
+- A single fact or a yes/no answer needs no list: one or two sentences.
+- Put a blank line between the opening sentence, the list, and any closing question, so each part
+  stands on its own.
+- Use **bold** only for bullet labels and at most one key figure or term elsewhere.
+- The only formatting the chat window can show is the above: no headings (#), tables, code,
+  backticks, links or emoji.
 - Never mention "excerpts", "documents", "the knowledge base", or "according to our records" — just
   answer, the way a colleague who knows the material would.
 - Lead with the answer itself. Skip filler openers ("Great question!", "Certainly!") and closers

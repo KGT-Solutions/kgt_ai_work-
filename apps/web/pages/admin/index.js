@@ -76,7 +76,7 @@ export default function StaffCompanies() {
                   <th className="px-4 py-3 font-medium">Company</th><th className="px-4 py-3 font-medium">Contact</th>
                   <th className="px-4 py-3 text-right font-medium">Docs</th><th className="px-4 py-3 font-medium">Keys</th>
                   <th className="px-4 py-3 font-medium">Activity</th>
-                  <th className="px-4 py-3 font-medium text-cyan-300/90">Support Bot</th><th className="px-4 py-3 font-medium text-violet-300/90">Sales Bot</th>
+                  <th className="px-4 py-3 font-medium text-brand-300/90">Support Bot</th><th className="px-4 py-3 font-medium text-green-300/90">Sales Bot</th>
                   <th className="px-4 py-3 text-right font-medium">Total cost</th><th className="px-4 py-3 font-medium">Status</th>
                 </tr>
               </thead>
@@ -87,7 +87,7 @@ export default function StaffCompanies() {
                   return (
                     <tr key={t.id} className="hover:bg-white/[0.015]">
                       <td className="px-4 py-3 align-top">
-                        <Link href={`/admin/tenants/${t.id}`} className="font-medium text-fg hover:text-cyan-300">{t.name}</Link>
+                        <Link href={`/admin/tenants/${t.id}`} className="font-medium text-fg hover:text-brand-300">{t.name}</Link>
                         <p className="text-xs text-fg-3">{t.industryLabel}</p>
                         <p className="font-mono text-[11px] text-fg-3">{t.slug} · joined {new Date(t.createdAt).toLocaleDateString()}</p>
                       </td>

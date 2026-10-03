@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Badge, Button, Card, Segmented, Spinner, cx } from '../ui';
 import { IconBolt, IconSend, IconShield, IconSpark } from '../ui/icons';
+import { ChatText } from '../ui/ChatText';
 
 // Side-by-side sandbox: one composer, the Support Bot and the Sales Bot
 // answering in their own panes. Runs through ws.chat, i.e. the signed-in
@@ -11,9 +12,9 @@ import { IconBolt, IconSend, IconShield, IconSpark } from '../ui/icons';
 // (or if generation failed) each pane shows the generic starters below.
 
 const BOTS = [
-  { id: 'support', name: 'Support Bot', icon: IconShield, tone: 'cyan', blurb: 'Grounded, factual answers. Hands off when unsure.',
+  { id: 'support', name: 'Support Bot', icon: IconShield, tone: 'blue', blurb: 'Grounded, factual answers. Hands off when unsure.',
     faqKey: 'supportFaqs', starters: ['How do I get started?', 'What is your refund policy?'] },
-  { id: 'sales', name: 'Sales Bot', icon: IconBolt, tone: 'violet', blurb: 'Persuasive, benefit-led, ends with a next step.',
+  { id: 'sales', name: 'Sales Bot', icon: IconBolt, tone: 'green', blurb: 'Persuasive, benefit-led, ends with a next step.',
     faqKey: 'salesFaqs', starters: ['Why should we choose you?', 'How does your pricing work?'] }
 ];
 
@@ -110,7 +111,7 @@ export default function BotSandbox({ ws, tenant }) {
             options={[{ value: 'both', label: 'Both' }, { value: 'support', label: 'Support' }, { value: 'sales', label: 'Sales' }]} />
           <input ref={inputRef} value={input} onChange={(e) => setInput(e.target.value)} aria-label="Message"
             placeholder={target === 'both' ? 'Ask both bots the same question…' : `Ask the ${target === 'support' ? 'Support' : 'Sales'} Bot…`}
-            className="h-10 min-w-0 flex-1 rounded-lg border border-white/10 bg-panel-2/80 px-3.5 text-sm text-fg placeholder:text-fg-3 focus:border-cyan-400/60 focus:outline-none focus:ring-4 focus:ring-cyan-400/10" />
+            className="h-10 min-w-0 flex-1 rounded-lg border border-white/10 bg-panel-2/80 px-3.5 text-sm text-fg placeholder:text-fg-3 focus:border-brand-400/60 focus:outline-none focus:ring-4 focus:ring-brand-400/10" />
           <div className="flex gap-2">
             <Button type="submit" variant="primary" disabled={!input.trim() || busy}><IconSend className="h-4 w-4" />Send</Button>
             <Button onClick={reset} variant="ghost" disabled={!threads.support.length && !threads.sales.length}>Clear</Button>
@@ -134,13 +135,13 @@ function BotPane({ bot, tenant, thread, pending, starters, tailored, generating,
   const scrollRef = useRef(null);
   useEffect(() => { scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' }); }, [thread, pending]);
   const Icon = bot.icon;
-  const accent = bot.tone === 'cyan' ? 'from-cyan-400/20' : 'from-violet-400/20';
+  const accent = bot.tone === 'blue' ? 'from-brand-400/20' : 'from-green-400/20';
 
   return (
     <Card className={cx('flex h-[480px] flex-col overflow-hidden transition', dimmed && 'opacity-60')}>
       <div className={cx('flex items-center justify-between gap-3 border-b border-white/[0.06] bg-gradient-to-r to-transparent px-4 py-3', accent)}>
         <div className="flex items-center gap-2.5">
-          <span className={cx('flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-obsidian/60', bot.tone === 'cyan' ? 'text-cyan-300' : 'text-violet-300')}>
+          <span className={cx('flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-obsidian/60', bot.tone === 'blue' ? 'text-brand-300' : 'text-green-300')}>
             <Icon className="h-4 w-4" />
           </span>
           <div>
@@ -170,7 +171,7 @@ function BotPane({ bot, tenant, thread, pending, starters, tailored, generating,
                 <button key={s} type="button" onClick={() => onStarter(s)}
                   className={cx('rounded-full border px-3 py-1.5 text-left text-xs transition hover:text-fg',
                     tailored
-                      ? (bot.tone === 'cyan' ? 'border-cyan-400/25 bg-cyan-400/[0.06] text-fg hover:border-cyan-400/50' : 'border-violet-400/25 bg-violet-400/[0.06] text-fg hover:border-violet-400/50')
+                      ? (bot.tone === 'blue' ? 'border-brand-400/25 bg-brand-400/[0.06] text-fg hover:border-brand-400/50' : 'border-green-400/25 bg-green-400/[0.06] text-fg hover:border-green-400/50')
                       : 'border-white/10 bg-white/[0.03] text-fg-2 hover:border-white/20')}>
                   {s}
                 </button>
@@ -183,9 +184,9 @@ function BotPane({ bot, tenant, thread, pending, starters, tailored, generating,
             <div key={i} className="ml-auto max-w-[85%] rounded-2xl rounded-br-md bg-white/[0.08] px-3.5 py-2 text-sm text-fg">{m.text}</div>
           ) : (
             <div key={i} className="max-w-[92%]">
-              <div className={cx('whitespace-pre-wrap rounded-2xl rounded-bl-md border px-3.5 py-2.5 text-sm leading-relaxed',
-                m.error ? 'border-rose-400/25 bg-rose-500/10 text-rose-100' : 'border-white/[0.08] bg-panel-2/80 text-fg')}>
-                {m.text}
+              <div className={cx('rounded-2xl rounded-bl-md border px-3.5 py-2.5 text-sm leading-relaxed',
+                m.error ? 'whitespace-pre-wrap border-rose-400/25 bg-rose-500/10 text-rose-100' : 'border-white/[0.08] bg-panel-2/80 text-fg')}>
+                {m.error ? m.text : <ChatText text={m.text} />}
               </div>
               {/* Chips only under the latest reply, and not while the next one is on its way. */}
               {i === thread.length - 1 && !pending && (
@@ -215,7 +216,7 @@ function FollowUpChips({ questions, tone, onPick }) {
       {questions.map((q) => (
         <button key={q} type="button" onClick={() => onPick(q)}
           className={cx('rounded-full border px-3 py-1 text-left text-xs text-fg-2 transition hover:text-fg',
-            tone === 'cyan' ? 'border-cyan-400/25 bg-cyan-400/[0.05] hover:border-cyan-400/50' : 'border-violet-400/25 bg-violet-400/[0.05] hover:border-violet-400/50')}>
+            tone === 'blue' ? 'border-brand-400/25 bg-brand-400/[0.05] hover:border-brand-400/50' : 'border-green-400/25 bg-green-400/[0.05] hover:border-green-400/50')}>
           {q}
         </button>
       ))}

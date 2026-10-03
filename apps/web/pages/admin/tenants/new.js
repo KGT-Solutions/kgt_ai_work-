@@ -36,7 +36,7 @@ export default function NewCompany() {
     return (
       <>
         <PageHeader title={`${created.name} created`} description="Copy the API key now — it's shown only this once." />
-        <Card className="border-cyan-400/25 shadow-glow">
+        <Card className="border-brand-400/25 shadow-glow">
           <CardHeader icon={<IconKey className="h-4 w-4" />} title="First API key" description={`Sent as X-Tenant-Api-Key to POST /api/v1/tenant-chat/${created.slug}/chat, or used in the embed snippet.`} />
           <div className="space-y-4 p-5">
             <SecretField value={created.apiKey} label="API key" />

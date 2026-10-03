@@ -70,7 +70,7 @@ export default function DocumentManager({ ws, audience }) {
             return (
               <button key={c.id} type="button" onClick={() => setFilter(c.id)} aria-pressed={filter === c.id}
                 className={cx('rounded-full border px-3 py-1 text-xs font-medium transition',
-                  filter === c.id ? 'border-cyan-400/40 bg-cyan-400/10 text-cyan-100' : 'border-white/10 text-fg-3 hover:text-fg-2')}>
+                  filter === c.id ? 'border-brand-400/40 bg-brand-400/10 text-brand-100' : 'border-white/10 text-fg-3 hover:text-fg-2')}>
                 {c.short} <span className="tabular-nums text-fg-3">{n}</span>
               </button>
             );
@@ -154,12 +154,12 @@ function UploadZone({ ws, onAdded }) {
         onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
         onDragLeave={() => setDrag(false)}
         onDrop={(e) => { e.preventDefault(); setDrag(false); handleFiles(e.dataTransfer.files); }}
-        className={cx('relative flex cursor-pointer flex-col items-center justify-center rounded-xl border border-dashed px-6 py-10 text-center transition focus-within:ring-4 focus-within:ring-cyan-400/10',
-          drag ? 'border-cyan-400/70 bg-cyan-400/[0.06] shadow-glow' : 'border-white/15 bg-white/[0.015] hover:border-white/25 hover:bg-white/[0.03]',
+        className={cx('relative flex cursor-pointer flex-col items-center justify-center rounded-xl border border-dashed px-6 py-10 text-center transition focus-within:ring-4 focus-within:ring-brand-400/10',
+          drag ? 'border-brand-400/70 bg-brand-400/[0.06] shadow-glow' : 'border-white/15 bg-white/[0.015] hover:border-white/25 hover:bg-white/[0.03]',
           busy && 'pointer-events-none opacity-70')}>
         <input ref={inputRef} type="file" multiple accept="application/pdf,.pdf,.txt,.md,.markdown,text/plain,text/markdown"
           className="absolute h-px w-px opacity-0" onChange={(e) => handleFiles(e.target.files)} disabled={busy} />
-        <span className="mb-3 flex h-11 w-11 items-center justify-center rounded-xl border border-white/10 bg-white/[0.04] text-cyan-300">
+        <span className="mb-3 flex h-11 w-11 items-center justify-center rounded-xl border border-white/10 bg-white/[0.04] text-brand-300">
           <IconUpload className="h-5 w-5" />
         </span>
         <p className="text-sm font-medium text-fg">Drop files here, or click to browse</p>
@@ -171,7 +171,7 @@ function UploadZone({ ws, onAdded }) {
           {items.map((i) => (
             <li key={i.id} className="flex items-center gap-3 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-[13px]">
               <span className="flex h-6 w-6 shrink-0 items-center justify-center">
-                {i.status === 'parsing' && <Spinner className="h-4 w-4 text-cyan-300" />}
+                {i.status === 'parsing' && <Spinner className="h-4 w-4 text-brand-300" />}
                 {i.status === 'queued' && <span className="h-2 w-2 rounded-full bg-fg-3" />}
                 {i.status === 'done' && <IconCheck className="h-4 w-4 text-emerald-300" />}
                 {i.status === 'error' && <IconAlert className="h-4 w-4 text-rose-300" />}
@@ -316,7 +316,7 @@ function DocumentRow({ ws, doc, onChanged }) {
     }
   };
 
-  const tone = { FAQ: 'cyan', CORE_OVERVIEW: 'violet', CUSTOM_POLICY: 'warning' }[doc.category] || 'neutral';
+  const tone = { FAQ: 'blue', CORE_OVERVIEW: 'green', CUSTOM_POLICY: 'warning' }[doc.category] || 'neutral';
 
   return (
     <li className="bg-white/[0.01]">
@@ -364,7 +364,7 @@ function DocumentRow({ ws, doc, onChanged }) {
             <pre className="max-h-72 overflow-auto whitespace-pre-wrap font-mono text-[12.5px] leading-relaxed text-fg-2">{doc.content}</pre>
           )}
           {doc.sourceUrl && !editing && (
-            <a href={doc.sourceUrl} target="_blank" rel="noreferrer" className="mt-3 inline-block text-xs text-cyan-300 hover:underline">{doc.sourceUrl}</a>
+            <a href={doc.sourceUrl} target="_blank" rel="noreferrer" className="mt-3 inline-block text-xs text-brand-300 hover:underline">{doc.sourceUrl}</a>
           )}
         </div>
       )}

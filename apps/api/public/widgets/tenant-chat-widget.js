@@ -91,6 +91,11 @@
     '#' + ns + '-body .msg{max-width:85%;padding:8px 11px;border-radius:12px;font-size:13.5px;line-height:1.4;}' +
     '#' + ns + '-body .msg.user{align-self:flex-end;background:#0f172a;color:#fff;}' +
     '#' + ns + '-body .msg.bot{align-self:flex-start;background:#f1f5f9;color:#0f172a;}' +
+    '#' + ns + '-body .msg.bot p{margin:0 0 8px;}' +
+    '#' + ns + '-body .msg.bot ul,#' + ns + '-body .msg.bot ol{margin:0 0 8px;padding-left:18px;}' +
+    '#' + ns + '-body .msg.bot li{margin:0 0 4px;padding-left:2px;}' +
+    '#' + ns + '-body .msg.bot > :last-child,#' + ns + '-body .msg.bot li:last-child{margin-bottom:0;}' +
+    '#' + ns + '-body .msg.bot strong{font-weight:600;}' +
     '#' + ns + '-body .msg.err{align-self:flex-start;background:#fef2f2;color:#b91c1c;}' +
     '#' + ns + '-body .empty{margin:auto;text-align:center;color:#94a3b8;font-size:12.5px;padding:0 10px;}' +
     '#' + ns + '-body .chips{align-self:flex-start;display:flex;flex-wrap:wrap;gap:6px;max-width:92%;}' +
@@ -156,7 +161,8 @@
       var m = msgs[i];
       var el = document.createElement('div');
       el.className = 'msg ' + (m.role === 'user' ? 'user' : m.error ? 'err' : 'bot');
-      el.textContent = m.text;
+      if (m.role === 'assistant' && !m.error) renderRichText(el, m.text);
+      else el.textContent = m.text;
       body.appendChild(el);
     }
     // Suggested follow-ups under the latest reply only; clicking one asks it.
@@ -176,6 +182,60 @@
       body.appendChild(chips);
     }
     body.scrollTop = body.scrollHeight;
+  }
+
+  // Bot replies use a small formatting subset (engine/promptBuilder.js "HOW
+  // TO LAY IT OUT"): paragraphs split by blank lines, "- " / "* " / "• "
+  // bullets, "1." steps and **bold**. Built with createElement + textContent
+  // only, never innerHTML, so nothing in a reply can inject markup into the
+  // host page. Anything else (a stray "#" heading) degrades to plain text.
+  function appendInline(parent, text) {
+    var parts = String(text).split(/\*\*(.+?)\*\*/g); // odd indexes are the bold runs
+    for (var i = 0; i < parts.length; i++) {
+      if (!parts[i]) continue;
+      if (i % 2) {
+        var b = document.createElement('strong');
+        b.textContent = parts[i];
+        parent.appendChild(b);
+      } else {
+        parent.appendChild(document.createTextNode(parts[i]));
+      }
+    }
+  }
+
+  function renderRichText(container, text) {
+    var lines = String(text || '').replace(/\r\n?/g, '\n').split('\n');
+    var para = null;
+    var list = null;
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].replace(/^\s*#{1,6}\s+/, '').trim();
+      var bullet = /^[-*•]\s+(.*)$/.exec(line);
+      var step = bullet ? null : /^(\d+)[.)]\s+(.*)$/.exec(line);
+      if (!line) {
+        para = null;
+        list = null;
+      } else if (bullet || step) {
+        var tag = bullet ? 'ul' : 'ol';
+        if (!list || list.tagName.toLowerCase() !== tag) {
+          list = document.createElement(tag);
+          if (step && step[1] !== '1') list.setAttribute('start', step[1]);
+          container.appendChild(list);
+        }
+        var li = document.createElement('li');
+        appendInline(li, bullet ? bullet[1] : step[2]);
+        list.appendChild(li);
+        para = null;
+      } else {
+        if (!para) {
+          para = document.createElement('p');
+          container.appendChild(para);
+        } else {
+          para.appendChild(document.createElement('br'));
+        }
+        appendInline(para, line);
+        list = null;
+      }
+    }
   }
 
   function setOpen(next) {

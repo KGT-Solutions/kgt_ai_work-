@@ -9,9 +9,9 @@ import { IconTicket } from '../ui/icons';
 const KINDS = {
   unanswered: { label: 'Unanswered', tone: 'warning' },
   outage: { label: 'AI unavailable', tone: 'warning' },
-  human_request: { label: 'Wants a person', tone: 'violet' },
+  human_request: { label: 'Wants a person', tone: 'green' },
   demo_request: { label: 'Demo request', tone: 'success' },
-  contact_request: { label: 'Follow-up', tone: 'violet' }
+  contact_request: { label: 'Follow-up', tone: 'green' }
 };
 
 export default function TicketsList({ ws }) {
@@ -35,7 +35,7 @@ export default function TicketsList({ ws }) {
                   <div className="min-w-0 space-y-1">
                     <p className="text-sm text-fg">{t.query}</p>
                     {t.contactEmail && (
-                      <a href={`mailto:${t.contactEmail}`} className="text-xs text-cyan-300 underline-offset-2 hover:underline">
+                      <a href={`mailto:${t.contactEmail}`} className="text-xs text-brand-300 underline-offset-2 hover:underline">
                         {t.contactEmail}
                       </a>
                     )}

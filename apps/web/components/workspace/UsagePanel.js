@@ -6,7 +6,7 @@ import { useToast } from '../ui/toast';
 import { IconBolt, IconShield } from '../ui/icons';
 
 // Usage over time, from /usage/daily, and per-bot totals from /usage.
-// Support and Sales are shown side by side everywhere (cyan / violet, the
+// Support and Sales are shown side by side everywhere (KGT blue / green, the
 // same colors as the Test bots panes). Charts never share two y-axes:
 // answers and tokens are separate charts.
 export default function UsagePanel({ ws }) {
@@ -48,7 +48,7 @@ export default function UsagePanel({ ws }) {
         <div className="p-5">
           {daily ? (
             <TimeSeriesChart title="AI answers per day by bot" data={daily}
-              series={[{ key: 'supportAnswers', label: 'Support Bot', color: SERIES.cyan }, { key: 'salesAnswers', label: 'Sales Bot', color: SERIES.violet }]} />
+              series={[{ key: 'supportAnswers', label: 'Support Bot', color: SERIES.blue }, { key: 'salesAnswers', label: 'Sales Bot', color: SERIES.green }]} />
           ) : <Skeleton className="h-[240px]" />}
         </div>
       </Card>
@@ -58,7 +58,7 @@ export default function UsagePanel({ ws }) {
         <div className="p-5">
           {daily ? (
             <TimeSeriesChart title="Tokens per day by bot" data={daily} height={180}
-              series={[{ key: 'supportTokens', label: 'Support Bot', color: SERIES.cyan }, { key: 'salesTokens', label: 'Sales Bot', color: SERIES.violet }]} />
+              series={[{ key: 'supportTokens', label: 'Support Bot', color: SERIES.blue }, { key: 'salesTokens', label: 'Sales Bot', color: SERIES.green }]} />
           ) : <Skeleton className="h-[200px]" />}
         </div>
       </Card>
@@ -67,8 +67,8 @@ export default function UsagePanel({ ws }) {
 }
 
 const BOT_ROWS = [
-  { key: 'support', name: 'Support Bot', icon: IconShield, tone: 'text-cyan-300' },
-  { key: 'sales', name: 'Sales Bot', icon: IconBolt, tone: 'text-violet-300' }
+  { key: 'support', name: 'Support Bot', icon: IconShield, tone: 'text-brand-300' },
+  { key: 'sales', name: 'Sales Bot', icon: IconBolt, tone: 'text-green-300' }
 ];
 
 // All-time per-bot ledger plus what the answer cache saved.

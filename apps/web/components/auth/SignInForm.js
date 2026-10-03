@@ -52,7 +52,7 @@ export default function SignInForm({ kind, signIn, checkSession, destination, fo
       <Field label={
         <span className="flex items-center justify-between">
           <span>Password</span>
-          {forgotHref && <Link href={forgotHref} className="text-xs font-medium text-cyan-300 hover:text-cyan-200">Forgot password?</Link>}
+          {forgotHref && <Link href={forgotHref} className="text-xs font-medium text-brand-300 hover:text-brand-200">Forgot password?</Link>}
         </span>
       } htmlFor={`${kind}-password`}>
         <Input id={`${kind}-password`} type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />

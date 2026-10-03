@@ -109,8 +109,8 @@ export default function DashboardShell({ audience, children }) {
             className={cx('group relative flex h-9 items-center gap-3 rounded-lg px-2.5 text-[13.5px] font-medium transition',
               active ? 'bg-white/[0.07] text-fg' : 'text-fg-3 hover:bg-white/[0.04] hover:text-fg-2')}
             aria-current={active ? 'page' : undefined}>
-            {active && <span className="absolute inset-y-2 left-0 w-0.5 rounded-full bg-cyan-400" />}
-            <Icon className={cx('h-[18px] w-[18px] shrink-0', active && 'text-cyan-300')} />
+            {active && <span className="absolute inset-y-2 left-0 w-0.5 rounded-full bg-brand-400" />}
+            <Icon className={cx('h-[18px] w-[18px] shrink-0', active && 'text-brand-300')} />
             <span className={cx('truncate', collapsed && 'lg:hidden')}>{item.label}</span>
           </Link>
         );
@@ -121,7 +121,7 @@ export default function DashboardShell({ audience, children }) {
   const footer = session && (
     <div className="border-t border-white/[0.06] p-2">
       <div className={cx('flex items-center gap-2.5 rounded-lg px-2 py-2', collapsed && 'lg:justify-center lg:px-0')}>
-        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-cyan-400/30 to-violet-400/30 text-xs font-semibold text-fg">
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-brand-400/30 to-green-400/30 text-xs font-semibold text-fg">
           {(session.name || '?').slice(0, 1).toUpperCase()}
         </span>
         <div className={cx('min-w-0 flex-1', collapsed && 'lg:hidden')}>

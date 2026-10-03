@@ -22,12 +22,12 @@ export default function DashboardOverview() {
         description={welcome ? `Trained on ${welcome.documentsCreated} document${welcome.documentsCreated === 1 ? '' : 's'}. Copy your key now — it's shown only this once.` : `${tenant.name} · Support and Sales bots`} />
 
       {welcome && (
-        <Card className="mb-6 space-y-4 border-cyan-400/25 p-5 shadow-glow">
+        <Card className="mb-6 space-y-4 border-brand-400/25 p-5 shadow-glow">
           <SecretField value={welcome.apiKey} label="Your API key" />
           <EmbedSnippets slug={welcome.slug} apiKey={welcome.apiKey} />
           <p className="text-[13px] text-fg-3">
             Lost your key later? Issue a new one in{' '}
-            <Link href="/dashboard/keys" className="text-cyan-300 hover:underline">API keys</Link>.
+            <Link href="/dashboard/keys" className="text-brand-300 hover:underline">API keys</Link>.
           </p>
         </Card>
       )}

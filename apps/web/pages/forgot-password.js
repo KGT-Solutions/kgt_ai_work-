@@ -91,7 +91,7 @@ export default function ForgotPassword() {
       <ol className="mb-6 grid grid-cols-3 gap-2" aria-label="Progress">
         {[['Email', IconMail], ['Code', IconShield], ['Password', IconLock]].map(([label, Icon], i) => (
           <li key={label} className="flex flex-col items-center gap-1.5">
-            <span className={cx('h-1 w-full rounded-full', i <= stepIndex ? 'bg-gradient-to-r from-cyan-400 to-violet-400' : 'bg-white/10')} />
+            <span className={cx('h-1 w-full rounded-full', i <= stepIndex ? 'bg-gradient-to-r from-brand-400 to-green-400' : 'bg-white/10')} />
             <span className={cx('flex items-center gap-1 text-[11px]', i === stepIndex ? 'text-fg' : 'text-fg-3')}><Icon className="h-3 w-3" />{label}</span>
           </li>
         ))}
@@ -115,7 +115,7 @@ export default function ForgotPassword() {
           <Button type="submit" variant="primary" className="w-full" loading={busy} disabled={code.join('').length !== 6}>Verify code</Button>
           <div className="flex items-center justify-between text-xs">
             <button type="button" className="text-fg-3 hover:text-fg-2" onClick={() => { setStep('email'); setError(''); }}>Use a different email</button>
-            <button type="button" className="font-medium text-cyan-300 hover:text-cyan-200 disabled:text-fg-3" disabled={cooldown > 0 || busy} onClick={sendCode}>
+            <button type="button" className="font-medium text-brand-300 hover:text-brand-200 disabled:text-fg-3" disabled={cooldown > 0 || busy} onClick={sendCode}>
               {cooldown > 0 ? `Resend in ${cooldown}s` : 'Resend code'}
             </button>
           </div>
@@ -176,7 +176,7 @@ function OtpInput({ value, onChange, disabled }) {
             if (e.key === 'ArrowLeft' && i > 0) refs.current[i - 1]?.focus();
             if (e.key === 'ArrowRight' && i < 5) refs.current[i + 1]?.focus();
           }}
-          className="h-12 w-full rounded-lg border border-white/10 bg-panel-2/80 text-center font-mono text-lg text-fg focus:border-cyan-400/60 focus:outline-none focus:ring-4 focus:ring-cyan-400/10" />
+          className="h-12 w-full rounded-lg border border-white/10 bg-panel-2/80 text-center font-mono text-lg text-fg focus:border-brand-400/60 focus:outline-none focus:ring-4 focus:ring-brand-400/10" />
       ))}
     </div>
   );

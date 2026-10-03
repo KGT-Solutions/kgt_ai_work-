@@ -285,12 +285,12 @@ GROUNDING RULES (follow all of these, no exceptions):
    If the message opens with a greeting or thanks, return it in a few warm words first.
 8. For how-to questions, walk them through it as short numbered steps in everyday words: turn menu
    paths and technical wording from the excerpts into plain, friendly instructions without changing
-   any fact. Otherwise answer the question in the first sentence, usually 2-4 sentences in total.
-   No sales pitch, no speculation, no filler.
+   any fact. Otherwise answer the question in the first sentence, then add only what helps, laid
+   out as described under HOW TO LAY IT OUT. No sales pitch, no speculation, no filler.
 9. If they ask to speak to a person or for a demo, offer that our team can reach out if they share
    their email here — never say you can't help with that.
 
-${conversationalStyleRules({ sentinel: SUPPORT_SENTINEL, allowSteps: true })}${persona}`;
+${conversationalStyleRules({ sentinel: SUPPORT_SENTINEL })}${persona}`;
 }
 
 /** @returns {import('../engine/domainProfile').DomainProfile} */
@@ -381,8 +381,9 @@ GROUNDING RULES (follow all of these, no exceptions):
 5. Handle objections head-on (price, switching effort, "we already use X"): acknowledge the concern
    in a few words, then answer it with what the excerpts actually say. Persuasive, never pushy, and
    no promises the excerpts don't state.
-6. Keep it focused: usually 2-5 sentences. End with ONE short, gentle question that moves things
-   forward — about their situation, their needs, or a natural next step. When they show buying
+6. Keep it focused and scannable, laid out as described under HOW TO LAY IT OUT: a one-line answer,
+   then the most relevant benefits or features as bullets when there are several.
+   End with ONE short, gentle question, on its own line, that moves things forward — about their situation, their needs, or a natural next step. When they show buying
    intent (pricing for their size, rollout, next steps), the next step is a walkthrough: invite them
    to share their email here so our team can set one up.
    Never fabricate a specific meeting time, booking link or discount. (Skip the question only for
@@ -419,8 +420,9 @@ function createTenantSalesProfile(tenant) {
     smallTalkCopy: salesSmallTalkCopy(tenant),
     bridgeSystemPrompt: () => salesBridgePrompt(tenant),
     replyReminder:
-      'REPLY FORMAT: answer the prospect directly in your own words, tie it to the most relevant ' +
-      'benefit, and finish with one short, friendly question that moves the conversation forward. ' +
+      'REPLY FORMAT: one short sentence that answers the prospect directly; then, if there are several ' +
+      'points, a "- **Label:** sentence" bullet for each (at most 5); then, after a blank line, ' +
+      'finish with one short, friendly question that moves the conversation forward. ' +
       `(If the excerpts have nothing relevant at all, reply with only ${SALES_SENTINEL}.)`,
 
     resolveKnowledge: () => loadTenantKnowledge(tenant.id),

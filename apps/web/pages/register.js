@@ -121,16 +121,16 @@ export default function Register() {
     <div className="relative min-h-screen overflow-x-hidden bg-obsidian">
       <Head><title>Create your AI bots — KGT AI Hub</title></Head>
       <div className="bg-grid pointer-events-none absolute inset-x-0 top-0 h-[520px]" aria-hidden="true" />
-      <div className="pointer-events-none absolute left-1/2 top-[-12rem] h-[26rem] w-[50rem] -translate-x-1/2 rounded-full bg-gradient-to-r from-cyan-500/15 via-sky-500/10 to-violet-500/20 blur-3xl" aria-hidden="true" />
+      <div className="pointer-events-none absolute left-1/2 top-[-12rem] h-[26rem] w-[50rem] -translate-x-1/2 rounded-full bg-gradient-to-r from-brand-500/15 via-brand-500/10 to-green-500/20 blur-3xl" aria-hidden="true" />
 
       <header className="relative mx-auto flex max-w-5xl items-center justify-between px-5 py-5">
         <Link href="/" aria-label="KGT AI Hub home"><Logo /></Link>
-        <Link href="/login" className="text-sm text-fg-3 hover:text-fg-2">Already a customer? <span className="font-medium text-cyan-300">Sign in</span></Link>
+        <Link href="/login" className="text-sm text-fg-3 hover:text-fg-2">Already a customer? <span className="font-medium text-brand-300">Sign in</span></Link>
       </header>
 
       <main className="relative mx-auto max-w-5xl px-5 pb-20 pt-4">
         <div className="mx-auto max-w-2xl text-center">
-          <Badge tone="cyan"><IconShield className="h-3 w-3" />Private to your company</Badge>
+          <Badge tone="blue"><IconShield className="h-3 w-3" />Private to your company</Badge>
           <h1 className="mt-4 text-balance text-3xl font-semibold tracking-tight text-fg sm:text-4xl">Create your Support & Sales bots</h1>
           <p className="mt-3 text-fg-2">Trained on your website and documents, live in three steps.</p>
         </div>
@@ -138,9 +138,9 @@ export default function Register() {
         <ol className="mx-auto mb-10 mt-10 grid max-w-2xl grid-cols-3 gap-3" aria-label="Progress">
           {STEPS.map((label, i) => (
             <li key={label} className="flex flex-col gap-2">
-              <span className={cx('h-1 rounded-full transition-all duration-500', i <= step ? 'bg-gradient-to-r from-cyan-400 to-violet-400' : 'bg-white/10')} />
+              <span className={cx('h-1 rounded-full transition-all duration-500', i <= step ? 'bg-gradient-to-r from-brand-400 to-green-400' : 'bg-white/10')} />
               <span className={cx('flex items-center gap-2 text-[13px] font-medium', i === step ? 'text-fg' : i < step ? 'text-fg-2' : 'text-fg-3')}>
-                <span className={cx('flex h-5 w-5 items-center justify-center rounded-full text-[11px]', i < step ? 'bg-emerald-400/15 text-emerald-300' : i === step ? 'bg-cyan-400/15 text-cyan-200' : 'bg-white/5')}>
+                <span className={cx('flex h-5 w-5 items-center justify-center rounded-full text-[11px]', i < step ? 'bg-emerald-400/15 text-emerald-300' : i === step ? 'bg-brand-400/15 text-brand-200' : 'bg-white/5')}>
                   {i < step ? <IconCheck className="h-3 w-3" /> : i + 1}
                 </span>
                 <span className="truncate">{label}</span>
@@ -249,7 +249,7 @@ function StepKnowledge({ websiteUrl, setWebsiteUrl, consent, setConsent, scannin
           <div className="rounded-xl border border-white/[0.07] bg-white/[0.02] p-4">
             <Checkbox checked={consent} onChange={(e) => setConsent(e.target.checked)} disabled={scanning}>{CRAWL_CONSENT_TEXT}</Checkbox>
           </div>
-          {scanning && <p className="flex items-center gap-2 text-sm text-cyan-200" aria-live="polite"><Spinner className="h-4 w-4" />{CRAWL_STATUS[statusIndex]}</p>}
+          {scanning && <p className="flex items-center gap-2 text-sm text-brand-200" aria-live="polite"><Spinner className="h-4 w-4" />{CRAWL_STATUS[statusIndex]}</p>}
           {!scanning && scanError && (
             <p className="flex items-start gap-2 rounded-lg border border-rose-400/25 bg-rose-500/10 px-3 py-2 text-[13px] text-rose-100" role="alert">
               <IconAlert className="mt-0.5 h-4 w-4 shrink-0" />{scanError} JavaScript-only or protected sites often can&apos;t be scanned — upload documents below instead.
@@ -268,7 +268,7 @@ function StepKnowledge({ websiteUrl, setWebsiteUrl, consent, setConsent, scannin
           <h2 className="text-base font-semibold text-fg">Your knowledge</h2>
           <p className="text-sm text-fg-3">Upload PDFs, .txt or .md files, or write entries. Scanned pages land here too — move or edit anything before launch.</p>
         </div>
-        <Badge tone={trainableCount > MAX_TRAINING_PAGES ? 'warning' : 'cyan'}>{trainableCount} / {MAX_TRAINING_PAGES} entries</Badge>
+        <Badge tone={trainableCount > MAX_TRAINING_PAGES ? 'warning' : 'blue'}>{trainableCount} / {MAX_TRAINING_PAGES} entries</Badge>
       </div>
 
       <div className="space-y-4">
@@ -342,11 +342,11 @@ function KnowledgeBlock({ category, pages, updatePage, onPdfPages, onEntry }) {
         <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
           <label onDragOver={(e) => { e.preventDefault(); setDrag(true); }} onDragLeave={() => setDrag(false)}
             onDrop={(e) => { e.preventDefault(); setDrag(false); handleFiles(e.dataTransfer.files); }}
-            className={cx('relative flex cursor-pointer items-center gap-3 rounded-xl border border-dashed px-4 py-3 transition focus-within:ring-4 focus-within:ring-cyan-400/10',
-              drag ? 'border-cyan-400/70 bg-cyan-400/[0.06]' : 'border-white/15 hover:border-white/25 hover:bg-white/[0.02]')}>
+            className={cx('relative flex cursor-pointer items-center gap-3 rounded-xl border border-dashed px-4 py-3 transition focus-within:ring-4 focus-within:ring-brand-400/10',
+              drag ? 'border-brand-400/70 bg-brand-400/[0.06]' : 'border-white/15 hover:border-white/25 hover:bg-white/[0.02]')}>
             <input ref={inputRef} type="file" multiple accept="application/pdf,.pdf,.txt,.md,.markdown,text/plain,text/markdown"
               className="absolute h-px w-px opacity-0" disabled={!!busy} onChange={(e) => handleFiles(e.target.files)} />
-            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-white/[0.03] text-cyan-300">
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-white/[0.03] text-brand-300">
               {busy ? <Spinner className="h-4 w-4" /> : <IconUpload className="h-4 w-4" />}
             </span>
             <span className="min-w-0">
@@ -372,7 +372,7 @@ function EntryRow({ page, onChange }) {
     return (
       <div className="flex items-center justify-between rounded-lg border border-dashed border-white/10 px-3 py-2">
         <span className="truncate text-[13px] text-fg-3 line-through">{page.title || 'Untitled entry'}</span>
-        <button type="button" onClick={() => onChange({ deleted: false })} className="text-xs font-medium text-cyan-300">Undo</button>
+        <button type="button" onClick={() => onChange({ deleted: false })} className="text-xs font-medium text-brand-300">Undo</button>
       </div>
     );
   }

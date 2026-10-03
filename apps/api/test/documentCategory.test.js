@@ -187,7 +187,7 @@ describe('tenant bots: conversational prompt layer', () => {
       assert.ok(p.indexOf('GROUNDING RULES') < p.indexOf('HOW TO SOUND'));
       assert.match(p, /never override the rules above/);
       assert.match(p, /Never invent|Do not invent/);
-      assert.match(p, /no markdown/);
+      assert.match(p, /no headings \(#\), tables, code/);
       assert.match(p, /Never mention "excerpts"/);
     }
   });
@@ -197,10 +197,15 @@ describe('tenant bots: conversational prompt layer', () => {
     assert.match(sales, new RegExp(`output only ${SALES_SENTINEL} exactly`));
   });
 
-  test('support may use numbered steps for procedures; sales is prose-only', () => {
-    assert.match(support, /short numbered sequence/);
-    assert.doesNotMatch(sales, /numbered sequence/);
-    assert.match(sales, /never lists/);
+  test('both lay replies out for a chat window: a direct opener, bold-labelled bullets, numbered steps', () => {
+    for (const p of [support, sales]) {
+      assert.match(p, /Open with one short sentence that answers the question directly/);
+      assert.match(p, /each starting with "- "/);
+      assert.match(p, /numbered steps/);
+      assert.match(p, /At most 5 bullets or steps/);
+      assert.match(p, /A single fact or a yes\/no answer needs no list/);
+    }
+    assert.match(createTenantSalesProfile(TENANT).replyReminder, /- \*\*Label:\*\* sentence/);
   });
 
   test('the degraded (LLM-down) fallback is a polite message, never a knowledge-base excerpt', () => {

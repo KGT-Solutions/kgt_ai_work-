@@ -46,7 +46,7 @@
     mask-image: radial-gradient(ellipse 70% 60% at 50% 0%, #000 40%, transparent 100%);
   }
   .text-gradient {
-    @apply bg-gradient-to-r from-cyan-300 via-sky-300 to-violet-300 bg-clip-text text-transparent;
+    @apply bg-gradient-to-r from-brand-300 to-green-300 bg-clip-text text-transparent;
   }
   .skeleton {
     background: linear-gradient(90deg, rgba(255, 255, 255, 0.03) 0%, rgba(255, 255, 255, 0.08) 50%, rgba(255, 255, 255, 0.03) 100%);
