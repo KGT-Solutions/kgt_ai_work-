@@ -135,6 +135,10 @@ function workspace(base, auth) {
     getFaqs: () => r('/faqs'),
     regenerateFaqs: () => r('/faqs/regenerate', { method: 'POST' }),
     listTickets: () => r('/tickets'),
+    // Visitors who left an email, with transcript and AI summary: { leads, counts, filters }.
+    // botType: 'all' | 'sales' | 'support'; status: 'all' | 'NEW' | 'CONTACTED' — filtered by the API.
+    listLeads: ({ botType = 'all', status = 'all' } = {}) => r(`/leads?botType=${enc(botType)}&status=${enc(status)}`),
+    updateLeadStatus: (id, status) => r(`/leads/${enc(id)}`, { method: 'PATCH', body: { status } }),
     getUsage: () => r('/usage'),
     getDailyUsage: (days = 30) => r(`/usage/daily?days=${days}`)
   };

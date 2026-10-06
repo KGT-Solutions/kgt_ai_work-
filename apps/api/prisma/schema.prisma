@@ -39,6 +39,7 @@ model Tenant {
   consents     TenantConsent[]
   chatSessions ChatSession[]
   tickets      SupportTicket[]
+  leads        Lead[]
   usageLogs    UsageLog[]
   starterFaqs  TenantFaq?
 }
@@ -184,6 +185,10 @@ model ChatMessage {
   // support | sales — which bot this turn went to; null on rows from before
   // per-bot tracking. CHECK constraint in migration 20261002090000_bot_type_check.
   botType    String?
+  // true on an assistant reply the model wrote from the knowledge base; false
+  // on greetings, handoffs, "can't answer that" and outage replies. The
+  // visitor's confirmation email recaps only these (services/leads.js).
+  answered   Boolean     @default(false)
   createdAt  DateTime    @default(now())
 
   @@index([sessionId])
@@ -207,6 +212,37 @@ model SupportTicket {
 
   @@index([tenantId, status])
   @@index([tenantId, sessionId])
+}
+
+enum LeadStatus {
+  NEW       // not yet followed up
+  CONTACTED // someone on the tenant's team has reached out
+}
+
+// A visitor who left an email in a bot conversation (services/leads.js).
+// One row per conversation, bot and email: leaving the same email again
+// updates it rather than adding another. fullTranscript and chatSummary are
+// rewritten in the background as the conversation goes on, so the summary
+// covers what was said after the email too.
+model Lead {
+  id                 String     @id @default(uuid())
+  tenant             Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantId           String
+  // support | sales (CHECK constraint in migration 20261005090000_leads)
+  botType            String
+  sessionId          String?    // the ChatSession the email was left in
+  email              String
+  chatSummary        String?    // the LLM's executive summary; null until one is written
+  summaryStatus      String     @default("pending") // pending | ready | failed
+  fullTranscript     Json       @default("[]") // [{ role, content, botType, at }], oldest first
+  status             LeadStatus @default(NEW)
+  confirmationSentAt DateTime?  // when the "we've received your request" email went out
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, sessionId])
+  @@index([tenantId, email])
 }
 
 // One row per answer that would have cost an LLM call: a real call, or a

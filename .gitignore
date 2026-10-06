@@ -28,6 +28,9 @@ apps/api/uploads/*
 !.env.*.example
 .env.local
 .env.docker
+# Any other dotfile ending in .docker is a stray env file (e.g. a ".eve.docker" typo)
+.*.docker
+!.env.docker.example
 apps/api/.env
 apps/mobile/.env
 apps/admin-web/.env.local

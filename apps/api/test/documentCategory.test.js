@@ -187,7 +187,7 @@ describe('tenant bots: conversational prompt layer', () => {
       assert.ok(p.indexOf('GROUNDING RULES') < p.indexOf('HOW TO SOUND'));
       assert.match(p, /never override the rules above/);
       assert.match(p, /Never invent|Do not invent/);
-      assert.match(p, /no headings \(#\), tables, code/);
+      assert.match(p, /no markdown/);
       assert.match(p, /Never mention "excerpts"/);
     }
   });
@@ -197,15 +197,20 @@ describe('tenant bots: conversational prompt layer', () => {
     assert.match(sales, new RegExp(`output only ${SALES_SENTINEL} exactly`));
   });
 
-  test('both lay replies out for a chat window: a direct opener, bold-labelled bullets, numbered steps', () => {
-    for (const p of [support, sales]) {
-      assert.match(p, /Open with one short sentence that answers the question directly/);
-      assert.match(p, /each starting with "- "/);
-      assert.match(p, /numbered steps/);
-      assert.match(p, /At most 5 bullets or steps/);
-      assert.match(p, /A single fact or a yes\/no answer needs no list/);
+  test('both bots answer in "• " bullets; only support may number the steps of a procedure', () => {
+    for (const prompt of [support, sales]) {
+      assert.match(prompt, /starting with "• "/);
+      assert.match(prompt, /never "-" or "\*" as bullet/);
     }
-    assert.match(createTenantSalesProfile(TENANT).replyReminder, /- \*\*Label:\*\* sentence/);
+    assert.match(support, /number the steps instead/);
+    assert.doesNotMatch(sales, /number the steps/);
+  });
+
+  test('neither bot asks for an email in a routine answer; each names when it may', () => {
+    for (const prompt of [support, sales]) assert.match(prompt, /do NOT ask for an email or contact details in a normal answer/);
+    assert.match(sales, /ONLY when they show clear commercial intent: they ask for a custom quote/);
+    assert.match(sales, /pricing overviews, plans, feature lists/);
+    assert.match(support, /ONLY when they explicitly ask for a person, a callback, a demo or follow-up support/);
   });
 
   test('the degraded (LLM-down) fallback is a polite message, never a knowledge-base excerpt', () => {
@@ -219,8 +224,8 @@ describe('tenant bots: conversational prompt layer', () => {
   });
 
   test('sales replies are told to end with one engagement question; support stays factual', () => {
-    assert.match(sales, /End with ONE short, gentle question/);
-    assert.doesNotMatch(support, /End with ONE short, gentle question/);
+    assert.match(sales, /then ONE short, gentle question/);
+    assert.doesNotMatch(support, /ONE short, gentle question/);
     assert.match(support, /No sales pitch/);
   });
 });

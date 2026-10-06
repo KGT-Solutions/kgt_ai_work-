@@ -14,7 +14,7 @@ const { usageBreakdowns } = require('../services/usageStats');
 const { wrapRouterAsync } = require('../utils/wrapAsync');
 
 // Everything one tenant can do with its own bots: documents, PDF upload,
-// website import, API keys, test chat, tickets and usage.
+// website import, API keys, test chat, tickets, leads and usage.
 //
 // ISOLATION CONTRACT. Mounted twice, behind two different gatekeepers:
 //   /api/v1/client/workspace          requireClient  (tenant from the client's TenantUser row)
@@ -323,6 +323,63 @@ router.get('/tickets', async (req, res) => {
     take: 100,
     select: { id: true, query: true, confidence: true, kind: true, botType: true, contactEmail: true, status: true, createdAt: true }
   }));
+});
+
+// ── Leads: visitors who left an email in a chat, with the conversation and
+// its AI summary (services/leads.js). A Lead row only exists once an email
+// was captured and saved (email is NOT NULL), so every row here is a real
+// lead — a conversation without an email never appears.
+//
+// GET /leads?botType=sales|support&status=NEW|CONTACTED (either omitted or
+// "all" = no filter). Filters run in the database, so the 200-row page is
+// the newest 200 MATCHING leads. counts covers all of this tenant's leads,
+// unfiltered, for the filter labels.
+const LEAD_STATUSES = ['NEW', 'CONTACTED'];
+const LEAD_BOT_TYPES = ['sales', 'support'];
+const MAX_LEADS = 200;
+const LEAD_FIELDS = {
+  id: true, botType: true, email: true, chatSummary: true, summaryStatus: true, fullTranscript: true,
+  status: true, confirmationSentAt: true, createdAt: true, updatedAt: true
+};
+
+// undefined/"all" -> no filter; a known value -> that value; anything else -> error.
+function leadFilter(raw, allowed, normalize) {
+  if (raw === undefined || raw === '' || String(raw).toLowerCase() === 'all') return { ok: true, value: undefined };
+  const value = normalize(String(raw).trim());
+  return allowed.includes(value) ? { ok: true, value } : { ok: false };
+}
+
+router.get('/leads', async (req, res) => {
+  const botType = leadFilter(req.query.botType, LEAD_BOT_TYPES, (v) => v.toLowerCase());
+  if (!botType.ok) return res.status(400).json({ error: `botType must be one of: all, ${LEAD_BOT_TYPES.join(', ')}` });
+  const status = leadFilter(req.query.status, LEAD_STATUSES, (v) => v.toUpperCase());
+  if (!status.ok) return res.status(400).json({ error: `status must be one of: all, ${LEAD_STATUSES.join(', ')}` });
+
+  const where = { tenantId: req.tenant.id };
+  if (botType.value) where.botType = botType.value;
+  if (status.value) where.status = status.value;
+
+  const [leads, groups] = await Promise.all([
+    prisma.lead.findMany({ where, orderBy: { createdAt: 'desc' }, take: MAX_LEADS, select: LEAD_FIELDS }),
+    prisma.lead.groupBy({ by: ['botType', 'status'], where: { tenantId: req.tenant.id }, _count: { _all: true } })
+  ]);
+  const counts = { total: 0, sales: 0, support: 0, NEW: 0, CONTACTED: 0 };
+  for (const g of groups) {
+    const n = g._count._all;
+    counts.total += n;
+    if (g.botType in counts) counts[g.botType] += n;
+    if (g.status in counts) counts[g.status] += n;
+  }
+  res.json({ leads, counts, filters: { botType: botType.value || 'all', status: status.value || 'all' } });
+});
+
+// Body: { status: 'NEW' | 'CONTACTED' }
+router.patch('/leads/:leadId', async (req, res) => {
+  const status = String(req.body?.status || '').toUpperCase();
+  if (!LEAD_STATUSES.includes(status)) return res.status(400).json({ error: `status must be one of: ${LEAD_STATUSES.join(', ')}` });
+  const lead = await prisma.lead.findFirst({ where: { id: req.params.leadId, tenantId: req.tenant.id }, select: { id: true } });
+  if (!lead) return res.status(404).json({ error: 'Lead not found' });
+  res.json(await prisma.lead.update({ where: { id: lead.id }, data: { status }, select: LEAD_FIELDS }));
 });
 
 // All-time totals plus the per-bot breakdown (services/usageStats.js):

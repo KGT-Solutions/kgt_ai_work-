@@ -1,8 +1,17 @@
 const app = require('./app');
-const { assertProdSafety } = require('./utils/assertProdSafety');
+const { assertProdSafety, ProdSafetyError } = require('./utils/assertProdSafety');
 const { describeLlmConfig, verifyLlmModels } = require('./engine/llmClient');
+const { verifyMailer, mailFrom } = require('./services/mailer');
+const { confirmationCooldownMs } = require('./services/leads');
 
-assertProdSafety();
+// A config problem gets a readable list of what to fix, not a stack trace.
+try {
+  assertProdSafety();
+} catch (err) {
+  if (!(err instanceof ProdSafetyError)) throw err;
+  console.error(`[startup] FATAL: ${err.message}`);
+  process.exit(1);
+}
 
 // Not fatal (the rest of the API works without an LLM), but loud: with no
 // working provider, every chat answer is a "try again later" fallback.
@@ -26,6 +35,25 @@ verifyLlmModels().then((results) => {
         `Set ${r.provider.toUpperCase()}_MODEL to one of: ${r.suggestions.join(', ') || '(none listed)'}`
       );
     } else console.warn(`[llm] could not verify ${r.provider} model "${r.model}": ${r.reason}`);
+  }
+});
+
+// Same idea for email: a wrong SMTP password otherwise only shows up as
+// visitors quietly not getting mail.
+verifyMailer().then((m) => {
+  if (!m.transport) {
+    const log = m.production ? console.error : console.warn;
+    log(`[mailer] ${m.production ? 'ERROR' : 'WARNING'}: no mail transport configured — ` +
+      `${m.production ? 'every email (lead confirmations, password resets) will FAIL' : 'emails are printed to this log, not sent'}\n` +
+      `[mailer]   fix: ${m.hint}`);
+  } else if (m.ok === false) {
+    console.error(`[mailer] ERROR: SMTP check failed (${m.reason}): ${m.error} — emails will fail until this is fixed\n[mailer]   fix: ${m.hint}`);
+  } else {
+    console.log(`[mailer] sending via ${m.transport}${m.ok ? ' (SMTP login OK)' : ''} as ${mailFrom()}`);
+  }
+  if (m.production && confirmationCooldownMs() === 0) {
+    console.warn('[leads] WARNING: LEAD_CONFIRMATION_COOLDOWN_HOURS=0 in production — every email typed into a chat gets a ' +
+      'confirmation, with no anti-spam limit. Remove it once testing is done.');
   }
 });
 

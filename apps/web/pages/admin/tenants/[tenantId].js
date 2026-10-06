@@ -6,6 +6,7 @@ import BotSandbox from '../../../components/workspace/BotSandbox';
 import DocumentManager from '../../../components/workspace/DocumentManager';
 import KeyVault from '../../../components/workspace/KeyVault';
 import Overview from '../../../components/workspace/Overview';
+import LeadsPanel from '../../../components/workspace/LeadsPanel';
 import TicketsList from '../../../components/workspace/TicketsList';
 import UsagePanel, { usd } from '../../../components/workspace/UsagePanel';
 import { Badge, Button, Card, PageHeader, Skeleton, cx } from '../../../components/ui';
@@ -15,7 +16,7 @@ import { api, staffWorkspace } from '../../../lib/api';
 
 // KGT staff inside one company: profile, contact and status, then the same
 // workspace components the company sees on its own dashboard.
-const TABS = ['Overview', 'Documents', 'Test bots', 'API keys', 'Tickets', 'Usage'];
+const TABS = ['Overview', 'Documents', 'Test bots', 'API keys', 'Tickets', 'Leads', 'Usage'];
 
 export default function StaffTenant() {
   const router = useRouter();
@@ -82,6 +83,7 @@ export default function StaffTenant() {
         {tab === 'Test bots' && <BotSandbox ws={ws} tenant={tenant} />}
         {tab === 'API keys' && <KeyVault ws={ws} tenant={tenant} />}
         {tab === 'Tickets' && <TicketsList ws={ws} />}
+        {tab === 'Leads' && <LeadsPanel ws={ws} />}
         {tab === 'Usage' && <UsagePanel ws={ws} />}
       </div>
     </>

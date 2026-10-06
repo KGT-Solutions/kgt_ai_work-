@@ -12,8 +12,20 @@ describe('buildUserPrompt — replyReminder', () => {
     const question = prompt.indexOf('How much is it?');
     const reminder = prompt.indexOf('REPLY FORMAT:');
     assert.ok(question !== -1 && reminder > question, 'reminder comes after the question');
-    assert.match(prompt, /finish with one short, friendly question/);
+    assert.match(prompt, /then one short, friendly question/);
+    assert.match(prompt, /Ask for their email only if/);
     assert.ok(prompt.includes(SALES_SENTINEL), 'the reminder keeps the sentinel escape hatch');
+  });
+
+  test('normalizeChatText: markdown the model slips in never reaches the chat', () => {
+    const { normalizeChatText } = require('../src/engine/promptBuilder');
+    assert.equal(
+      normalizeChatText('## Plans\nWe offer **two** plans:\n- Starter\n* Pro, with `API` access\n\n\n\nWant a walkthrough?'),
+      'Plans\nWe offer two plans:\n• Starter\n• Pro, with API access\n\nWant a walkthrough?'
+    );
+    // Left alone: numbered steps, "•" bullets, in-word hyphens, arithmetic.
+    const clean = '1. Open Settings\n2. Tap Billing\n• Takes 2-3 minutes\nTotal: 5 * 3 = 15';
+    assert.equal(normalizeChatText(clean), clean);
   });
 
   test('support prompts carry no sales reminder', () => {

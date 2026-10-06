@@ -1,56 +1,230 @@
-// Transactional email. Sends through Resend's HTTP API when RESEND_API_KEY and
-// MAIL_FROM are set (no SDK — plain fetch). Without them:
-//   - outside production, the message is printed to the API log so the
-//     password-reset flow can be tested locally ("dev mail");
-//   - in production (DEPLOY_ENV=production) nothing is printed — codes must
-//     never land in production logs — and the send reports failure.
+const nodemailer = require('nodemailer');
+
+// Transactional email: password-reset codes and the visitor's lead
+// confirmation. Nothing here emails internal staff. Transports, first one
+// configured wins:
+//   1. SMTP via nodemailer, when SMTP_HOST is set (Microsoft 365);
+//   2. Resend's HTTP API, when RESEND_API_KEY and a sender are set (kept so
+//      existing deployments keep working until they move to SMTP);
+//   3. neither — outside production the message is printed to the API log so
+//      flows can be tested locally ("dev mail"); in production
+//      (DEPLOY_ENV or NODE_ENV=production) nothing is printed — reset codes must never
+//      land in production logs — and the send reports failure.
+//
+// SMTP settings (Microsoft 365), all from the environment (.env.docker):
+//   SMTP_HOST    smtp.office365.com
+//   SMTP_PORT    587 (STARTTLS, the default) or 465 (implicit TLS)
+//   SMTP_SECURE  optional override: true = implicit TLS. Defaults to true on
+//                port 465 only. Without it, STARTTLS is required, so the
+//                password never crosses the wire unencrypted.
+//   SMTP_USER    connect@kgt.solutions
+//   SMTP_PASS    the mailbox's app password when MFA is on; the mailbox also
+//                needs Authenticated SMTP enabled
+//   SMTP_FROM    "KGT Solutions <connect@kgt.solutions>"; defaults to SMTP_USER.
+//                Microsoft 365 rejects a From address the login can't send as
+//                (550 5.7.60 SendAsDenied), so keep it the same mailbox.
 
 const RESEND_URL = 'https://api.resend.com/emails';
+const env = (name) => String(process.env[name] || '').trim();
 
-// Sender address. EMAIL_FROM is accepted too: it's the name this project's
-// older .env files use, and with only that set no mail was ever sent.
+// Sender address. MAIL_FROM / EMAIL_FROM are the names older .env files use.
 function mailFrom() {
-  return String(process.env.MAIL_FROM || process.env.EMAIL_FROM || '').trim();
+  return env('SMTP_FROM') || env('MAIL_FROM') || env('EMAIL_FROM') || (env('SMTP_HOST') ? env('SMTP_USER') : '');
+}
+
+function smtpConfig() {
+  const host = env('SMTP_HOST');
+  if (!host) return null;
+  const port = Number.parseInt(env('SMTP_PORT'), 10) || 587;
+  const secure = env('SMTP_SECURE') ? env('SMTP_SECURE').toLowerCase() === 'true' : port === 465;
+  const user = env('SMTP_USER');
+  return {
+    host,
+    port,
+    secure,
+    requireTLS: !secure, // STARTTLS or fail; never fall back to plaintext
+    auth: user ? { user, pass: process.env.SMTP_PASS || '' } : undefined,
+    connectionTimeout: 10_000,
+    greetingTimeout: 10_000,
+    socketTimeout: 20_000
+  };
+}
+
+function resendConfigured() {
+  return !!(env('RESEND_API_KEY') && mailFrom());
+}
+
+/** @returns {'smtp'|'resend'|null} */
+function activeTransport() {
+  if (smtpConfig() && mailFrom()) return 'smtp';
+  if (resendConfigured()) return 'resend';
+  return null;
 }
 
 function mailConfigured() {
-  return !!(String(process.env.RESEND_API_KEY || '').trim() && mailFrom());
+  return activeTransport() !== null;
+}
+
+// One pooled transport per configuration, built on first use.
+let smtp = { key: null, transport: null };
+function smtpTransport(config) {
+  const key = JSON.stringify(config);
+  if (smtp.key !== key) {
+    smtp.transport?.close();
+    smtp = { key, transport: nodemailer.createTransport({ ...config, pool: true, maxConnections: 3 }) };
+  }
+  return smtp.transport;
+}
+
+
+// Production is either flag: Docker images set NODE_ENV=production, and a
+// deployment that forgot DEPLOY_ENV must still never print mail (reset codes)
+// to its logs or pretend a dev-log line was a delivered email.
+function isProduction() {
+  return env('DEPLOY_ENV') === 'production' || env('NODE_ENV') === 'production';
+}
+
+// Recipients in logs: enough to spot a typo'd domain, not the whole address.
+function maskAddress(email) {
+  const [local, domain] = String(email).split('@');
+  return domain ? `${local.slice(0, 2)}***@${domain}` : '***';
+}
+
+const NOT_CONFIGURED_HINT = 'Set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS and SMTP_FROM in the env file the API ' +
+  'process actually reads (.env.docker for Docker; apps/api/.env is excluded from the image), then recreate the ' +
+  'container so it picks them up: docker compose --env-file .env.docker up -d api (a plain restart keeps the old env).';
+
+/**
+ * Sorts a send failure into something actionable.
+ * reason: auth | timeout | connection | tls | rejected | temporary | unknown.
+ * transient: worth retrying (the same message may go through in a minute).
+ * @returns {{ reason: string, transient: boolean, hint: string, detail: string }}
+ */
+function classifyMailError(err) {
+  const code = err?.code || '';
+  const status = Number(err?.responseCode) || 0;
+  const detail = `${code} ${err?.response || err?.message || ''}`.trim();
+  const config = smtpConfig();
+  const where = config ? `${config.host}:${config.port}` : 'the mail server';
+  const result = (reason, transient, hint) => ({ reason, transient, hint, detail });
+
+  if (code === 'EAUTH' || code === 'ENOAUTH' || [530, 534, 535].includes(status)) {
+    return result('auth', false, 'SMTP login refused. Check SMTP_USER / SMTP_PASS. Microsoft 365: use an app password if the ' +
+      'account has MFA, and make sure Authenticated SMTP is enabled for this mailbox (Microsoft 365 admin center > Users > ' +
+      'Mail > Manage email apps). If it is enabled and the password is right, the tenant may have security defaults on, ' +
+      'which block SMTP AUTH for every mailbox.');
+  }
+  if (code === 'ETIMEDOUT' || /timed? ?out/i.test(detail)) {
+    return result('timeout', true, `No answer from ${where} in time. Check SMTP_HOST / SMTP_PORT, and that this host can ` +
+      'make outbound connections on that port (some cloud providers block SMTP ports by default).');
+  }
+  if (code === 'ETLS' || /certificate|ssl|tls|wrong version number/i.test(detail)) {
+    return result('tls', false, 'TLS handshake failed. Use port 587 with SMTP_SECURE unset (STARTTLS), or port 465 with ' +
+      'SMTP_SECURE=true.');
+  }
+  if (['EDNS', 'ECONNECTION', 'ESOCKET', 'ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND', 'EAI_AGAIN'].includes(code) ||
+      /ECONNREFUSED|ENOTFOUND|ECONNRESET|EAI_AGAIN/.test(detail)) {
+    return result('connection', true, `Could not connect to ${where}. Check SMTP_HOST / SMTP_PORT and outbound network access.`);
+  }
+  if (status >= 400 && status < 500) {
+    return result('temporary', true, 'The mail server deferred the message (4xx); it usually goes through on a retry.');
+  }
+  if (code === 'EENVELOPE' || status >= 500) {
+    return result('rejected', false, 'The mail server refused the message. "SendAsDenied" / 5.7.60 means SMTP_FROM is not an ' +
+      'address SMTP_USER may send as; otherwise check the recipient address.');
+  }
+  return result('unknown', false, 'See the detail above.');
+}
+
+function logFailure({ label, recipients, via, failure }) {
+  console.error(
+    `[mailer] ERROR: email NOT sent${label ? ` (${label})` : ''} to ${recipients.map(maskAddress).join(', ')} via ${via}: ` +
+    `${failure.reason}${failure.detail ? ` - ${failure.detail}` : ''}\n[mailer]   fix: ${failure.hint}`
+  );
 }
 
 /**
- * @param {{ to: string, subject: string, text: string, html?: string, devSummary?: string }} msg
+ * Never throws. Every failure is logged here, once, with its reason and a fix.
+ * @param {{ to: string|string[], subject: string, text: string, html?: string,
+ *           replyTo?: string, label?: string, devSummary?: string }} msg
+ *   label: what this email is, for the logs ("visitor confirmation, lead 123")
  *   devSummary: what to print in dev mode instead of the whole body
- * @returns {Promise<{ sent: boolean, via: 'resend'|'dev-log'|'none', error?: string }>}
+ * @returns {Promise<{ sent: boolean, via: 'smtp'|'resend'|'dev-log'|'none', simulated?: true,
+ *   reason?: string, transient?: boolean, error?: string }>}
+ *   simulated: printed to the log in development, not delivered to anyone.
  */
-async function sendMail({ to, subject, text, html, devSummary }) {
-  if (mailConfigured()) {
+async function sendMail({ to, subject, text, html, replyTo, label, devSummary }) {
+  const recipients = (Array.isArray(to) ? to : [to]).filter(Boolean);
+  if (!recipients.length) return { sent: false, via: 'none', reason: 'no-recipient', transient: false, error: 'No recipient' };
+  const transport = activeTransport();
+
+  if (transport === 'smtp') {
     try {
-      const res = await fetch(RESEND_URL, {
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${process.env.RESEND_API_KEY.trim()}`,
-          'content-type': 'application/json'
-        },
-        body: JSON.stringify({ from: mailFrom(), to: [to], subject, text, ...(html ? { html } : {}) })
+      await smtpTransport(smtpConfig()).sendMail({
+        from: mailFrom(), to: recipients, subject, text, ...(html ? { html } : {}), ...(replyTo ? { replyTo } : {})
       });
-      if (!res.ok) {
-        const body = await res.text().catch(() => '');
-        console.error(`[mailer] Resend rejected the message (${res.status}): ${body.slice(0, 200)}`);
-        return { sent: false, via: 'resend', error: `HTTP ${res.status}` };
-      }
-      return { sent: true, via: 'resend' };
+      return { sent: true, via: 'smtp' };
     } catch (err) {
-      console.error(`[mailer] could not reach Resend: ${err.message}`);
-      return { sent: false, via: 'resend', error: err.message };
+      // err.response is the server's reply ("535 5.7.3 Authentication unsuccessful"), never the password.
+      const failure = classifyMailError(err);
+      logFailure({ label, recipients, via: 'smtp', failure });
+      return { sent: false, via: 'smtp', reason: failure.reason, transient: failure.transient, error: failure.detail };
     }
   }
 
-  if (process.env.DEPLOY_ENV === 'production') {
-    console.error('[mailer] RESEND_API_KEY / MAIL_FROM (or EMAIL_FROM) not set — email not sent.');
-    return { sent: false, via: 'none', error: 'Email is not configured' };
+  if (transport === 'resend') {
+    let failure;
+    try {
+      const res = await fetch(RESEND_URL, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${env('RESEND_API_KEY')}`, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          from: mailFrom(),
+          to: recipients, subject, text, ...(html ? { html } : {}), ...(replyTo ? { reply_to: replyTo } : {})
+        })
+      });
+      if (res.ok) return { sent: true, via: 'resend' };
+      const detail = `HTTP ${res.status} ${(await res.text().catch(() => '')).slice(0, 200)}`.trim();
+      const retryable = res.status >= 500 || res.status === 429;
+      failure = res.status === 401 || res.status === 403
+        ? { reason: 'auth', transient: false, hint: 'Check RESEND_API_KEY, or switch to SMTP.', detail }
+        : { reason: retryable ? 'temporary' : 'rejected', transient: retryable, hint: 'Resend refused the message; see the detail.', detail };
+    } catch (err) {
+      failure = { reason: 'connection', transient: true, hint: 'Could not reach api.resend.com.', detail: err.message };
+    }
+    logFailure({ label, recipients, via: 'resend', failure });
+    return { sent: false, via: 'resend', reason: failure.reason, transient: failure.transient, error: failure.detail };
   }
-  console.log(`[mailer:dev] to=${to} subject="${subject}" ${devSummary || text}`);
-  return { sent: true, via: 'dev-log' };
+
+  if (isProduction()) {
+    logFailure({ label, recipients, via: 'none', failure: { reason: 'not-configured', detail: 'no mail transport is configured', hint: NOT_CONFIGURED_HINT } });
+    return { sent: false, via: 'none', reason: 'not-configured', transient: false, error: 'Email is not configured' };
+  }
+  console.warn(`[mailer:dev] NOT delivered (no mail transport, printed instead) to=${recipients.join(',')} subject="${subject}" ${devSummary || text}`);
+  return { sent: true, via: 'dev-log', simulated: true };
 }
 
-module.exports = { sendMail, mailConfigured, mailFrom };
+/**
+ * Startup check: logs in to the SMTP server without sending anything, so bad
+ * credentials show up in the boot log rather than as silently missing mail.
+ * Never throws.
+ * @returns {Promise<{ transport: string|null, production: boolean, ok?: boolean, error?: string,
+ *   reason?: string, hint?: string }>}
+ */
+async function verifyMailer() {
+  const transport = activeTransport();
+  const base = { transport, production: isProduction() };
+  if (!transport) return { ...base, hint: NOT_CONFIGURED_HINT };
+  if (transport !== 'smtp') return base;
+  try {
+    await smtpTransport(smtpConfig()).verify();
+    return { ...base, ok: true };
+  } catch (err) {
+    const failure = classifyMailError(err);
+    return { ...base, ok: false, error: failure.detail, reason: failure.reason, hint: failure.hint };
+  }
+}
+
+module.exports = {
+  sendMail, mailConfigured, mailFrom, verifyMailer, smtpConfig, classifyMailError, isProduction, maskAddress
+};

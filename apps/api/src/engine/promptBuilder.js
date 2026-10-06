@@ -11,40 +11,41 @@ const { CATEGORY_PROMPT_LABELS } = require('../services/shared/documentCategory'
  * Always placed AFTER the profile's grounding rules and explicitly
  * subordinate to them: tone governs how an answer is phrased, never whether
  * one is given or what facts it contains.
- *
- * Replies may use a small chat-formatting subset — paragraphs, "- " bullets,
- * "1." steps and **bold** — which the widget (public/widgets/
- * tenant-chat-widget.js) and the Test Bots sandbox (apps/web
- * components/ui/ChatText.js) render. Anything outside it (headings, tables,
- * code, links) would show literally, so it stays forbidden.
- * @param {{ sentinel: string }} opts
+ * @param {{ sentinel: string, allowSteps?: boolean }} opts
+ *   allowSteps: when the excerpts describe an ordered procedure, use numbered
+ *   steps instead of bullets (support troubleshooting); off for sales.
  */
-function conversationalStyleRules({ sentinel }) {
-  return `HOW TO SOUND (these shape phrasing only — they never override the rules above):
-- Talk like a knowledgeable, friendly person on the team, not a search engine. Warm, clear, and
-  direct; empathetic when the person is frustrated or stuck ("That's annoying — here's how to fix it").
-- Synthesize: read the excerpts, work out what actually answers the question, and say that in your
-  own words. Never paste excerpt text verbatim or dump everything you were given.
+function conversationalStyleRules({ sentinel, allowSteps = false }) {
+  const steps = allowSteps
+    ? `
+- One exception to bullets: when the excerpts describe an ordered procedure (setup, troubleshooting,
+  a return process), number the steps instead — "1.", "2." — one short, friendly sentence per step.`
+    : '';
 
-HOW TO LAY IT OUT (the reply is shown in a small chat window, so it must be easy to scan):
-- Open with one short sentence that answers the question directly.
-- When the answer covers two or more distinct points (features, options, benefits, requirements),
-  put them in a bulleted list: one line per point, each starting with "- ". Begin each bullet
-  with a 1-3 word label in **bold**, then a colon and one plain sentence, e.g.
-  "- **Visitor approvals:** residents let guests in from their phone."
-- For an ordered procedure (setup, troubleshooting, a return process), use numbered steps
-  "1.", "2.", "3." instead, one short sentence each.
-- At most 5 bullets or steps; pick the ones that matter most to this person.
-- A single fact or a yes/no answer needs no list: one or two sentences.
-- Put a blank line between the opening sentence, the list, and any closing question, so each part
-  stands on its own.
-- Use **bold** only for bullet labels and at most one key figure or term elsewhere.
-- The only formatting the chat window can show is the above: no headings (#), tables, code,
-  backticks, links or emoji.
+  return `HOW TO SOUND (these shape phrasing only — they never override the rules above):
+- Sound like a top-tier human specialist who genuinely enjoys helping: warm, upbeat, confident and
+  professional. Let real enthusiasm show when something is good news for them, and be empathetic
+  when they're frustrated or stuck ("That's annoying — here's how to fix it"). Never robotic, stiff,
+  or dry legal-sounding wording; turn formal phrasing into everyday language without changing facts.
+- Synthesize: read the excerpts, work out what actually answers the question, and say that in your
+  own words. Never paste excerpt text verbatim, dump everything you were given, or answer with
+  headings.
+
+REPLY LAYOUT (always, so it's easy to scan):
+- Open with one short, friendly sentence that answers or frames the answer directly.
+- Then give the key points as bullets: each on its own line, starting with "• " (the bullet
+  character, then a space). Usually 2-5 bullets, one idea each, a short sentence or two at most.
+  Never write a dense, blocky paragraph.${steps}
+- Close with one short, warm line: a natural next step or an inviting question.
+- If the whole answer is a single simple fact, one or two friendly sentences are fine — no bullets
+  just for the sake of it.
+- Plain text otherwise: no markdown (#, **, backticks, tables), and never "-" or "*" as bullet
+  markers — the reply is shown as a chat message, where those symbols appear literally.
+
 - Never mention "excerpts", "documents", "the knowledge base", or "according to our records" — just
   answer, the way a colleague who knows the material would.
-- Lead with the answer itself. Skip filler openers ("Great question!", "Certainly!") and closers
-  ("I hope this helps!"). A brief, genuine next step or offer to help further is fine.
+- Skip empty filler openers ("Great question!", "Certainly!") and canned closers ("I hope this
+  helps!") — warmth should come from what you say, not stock phrases.
 - Match the person's language and register; keep it concise.
 - Keep every fact, number, price, and condition exactly as the excerpts state it — rephrase the
   wording, never the substance.
@@ -136,4 +137,23 @@ function parseCitedExcerpt(rawText, chunkCount) {
   return { answerText, citedIndex };
 }
 
-module.exports = { buildSystemPrompt, buildUserPrompt, parseCitedExcerpt, conversationalStyleRules };
+/**
+ * The reply layout rules above, enforced: models still slip into markdown now
+ * and then (**bold**, "- " bullets, "## " headings), and the chat shows plain
+ * text, so the symbols would reach the visitor literally. Strips emphasis and
+ * heading marks, and turns "-" / "*" list markers into "• ". Numbered steps,
+ * hyphens inside sentences and a lone "*" (5 * 3) are left alone.
+ * @param {string} text
+ */
+function normalizeChatText(text) {
+  return String(text)
+    .replace(/\*\*([^*\n]+)\*\*/g, '$1')
+    .replace(/__([^_\n]+)__/g, '$1')
+    .replace(/`([^`\n]+)`/g, '$1')
+    .replace(/^[ \t]*#{1,6}[ \t]+/gm, '')
+    .replace(/^([ \t]*)[-*][ \t]+/gm, '$1• ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+module.exports = { buildSystemPrompt, buildUserPrompt, parseCitedExcerpt, conversationalStyleRules, normalizeChatText };

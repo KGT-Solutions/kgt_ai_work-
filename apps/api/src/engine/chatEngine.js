@@ -11,7 +11,7 @@
 
 const { loadKnowledgeBase } = require('./knowledgeLoader');
 const { retrieve } = require('./retriever');
-const { buildSystemPrompt, buildUserPrompt, parseCitedExcerpt } = require('./promptBuilder');
+const { buildSystemPrompt, buildUserPrompt, parseCitedExcerpt, normalizeChatText } = require('./promptBuilder');
 const { tryActions } = require('./actionRegistry');
 const { computeConfidence } = require('./confidence');
 const { fileSupportTicket } = require('./ticketing');
@@ -45,6 +45,8 @@ async function getEngineAnswer({ profile, query, ctx = {} }) {
     // handoff (a person will follow up), awaitingContact (the reply asks for
     // an email), contactCaptured (one was just left).
     for (const flag of RESULT_FLAGS) if (actionResult[flag]) result[flag] = true;
+    // The email itself, alongside contactCaptured, for the caller to record as a lead.
+    if (actionResult.contactCaptured && actionResult.contactEmail) result.contactEmail = actionResult.contactEmail;
     await profile.onResult?.(result, query, ctx);
     return result;
   }
@@ -153,7 +155,10 @@ async function getEngineAnswer({ profile, query, ctx = {} }) {
     const bridge = noAnswer ? await composeBridgeReply({ profile, query, ctx }) : null;
     const handoff = noAnswer && lowConfidence && !bridge?.offTopic;
     let result;
-    if (!noAnswer) result = profile.formatSuccess(answerText, effectiveRanked, ctx);
+    if (!noAnswer) {
+      result = profile.formatSuccess(normalizeChatText(answerText), effectiveRanked, ctx);
+      result.answered = true; // a real knowledge-base answer, not a handoff or fallback
+    }
     else if (handoff || !profile.formatNoAnswer) result = profile.formatFallback(ctx, confidence);
     else result = profile.formatNoAnswer(ctx, confidence);
     if (bridge) result.answer = bridge.text;

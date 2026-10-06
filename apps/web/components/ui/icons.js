@@ -28,7 +28,8 @@ export const IconEyeOff = (p) => <Icon {...p}><path d="M3 3l18 18M10.6 10.6a3 3 
 export const IconShield = (p) => <Icon {...p}><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6l7-3z" /><path d="M9 12l2 2 4-4" /></Icon>;
 export const IconBolt = (p) => <Icon {...p}><path d="M13 2L4 14h6l-1 8 9-12h-6l1-8z" /></Icon>;
 export const IconLock = (p) => <Icon {...p}><rect x="5" y="11" width="14" height="10" rx="2" /><path d="M8 11V7a4 4 0 018 0v4" /></Icon>;
-export const IconMail = (p) => <Icon {...p}><rect x="3" y="5" width="18" height="14" rx="2" /><path d="M3 7l9 6 9-6" /></Icon>;
+export const IconInbox = (p) => <Icon {...p}><path d="M3 13l3-8a2 2 0 011.9-1.4h8.2A2 2 0 0118 5l3 8v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5z" /><path d="M3 13h5l1.5 3h5l1.5-3h5" /></Icon>;
+export const IconMail =(p) => <Icon {...p}><rect x="3" y="5" width="18" height="14" rx="2" /><path d="M3 7l9 6 9-6" /></Icon>;
 export const IconArrowRight = (p) => <Icon {...p}><path d="M5 12h14M13 6l6 6-6 6" /></Icon>;
 export const IconArrowLeft = (p) => <Icon {...p}><path d="M19 12H5M11 6l-6 6 6 6" /></Icon>;
 export const IconChevronDown = (p) => <Icon {...p}><path d="M6 9l6 6 6-6" /></Icon>;

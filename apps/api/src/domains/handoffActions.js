@@ -103,7 +103,8 @@ registerAction('handoff.contact', {
         query: lastUserTurn(ctx) || 'Left an email in the chat'
       });
     }
-    return { answer: profile.handoffCopy.thanks(email), handoff: true, contactCaptured: true };
+    // contactEmail: for the lead record (services/leads.js); never sent to the chat client.
+    return { answer: profile.handoffCopy.thanks(email), handoff: true, contactCaptured: true, contactEmail: email };
   }
 });
 

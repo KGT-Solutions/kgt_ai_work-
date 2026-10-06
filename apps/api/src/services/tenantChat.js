@@ -3,6 +3,7 @@ const { getEngineAnswer } = require('../engine/chatEngine');
 const { createTenantSupportProfile, createTenantSalesProfile } = require('../domains/tenantProfile');
 const { createIpRateLimiter } = require('../utils/ipRateLimit');
 const { pickFollowUps } = require('./followUps');
+const { trackLeadActivity } = require('./leads');
 
 // One chat turn for one tenant. Shared by every way a tenant's bots are
 // reached — the embed widget (API key), the client dashboard (client JWT)
@@ -103,14 +104,17 @@ async function runTenantChat({ tenant, body }) {
   ]);
 
   // The confidence score is stored here (and on tickets) for staff and
-  // tenant review, never sent to the chat client.
-  const { confidence, ...reply } = result;
+  // tenant review, never sent to the chat client; neither is the email just
+  // captured, which goes to the lead record, nor the answered flag.
+  const { confidence, contactEmail, answered, ...reply } = result;
   await prisma.chatMessage.createMany({
     data: [
       { sessionId: session.id, role: 'user', content: query, botType },
-      { sessionId: session.id, role: 'assistant', content: reply.answer, confidence: confidence ?? null, botType }
+      { sessionId: session.id, role: 'assistant', content: reply.answer, confidence: confidence ?? null, botType, answered: !!answered }
     ]
   });
+  // After the messages are written, so the lead's transcript includes this turn.
+  await trackLeadActivity({ tenant, botType, sessionId: session.id, contactEmail: reply.contactCaptured ? contactEmail : null });
 
   // No suggested questions while the bot is waiting for an email: the reply
   // just asked for one, and chips would pull the visitor away from answering.

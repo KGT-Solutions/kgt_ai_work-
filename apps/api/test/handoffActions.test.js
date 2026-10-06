@@ -137,6 +137,19 @@ describe('handoff flow through the engine', () => {
     assert.match(generateAnswerMock.mock.calls[0].arguments[0].userPrompt, /Payments tab/);
     assert.ok(!tickets.some((t) => t.kind === 'human_request' || t.kind === 'demo_request'));
   });
+
+  // `answered` decides what the visitor's confirmation email recaps (services/leads.js).
+  test('only a real knowledge-base answer is marked answered — never a handoff, fallback or "no answer"', async () => {
+    generateAnswerMock.mock.mockImplementationOnce(async () => ({
+      text: 'Residents pay from the Payments tab using UPI or card.', provider: 'mock', model: 'mock-1', usage: { promptTokens: 0, completionTokens: 0 }
+    }));
+    const answered = await ask(support(), 'How do residents pay maintenance bills in the app?');
+    assert.equal(answered.answered, true);
+    // A different question (the same one would be served from the answer cache, still answered).
+    assert.equal((await ask(support(), 'Can residents pay maintenance bills by card?')).answered, undefined, 'model said NO_ANSWER');
+    assert.equal((await ask(sales(), 'Can I schedule a demo?')).answered, undefined, 'handoff action');
+    assert.equal((await ask(support(), 'zebra quantum saxophone')).answered, undefined, 'below the gate');
+  });
 });
 
 describe('small talk', () => {
