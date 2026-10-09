@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { DOC_CATEGORIES, DEFAULT_CATEGORY, categoryLabel } from '../../lib/documentCategories';
+import { BOT_SCOPES, DEFAULT_BOT_SCOPE, botScopeLabel } from '../../lib/botScopes';
 import { Badge, Button, Card, CardHeader, Checkbox, EmptyState, Field, Input, Segmented, Select, Skeleton, Spinner, Textarea, cx } from '../ui';
 import { useToast } from '../ui/toast';
 import { IconCheck, IconDocs, IconGlobe, IconPencil, IconSearch, IconTrash, IconUpload, IconX, IconAlert } from '../ui/icons';
@@ -285,7 +286,7 @@ function DocumentRow({ ws, doc, onChanged }) {
   const toast = useToast();
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState({ title: doc.title, content: doc.content, category: doc.category || DEFAULT_CATEGORY });
+  const [draft, setDraft] = useState({ title: doc.title, content: doc.content, category: doc.category || DEFAULT_CATEGORY, botScope: doc.botScope || DEFAULT_BOT_SCOPE });
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState(false);
 
@@ -325,6 +326,7 @@ function DocumentRow({ ws, doc, onChanged }) {
           <div className="flex flex-wrap items-center gap-2">
             <span className="truncate text-sm font-medium text-fg">{doc.title}</span>
             <Badge tone={tone}>{categoryLabel(doc.category)}</Badge>
+            {doc.botScope && doc.botScope !== DEFAULT_BOT_SCOPE && <Badge tone={doc.botScope === 'SALES' ? 'green' : doc.botScope === 'SUPPORT' ? 'blue' : 'neutral'}>{botScopeLabel(doc.botScope)} bot{doc.botScope === 'BOTH' ? 's' : ''}</Badge>}
             {doc.sourceUrl && <Badge><IconGlobe className="h-3 w-3" />Website</Badge>}
           </div>
           <p className="mt-1 line-clamp-1 text-xs text-fg-3">{doc.content.replace(/\s+/g, ' ').slice(0, 200)}</p>
@@ -348,10 +350,14 @@ function DocumentRow({ ws, doc, onChanged }) {
         <div className="border-t border-white/[0.05] px-4 py-4">
           {editing ? (
             <div className="space-y-3">
-              <div className="grid gap-3 sm:grid-cols-[1fr_240px]">
+              <div className="grid gap-3 sm:grid-cols-[1fr_220px_180px]">
                 <Input value={draft.title} onChange={(e) => setDraft({ ...draft, title: e.target.value })} aria-label="Title" />
                 <Select value={draft.category} onChange={(e) => setDraft({ ...draft, category: e.target.value })} aria-label="Section">
                   {DOC_CATEGORIES.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
+                </Select>
+                <Select value={draft.botScope} onChange={(e) => setDraft({ ...draft, botScope: e.target.value })} aria-label="Used by"
+                  title={BOT_SCOPES.find((s) => s.id === draft.botScope)?.hint}>
+                  {BOT_SCOPES.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
                 </Select>
               </div>
               <Textarea value={draft.content} onChange={(e) => setDraft({ ...draft, content: e.target.value })} className="min-h-[220px] font-mono text-[13px]" aria-label="Content" />

@@ -90,10 +90,20 @@ export default function BotSandbox({ ws, tenant }) {
 
   const busy = (target === 'both' ? pending.support || pending.sales : pending[target]);
   const reset = () => { setThreads({ support: [], sales: [] }); setSessions({}); };
+  const [view, setView] = useState('chat');
 
   return (
     <div className="space-y-4">
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <Segmented label="View" value={view} onChange={setView}
+          options={[{ value: 'chat', label: 'Compare answers' }, { value: 'knowledge', label: 'Knowledge split' }]} />
+        <p className="text-xs text-fg-3">
+          {view === 'chat' ? 'Ask both bots the same question to see how each answers from its own knowledge.'
+            : 'Which sections of your documents each bot answers from.'}
+        </p>
+      </div>
+      {view === 'knowledge' && <KnowledgeSplit ws={ws} />}
+      <div className={cx('grid gap-4 lg:grid-cols-2', view !== 'chat' && 'hidden')}>
         {BOTS.map((bot) => {
           const tailored = faqs?.[bot.faqKey] || [];
           return (
@@ -105,7 +115,7 @@ export default function BotSandbox({ ws, tenant }) {
         })}
       </div>
 
-      <Card className="p-3">
+      <Card className={cx('p-3', view !== 'chat' && 'hidden')}>
         <form onSubmit={(e) => { e.preventDefault(); send(); }} className="flex flex-col gap-3 sm:flex-row sm:items-center">
           <Segmented label="Send to" value={target} onChange={setTarget}
             options={[{ value: 'both', label: 'Both' }, { value: 'support', label: 'Support' }, { value: 'sales', label: 'Sales' }]} />
@@ -202,6 +212,55 @@ function BotPane({ bot, tenant, thread, pending, starters, tailored, generating,
         )}
       </div>
     </Card>
+  );
+}
+
+// The Sales / Support split (GET /knowledge/distribution): for each bot,
+// the document sections it may answer from — its own plus those shared with
+// both. Fix a misfiled document from Documents → edit → "Used by".
+function KnowledgeSplit({ ws }) {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState('');
+  useEffect(() => { ws.getKnowledgeDistribution().then(setData).catch((e) => setError(e.message)); }, [ws]);
+
+  if (error) return <Card className="p-5 text-sm text-rose-200">{error}</Card>;
+  if (!data) return <Card className="flex items-center gap-2 p-5 text-sm text-fg-3"><Spinner className="h-4 w-4" />Loading the knowledge split…</Card>;
+
+  return (
+    <div className="grid gap-4 lg:grid-cols-2">
+      {BOTS.map((bot) => {
+        const own = bot.id;
+        const docs = data.documents
+          .map((d) => ({ ...d, sections: d.sections.filter((s) => s.scope === own || s.scope === 'both') }))
+          .filter((d) => d.sections.length);
+        const Icon = bot.icon;
+        return (
+          <Card key={bot.id} className="flex max-h-[480px] flex-col overflow-hidden">
+            <div className="flex items-center justify-between gap-3 border-b border-white/[0.06] px-4 py-3">
+              <span className="flex items-center gap-2 text-sm font-semibold text-fg">
+                <Icon className={cx('h-4 w-4', bot.tone === 'blue' ? 'text-brand-300' : 'text-green-300')} />{bot.name}
+              </span>
+              <span className="text-xs text-fg-3 tabular-nums">
+                {data.totals[`${own}Bot`]} sections · {data.totals[own]} its own · {data.totals.both} shared
+              </span>
+            </div>
+            <ul className="flex-1 divide-y divide-white/[0.05] overflow-y-auto">
+              {docs.length === 0 && <li className="p-4 text-[13px] text-amber-200">No knowledge for this bot yet — it will hand every question to your team.</li>}
+              {docs.map((d) => (
+                <li key={d.id} className="px-4 py-2.5">
+                  <p className="truncate text-[13px] font-medium text-fg">{d.title}</p>
+                  <div className="mt-1 flex flex-wrap gap-1.5">
+                    {d.sections.map((s, i) => (
+                      <Badge key={i} tone={s.scope === 'both' ? 'neutral' : bot.tone}>{s.title}{s.scope === 'both' ? ' · shared' : ''}</Badge>
+                    ))}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </Card>
+        );
+      })}
+    </div>
   );
 }
 

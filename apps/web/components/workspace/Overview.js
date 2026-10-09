@@ -6,6 +6,45 @@ import { Badge, Card, CardHeader, Skeleton, cx } from '../ui';
 import { useToast } from '../ui/toast';
 import { IconArrowRight, IconBot, IconCheck, IconDocs, IconKey } from '../ui/icons';
 import { Stat } from './UsagePanel';
+import BotReadinessPanel from './BotReadinessPanel';
+
+const READINESS_POLL_MS = 5000;
+
+// The saved pre-flight audit (written at signup, or by "Run again" here).
+// While the API reports one running in the background — right after signup,
+// when the wizard's report couldn't be reused — it polls until it lands.
+function ReadinessCard({ ws }) {
+  const toast = useToast();
+  const [state, setState] = useState(null); // { report, stale, running }
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    let timer;
+    const load = () => ws.getReadiness().then((s) => {
+      if (!alive) return;
+      setState(s);
+      if (s.running) timer = setTimeout(load, READINESS_POLL_MS);
+    }).catch(() => alive && setState({ report: null, stale: false, running: false }));
+    load();
+    return () => { alive = false; clearTimeout(timer); };
+  }, [ws]);
+
+  const run = async () => {
+    setBusy(true);
+    try {
+      const report = await ws.runReadinessAudit();
+      setState({ report, stale: false, running: false });
+    } catch (e) {
+      toast.error(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!state) return <Skeleton className="h-40" />;
+  return <BotReadinessPanel report={state.report} stale={state.stale} loading={busy || state.running} onRun={run} />;
+}
 
 // Landing page of a workspace: are the bots live, what's left to set up, and
 // how much they've been used lately. `base` is where the subpages live
@@ -55,6 +94,8 @@ export default function Overview({ ws, tenant, base }) {
         <Stat label="AI answers · 30 days" value={data && sum('aiAnswers')} />
         <Stat label="Open tickets" value={data && data.tickets.filter((t) => t.status === 'open').length} />
       </div>
+
+      <ReadinessCard ws={ws} />
 
       <div className="grid gap-6 lg:grid-cols-[1.6fr_1fr]">
         <Card>

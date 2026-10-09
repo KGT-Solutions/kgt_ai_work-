@@ -12,6 +12,9 @@ const { handleChat } = require('../services/tenantChat');
 const { scheduleFaqGeneration, isFaqGenerationRunning } = require('../services/tenantFaqs');
 const { usageBreakdowns } = require('../services/usageStats');
 const { wrapRouterAsync } = require('../utils/wrapAsync');
+const { parseBotScope, scopeCounts } = require('../services/shared/botScope');
+const { documentChunks } = require('../domains/tenantProfile');
+const { auditTenant, tenantReadiness } = require('../services/botAuditor');
 
 // Everything one tenant can do with its own bots: documents, PDF upload,
 // website import, API keys, test chat, tickets, leads and usage.
@@ -26,7 +29,7 @@ const { wrapRouterAsync } = require('../utils/wrapAsync');
 const router = express.Router({ mergeParams: true });
 
 const DOC_FIELDS = {
-  id: true, title: true, content: true, category: true, sourceUrl: true, createdAt: true, updatedAt: true
+  id: true, title: true, content: true, category: true, botScope: true, sourceUrl: true, createdAt: true, updatedAt: true
 };
 const API_KEY_PUBLIC_FIELDS = { id: true, keyPrefix: true, label: true, createdAt: true, lastUsedAt: true, revokedAt: true };
 const MAX_TITLE_LEN = 200;
@@ -37,6 +40,8 @@ const MAX_DOCUMENTS_PER_TENANT = 500;
 const isClientCrawlLimited = createIpRateLimiter({ max: 5, windowMs: 60 * 60 * 1000 });
 // Manual starter-FAQ refreshes: each one is an LLM call, so a few per hour per tenant.
 const isFaqRegenLimited = createIpRateLimiter({ max: 5, windowMs: 60 * 60 * 1000 });
+// Readiness audits: each is an LLM call billed to the tenant.
+const isAuditLimited = createIpRateLimiter({ max: 6, windowMs: 60 * 60 * 1000 });
 
 // ── PDF upload (same parser and 10MB limit as the signup wizard)
 const MAX_PDF_BYTES = 10 * 1024 * 1024;
@@ -90,10 +95,12 @@ router.post('/documents', async (req, res) => {
   if (!title || !content) return res.status(400).json({ error: 'title and content are required' });
   const category = parseCategory(req.body?.category);
   if (!category.ok) return res.status(400).json({ error: category.error });
+  const botScope = parseBotScope(req.body?.botScope);
+  if (!botScope.ok) return res.status(400).json({ error: botScope.error });
   if (!(await roomForDocuments(req.tenant.id, 1))) return res.status(409).json(TOO_MANY_DOCS);
 
   const doc = await prisma.tenantDocument.create({
-    data: { tenantId: req.tenant.id, title, content, category: category.value },
+    data: { tenantId: req.tenant.id, title, content, category: category.value, botScope: botScope.value },
     select: DOC_FIELDS
   });
   invalidateTenantKnowledge(req.tenant.id); // next chat request re-reads from the DB
@@ -157,6 +164,12 @@ router.patch('/documents/:documentId', async (req, res) => {
     const category = parseCategory(req.body.category, null);
     if (!category.ok || !category.value) return res.status(400).json({ error: category.error || 'category cannot be empty' });
     data.category = category.value;
+  }
+  // Which bot may use it: AUTO | BOTH | SUPPORT | SALES (services/shared/botScope.js).
+  if (req.body?.botScope !== undefined) {
+    const botScope = parseBotScope(req.body.botScope, null);
+    if (!botScope.ok || !botScope.value) return res.status(400).json({ error: botScope.error || 'botScope cannot be empty' });
+    data.botScope = botScope.value;
   }
   if (!Object.keys(data).length) return res.status(400).json({ error: 'Nothing to update' });
 
@@ -270,6 +283,45 @@ router.post('/faqs/regenerate', async (req, res) => {
   }
   scheduleFaqGeneration(req.tenant.id);
   res.status(202).json({ status: 'pending' });
+});
+
+// ── Readiness audit and the Sales / Support knowledge split.
+
+// Runs the pre-flight audit on this tenant's documents now and saves it
+// (services/botAuditor.js). Synchronous — the caller is waiting on the report.
+router.post('/preflight-audit', async (req, res) => {
+  if (!(await prisma.tenantDocument.count({ where: { tenantId: req.tenant.id } }))) {
+    return res.status(409).json({ error: 'Add a document or import a website first — the audit reads your content.' });
+  }
+  if (isAuditLimited(req.tenant.id)) {
+    return res.status(429).json({ error: 'The readiness audit ran several times recently. Please try again in an hour.' });
+  }
+  res.json(await auditTenant(req.tenant.id));
+});
+
+// The latest saved report; stale = documents changed since it was written.
+router.get('/readiness', async (req, res) => {
+  res.json(await tenantReadiness(req.tenant.id));
+});
+
+// How the knowledge splits between the bots, overall and per document:
+// sections each bot can use (support / sales / both), from the same
+// classifier retrieval uses (domains/tenantProfile.js documentChunks).
+router.get('/knowledge/distribution', async (req, res) => {
+  const docs = await prisma.tenantDocument.findMany({
+    where: { tenantId: req.tenant.id },
+    orderBy: { createdAt: 'desc' },
+    select: { id: true, title: true, content: true, category: true, botScope: true }
+  });
+  const perDoc = docs.map((doc) => {
+    const chunks = documentChunks(doc);
+    return {
+      id: doc.id, title: doc.title, category: doc.category, botScope: doc.botScope,
+      sections: chunks.map((c) => ({ title: c.title, scope: c.scope })),
+      counts: scopeCounts(chunks)
+    };
+  });
+  res.json({ totals: scopeCounts(perDoc.flatMap((d) => d.sections)), documents: perDoc });
 });
 
 // ── API keys. Plaintext is returned only by the POST that issues a key;

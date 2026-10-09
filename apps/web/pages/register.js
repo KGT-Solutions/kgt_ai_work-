@@ -8,13 +8,20 @@ import {
 } from '../components/ui/icons';
 import { api, setToken } from '../lib/api';
 import { DOC_CATEGORIES, DEFAULT_CATEGORY } from '../lib/documentCategories';
+import { BOT_SCOPES, DEFAULT_BOT_SCOPE } from '../lib/botScopes';
+import BotReadinessPanel from '../components/workspace/BotReadinessPanel';
+import EmailVerificationStep from '../components/signup/EmailVerificationStep';
 import { putSignupHandoff } from '../lib/signupHandoff';
 
-// Self-serve signup for a new client company, in three steps:
+// Self-serve signup for a new client company, in five steps:
 //   1. Company & account — company, contact, email, password, industry
-//   2. Knowledge         — scan the website AND/OR upload files / write entries,
+//   2. Verify email      — a 6-digit code to that address; nothing past this
+//                          step unlocks until it's verified (the API enforces it too)
+//   3. Knowledge         — scan the website AND/OR upload files / write entries,
 //                          all reviewed together in three knowledge blocks
-//   3. Review & launch   — creates the isolated tenant, its first (hashed)
+//   4. Readiness check   — an AI audit of that knowledge: score, gaps, what to add
+//                          (launch unlocks at 80%, or once the gaps are acknowledged)
+//   5. Review & launch   — creates the isolated tenant, its first (hashed)
 //                          API key and the login in one request, then lands the
 //                          company, signed in, on /dashboard.
 
@@ -30,9 +37,13 @@ const MAX_TRAINING_PAGES = 40; // mirrors MAX_PAGES_ON_COMPLETE in the API
 const MAX_PDF_MB = 10;
 const MAX_TEXT_KB = 200;
 const MIN_PASSWORD_LEN = 10; // mirrors the API
-const STEPS = ['Company & account', 'Knowledge', 'Review & launch'];
+const STEPS = ['Company & account', 'Verify email', 'Knowledge', 'Readiness check', 'Review & launch'];
+const STEP = { ACCOUNT: 0, VERIFY: 1, KNOWLEDGE: 2, READINESS: 3, REVIEW: 4 };
+const READY_AT = 80; // mirrors the API's Production Ready threshold (services/botAuditor.js)
 
 const isValidEmail = (v) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim());
+// What the API audits and trains on, for one page.
+const toApiPage = (p) => ({ title: p.title, content: p.content, category: p.category, botScope: p.botScope || DEFAULT_BOT_SCOPE, sourceUrl: p.url || undefined });
 const isTrainable = (p) => !p.deleted && p.title.trim() && p.content.trim();
 const isPdf = (f) => /\.pdf$/i.test(f.name) || f.type === 'application/pdf';
 const isText = (f) => /\.(txt|md|markdown)$/i.test(f.name) || /^text\/(plain|markdown)$/.test(f.type);
@@ -42,10 +53,16 @@ export default function Register() {
   const [step, setStep] = useState(0);
   const [account, setAccount] = useState({ companyName: '', contactName: '', email: '', password: '', confirm: '', industryLabel: INDUSTRIES[0] });
 
+  // Email verification: { email, token } once the code is confirmed. Tied to
+  // the address — editing the email in step 1 means verifying again.
+  const [verification, setVerification] = useState(null);
+  const normalizedEmail = account.email.trim().toLowerCase();
+  const emailVerified = !!verification && verification.email === normalizedEmail;
+
   // One list for everything: crawled pages (url set), file sections (sourceFile) and written entries (manual).
   const [pages, setPages] = useState([]);
   const nextId = useRef(0);
-  const withIds = (list) => list.map((p) => ({ category: DEFAULT_CATEGORY, ...p, id: nextId.current++, deleted: false }));
+  const withIds = (list) => list.map((p) => ({ category: DEFAULT_CATEGORY, botScope: DEFAULT_BOT_SCOPE, ...p, id: nextId.current++, deleted: false }));
 
   const [websiteUrl, setWebsiteUrl] = useState('');
   const [consent, setConsent] = useState(false);
@@ -58,6 +75,33 @@ export default function Register() {
 
   const trainable = pages.filter(isTrainable);
   const hasCrawled = trainable.some((p) => p.url);
+
+  // Readiness audit of exactly what will be trained on. auditKey fingerprints
+  // the pages: going back and editing anything invalidates the audit, so the
+  // report on screen always matches what launches.
+  const [audit, setAudit] = useState({ report: null, key: null, loading: false, error: '' });
+  const [acknowledged, setAcknowledged] = useState(false);
+  const auditKey = JSON.stringify(trainable.map(toApiPage));
+  const auditCurrent = audit.key === auditKey && !audit.loading;
+  const canLaunch = emailVerified && auditCurrent &&
+    (audit.report ? audit.report.readinessScore >= READY_AT || acknowledged : !!audit.error && acknowledged);
+
+  const runAudit = async () => {
+    const key = auditKey;
+    setAudit((a) => ({ ...a, loading: true, error: '', key }));
+    setAcknowledged(false);
+    try {
+      const report = await api.preflightAudit({ companyName: account.companyName.trim(), industryLabel: account.industryLabel, pages: trainable.map(toApiPage) });
+      setAudit({ report, key, loading: false, error: '' });
+    } catch (err) {
+      setAudit({ report: null, key, loading: false, error: err.message });
+    }
+  };
+
+  // Entering the readiness step audits the current pages (once per version of them).
+  useEffect(() => {
+    if (step === STEP.READINESS && audit.key !== auditKey && !audit.loading && trainable.length) runAudit();
+  }, [step]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const scan = async () => {
     const url = websiteUrl.trim();
@@ -87,7 +131,7 @@ export default function Register() {
   const updatePage = (id, patch) => setPages((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)));
 
   const launch = async () => {
-    if (launching) return;
+    if (launching || !canLaunch) return;
     if (!trainable.length) return setLaunchError('Add at least one website page or document with a title and content.');
     if (trainable.length > MAX_TRAINING_PAGES) return setLaunchError(`You can train on up to ${MAX_TRAINING_PAGES} entries — remove ${trainable.length - MAX_TRAINING_PAGES}.`);
     setLaunchError('');
@@ -99,21 +143,30 @@ export default function Register() {
         email: account.email.trim(),
         password: account.password,
         industryLabel: account.industryLabel,
-        pages: trainable.map((p) => ({ title: p.title, content: p.content, category: p.category, sourceUrl: p.url || undefined })),
+        pages: trainable.map(toApiPage),
         // Required by the API whenever crawled pages are included; stored as the consent record.
-        websiteConsent: hasCrawled ? { authorized: true, url: crawl?.url } : undefined
+        websiteConsent: hasCrawled ? { authorized: true, url: crawl?.url } : undefined,
+        // Proof of the email OTP; the API answers 403 without it.
+        emailVerificationToken: verification?.token
       });
       setToken('client', data.token);
       putSignupHandoff({ apiKey: data.apiKey, slug: data.slug, documentsCreated: data.documentsCreated });
       router.push('/dashboard');
     } catch (err) {
-      setLaunchError(err.message);
       setLaunching(false);
+      if (err.data?.code === 'EMAIL_NOT_VERIFIED') {
+        // Expired (2h) or already used: verify again, then come straight back.
+        setVerification(null);
+        setLaunchError('');
+        return goTo(STEP.VERIFY);
+      }
+      setLaunchError(err.message);
     }
   };
 
   const goTo = (n) => {
-    setStep(n);
+    // Nothing past the verification step without a verified email.
+    setStep(n > STEP.VERIFY && !emailVerified ? STEP.VERIFY : n);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -132,10 +185,10 @@ export default function Register() {
         <div className="mx-auto max-w-2xl text-center">
           <Badge tone="blue"><IconShield className="h-3 w-3" />Private to your company</Badge>
           <h1 className="mt-4 text-balance text-3xl font-semibold tracking-tight text-fg sm:text-4xl">Create your Support & Sales bots</h1>
-          <p className="mt-3 text-fg-2">Trained on your website and documents, live in three steps.</p>
+          <p className="mt-3 text-fg-2">Trained on your website and documents, live in five steps.</p>
         </div>
 
-        <ol className="mx-auto mb-10 mt-10 grid max-w-2xl grid-cols-3 gap-3" aria-label="Progress">
+        <ol className="mx-auto mb-10 mt-10 grid max-w-4xl grid-cols-5 gap-3" aria-label="Progress">
           {STEPS.map((label, i) => (
             <li key={label} className="flex flex-col gap-2">
               <span className={cx('h-1 rounded-full transition-all duration-500', i <= step ? 'bg-gradient-to-r from-brand-400 to-green-400' : 'bg-white/10')} />
@@ -150,18 +203,26 @@ export default function Register() {
         </ol>
 
         <div key={step} className="animate-fade-up">
-          {step === 0 && <StepAccount account={account} setAccount={setAccount} onNext={() => goTo(1)} />}
-          {step === 1 && (
+          {step === STEP.ACCOUNT && <StepAccount account={account} setAccount={setAccount} onNext={() => goTo(STEP.VERIFY)} />}
+          {step === STEP.VERIFY && (
+            <EmailVerificationStep email={normalizedEmail} verified={emailVerified} onVerified={setVerification}
+              onChangeEmail={() => goTo(STEP.ACCOUNT)} onNext={() => goTo(STEP.KNOWLEDGE)} />
+          )}
+          {step === STEP.KNOWLEDGE && (
             <StepKnowledge
               websiteUrl={websiteUrl} setWebsiteUrl={setWebsiteUrl} consent={consent} setConsent={setConsent}
               scanning={scanning} scanError={scanError} crawl={crawl} onScan={scan}
               pages={pages} trainableCount={trainable.length} updatePage={updatePage} addPdfPages={addPdfPages} addEntry={addEntry}
-              onBack={() => goTo(0)} onNext={() => goTo(2)}
+              onBack={() => goTo(STEP.VERIFY)} onNext={() => goTo(STEP.READINESS)}
             />
           )}
-          {step === 2 && (
-            <StepReview account={account} trainable={trainable} crawledHost={hasCrawled ? crawl?.baseHost : null}
-              launching={launching} launchError={launchError} onBack={() => goTo(1)} onLaunch={launch} />
+          {step === STEP.READINESS && (
+            <StepReadiness audit={audit} stale={!auditCurrent && !audit.loading} acknowledged={acknowledged} setAcknowledged={setAcknowledged}
+              canContinue={canLaunch} onRun={runAudit} onBack={() => goTo(STEP.KNOWLEDGE)} onNext={() => goTo(STEP.REVIEW)} />
+          )}
+          {step === STEP.REVIEW && (
+            <StepReview account={account} trainable={trainable} crawledHost={hasCrawled ? crawl?.baseHost : null} readiness={auditCurrent ? audit.report : null}
+              canLaunch={canLaunch} launching={launching} launchError={launchError} onBack={() => goTo(STEP.READINESS)} onLaunch={launch} />
           )}
         </div>
       </main>
@@ -281,7 +342,7 @@ function StepKnowledge({ websiteUrl, setWebsiteUrl, consent, setConsent, scannin
       <div className="flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between">
         <Button onClick={onBack} disabled={scanning}><IconArrowLeft className="h-4 w-4" />Back</Button>
         <div className="flex flex-col items-stretch gap-1 sm:items-end">
-          <Button variant="primary" onClick={onNext} disabled={scanning || trainableCount === 0}>Review & launch <IconArrowRight className="h-4 w-4" /></Button>
+          <Button variant="primary" onClick={onNext} disabled={scanning || trainableCount === 0}>Check readiness <IconArrowRight className="h-4 w-4" /></Button>
           {trainableCount === 0 && <span className="text-xs text-fg-3">Scan your website or add at least one document.</span>}
         </div>
       </div>
@@ -395,12 +456,20 @@ function EntryRow({ page, onChange }) {
           <Textarea value={page.content} onChange={(e) => onChange({ content: e.target.value })} className="font-mono text-[12.5px]" aria-label="Entry content"
             placeholder={'## A question or topic\nThe answer, in plain words.\n\n## Another topic\n…'} />
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <label className="flex items-center gap-2 text-xs text-fg-3">
-              Move to
-              <Select value={page.category} onChange={(e) => onChange({ category: e.target.value })} className="h-8 w-auto text-xs">
-                {DOC_CATEGORIES.map((c) => <option key={c.id} value={c.id}>{c.short}</option>)}
-              </Select>
-            </label>
+            <div className="flex flex-wrap items-center gap-3">
+              <label className="flex items-center gap-2 text-xs text-fg-3">
+                Move to
+                <Select value={page.category} onChange={(e) => onChange({ category: e.target.value })} className="h-8 w-auto text-xs">
+                  {DOC_CATEGORIES.map((c) => <option key={c.id} value={c.id}>{c.short}</option>)}
+                </Select>
+              </label>
+              <label className="flex items-center gap-2 text-xs text-fg-3" title={BOT_SCOPES.find((s) => s.id === (page.botScope || DEFAULT_BOT_SCOPE))?.hint}>
+                Used by
+                <Select value={page.botScope || DEFAULT_BOT_SCOPE} onChange={(e) => onChange({ botScope: e.target.value })} className="h-8 w-auto text-xs">
+                  {BOT_SCOPES.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+                </Select>
+              </label>
+            </div>
             <button type="button" onClick={() => onChange({ deleted: true })} className="text-xs font-medium text-rose-300 hover:text-rose-200">Remove</button>
           </div>
         </div>
@@ -410,7 +479,51 @@ function EntryRow({ page, onChange }) {
 }
 
 // ── Step 3
-function StepReview({ account, trainable, crawledHost, launching, launchError, onBack, onLaunch }) {
+function StepReadiness({ audit, stale, acknowledged, setAcknowledged, canContinue, onRun, onBack, onNext }) {
+  const score = audit.report?.readinessScore;
+  const ready = typeof score === 'number' && score >= READY_AT;
+  const footer = audit.report && (ready ? (
+    <p className="flex items-center gap-2 text-[13px] text-emerald-200"><IconCheck className="h-4 w-4" />Above {READY_AT}% — your bots are ready to launch.</p>
+  ) : (
+    <div className="rounded-xl border border-white/[0.07] bg-white/[0.02] p-4">
+      <Checkbox checked={acknowledged} onChange={(e) => setAcknowledged(e.target.checked)}>
+        I&apos;ve reviewed the gaps above and want to launch now. I can add the missing information later from my dashboard,
+        and until then the bots will hand those questions to my team instead of guessing.
+      </Checkbox>
+    </div>
+  ));
+
+  return (
+    <div className="mx-auto max-w-3xl space-y-4">
+      {stale && audit.report && (
+        <p className="flex items-center justify-between gap-3 rounded-lg border border-amber-400/25 bg-amber-400/[0.06] px-3 py-2 text-[13px] text-amber-100">
+          Your knowledge changed since this audit.
+          <Button size="sm" onClick={onRun}>Re-run audit</Button>
+        </p>
+      )}
+      <BotReadinessPanel title="Pre-flight readiness" report={stale ? null : audit.report} loading={audit.loading} error={audit.error} onRun={onRun} footer={footer} />
+      {audit.error && !audit.loading && (
+        <div className="rounded-xl border border-white/[0.07] bg-white/[0.02] p-4">
+          <Checkbox checked={acknowledged} onChange={(e) => setAcknowledged(e.target.checked)}>
+            Continue without the readiness audit. I can run it later from my dashboard.
+          </Checkbox>
+        </div>
+      )}
+      <div className="flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <Button onClick={onBack} disabled={audit.loading}><IconArrowLeft className="h-4 w-4" />Add more knowledge</Button>
+        <div className="flex flex-col items-stretch gap-1 sm:items-end">
+          <Button variant="primary" onClick={onNext} disabled={!canContinue}>Review & launch <IconArrowRight className="h-4 w-4" /></Button>
+          {!canContinue && !audit.loading && (
+            <span className="text-xs text-fg-3">{stale ? 'Re-run the audit for your latest knowledge.' : `Reach ${READY_AT}% or acknowledge the gaps to continue.`}</span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Step 4
+function StepReview({ account, trainable, crawledHost, readiness, canLaunch, launching, launchError, onBack, onLaunch }) {
   const fromWebsite = trainable.filter((p) => p.url).length;
   const fromFiles = trainable.length - fromWebsite;
   return (
@@ -420,7 +533,8 @@ function StepReview({ account, trainable, crawledHost, launching, launchError, o
           description="Creates your private workspace, your first API key and your login, then signs you in to your dashboard." />
         <dl className="grid gap-x-6 gap-y-4 p-6 sm:grid-cols-2">
           {[['Company', account.companyName], ['Industry', account.industryLabel], ['Sign-in email', account.email],
-            ['Knowledge', [fromWebsite && `${fromWebsite} from ${crawledHost || 'your website'}`, fromFiles && `${fromFiles} from documents`].filter(Boolean).join(' · ')]]
+            ['Knowledge', [fromWebsite && `${fromWebsite} from ${crawledHost || 'your website'}`, fromFiles && `${fromFiles} from documents`].filter(Boolean).join(' · ')],
+            ['Readiness', readiness ? `${readiness.readinessScore}% · ${readiness.readinessLevel}` : 'Not audited']]
             .map(([k, v]) => (
               <div key={k} className="min-w-0"><dt className="text-xs text-fg-3">{k}</dt><dd className="mt-0.5 truncate text-sm font-medium text-fg">{v}</dd></div>
             ))}
@@ -440,9 +554,12 @@ function StepReview({ account, trainable, crawledHost, launching, launchError, o
         )}
         <div className="flex flex-col-reverse gap-3 border-t border-white/[0.06] px-6 py-4 sm:flex-row sm:justify-between">
           <Button onClick={onBack} disabled={launching}><IconArrowLeft className="h-4 w-4" />Back</Button>
-          <Button variant="primary" onClick={onLaunch} loading={launching} disabled={!trainable.length}>
-            {launching ? `Training on ${trainable.length} entries…` : <><IconSpark className="h-4 w-4" />Create my bots</>}
-          </Button>
+          <div className="flex flex-col items-stretch gap-1 sm:items-end">
+            <Button variant="primary" onClick={onLaunch} loading={launching} disabled={!trainable.length || !canLaunch}>
+              {launching ? `Training on ${trainable.length} entries…` : <><IconSpark className="h-4 w-4" />Deploy & test my bots</>}
+            </Button>
+            {!canLaunch && <span className="text-xs text-fg-3">Complete the readiness check first.</span>}
+          </div>
         </div>
       </Card>
     </div>

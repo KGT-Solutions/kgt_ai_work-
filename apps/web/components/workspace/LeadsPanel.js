@@ -10,8 +10,8 @@ import { IconChevronDown, IconInbox, IconMail } from '../ui/icons';
 // and status filters are applied by the API (GET /leads?botType=&status=).
 
 const BOTS = {
-  sales: { label: 'Sales bot', tone: 'cyan' },
-  support: { label: 'Support bot', tone: 'violet' }
+  sales: { label: 'Sales bot', tone: 'green' },
+  support: { label: 'Support bot', tone: 'blue' }
 };
 const STATUSES = {
   NEW: { label: 'New', tone: 'warning' },

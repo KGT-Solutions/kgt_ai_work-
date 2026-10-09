@@ -11,6 +11,13 @@ const { hashPassword } = require('../utils/password');
 const { signClientToken } = require('../middleware/clientAuth');
 const { crawlConsentRecord, hostOf } = require('../services/shared/crawlConsent');
 const { scheduleFaqGeneration } = require('../services/tenantFaqs');
+const { parseBotScope } = require('../services/shared/botScope');
+const { claimVerification } = require('../services/verificationService');
+
+class UnverifiedEmail extends Error {}
+const {
+  auditKnowledge, rememberWizardAudit, takeWizardAudit, saveTenantReadiness, scheduleTenantAudit, contentHash
+} = require('../services/botAuditor');
 
 // Public self-serve registration wizard backend (apps/admin-web/pages/register.js).
 // Deliberately unauthenticated — that's the entire point of self-serve — so
@@ -33,6 +40,8 @@ const isAnalyzeRateLimited = createIpRateLimiter({ max: 8, windowMs: 10 * 60 * 1
 // the endpoint can't be used to probe which emails already have accounts.
 const isCompleteRateLimited = createIpRateLimiter({ max: Number(process.env.SIGNUP_RATE_LIMIT_MAX) || 3, windowMs: 60 * 60 * 1000 });
 const isPdfRateLimited = createIpRateLimiter({ max: 10, windowMs: 10 * 60 * 1000 });
+// Each readiness check is an LLM call paid by us, on a public route.
+const isAuditRateLimited = createIpRateLimiter({ max: Number(process.env.PREFLIGHT_AUDIT_RATE_LIMIT_MAX) || 6, windowMs: 10 * 60 * 1000 });
 
 // Room for a full crawl (crawler.js MAX_PAGES = 12) plus several uploaded
 // documents: the wizard lets a company combine both sources.
@@ -88,6 +97,55 @@ function makeSlug(name) {
 function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || ''));
 }
+
+/**
+ * The submitted pages, capped and validated exactly as they'd be saved —
+ * shared by /preflight-audit and /complete, so an audit's content hash
+ * matches the pages /complete then creates.
+ * @returns {{ ok: true, pages: object[] } | { ok: false, error: string }}
+ */
+function normalizePages(rawPages) {
+  const pages = [];
+  for (const p of (Array.isArray(rawPages) ? rawPages : []).slice(0, MAX_PAGES_ON_COMPLETE)) {
+    // Omitted category -> CORE_OVERVIEW and omitted botScope -> AUTO (older
+    // clients); an unknown value is rejected rather than silently re-filed.
+    const category = parseCategory(p?.category);
+    if (!category.ok) return { ok: false, error: category.error };
+    const botScope = parseBotScope(p?.botScope);
+    if (!botScope.ok) return { ok: false, error: botScope.error };
+    const sourceUrl = typeof p?.sourceUrl === 'string' && hostOf(p.sourceUrl) ? p.sourceUrl.slice(0, MAX_SOURCE_URL_LEN) : null;
+    const page = {
+      title: String(p?.title || '').trim().slice(0, MAX_TITLE_LEN),
+      content: String(p?.content || '').trim().slice(0, MAX_CONTENT_LEN),
+      category: category.value,
+      botScope: botScope.value,
+      sourceUrl
+    };
+    if (page.title && page.content) pages.push(page);
+  }
+  return { ok: true, pages };
+}
+
+// Pre-flight readiness audit of the pages in the wizard, before anything is
+// created (services/botAuditor.js). One LLM call per request on an
+// unauthenticated route, so it's rate-limited per IP; the report is kept
+// briefly by content hash so /complete can store it without auditing again.
+router.post('/preflight-audit', async (req, res) => {
+  if (isAuditRateLimited(req.ip)) {
+    return res.status(429).json({ error: 'Too many readiness checks from this address. Please wait a few minutes and try again.' });
+  }
+  const normalized = normalizePages(req.body?.pages);
+  if (!normalized.ok) return res.status(400).json({ error: normalized.error });
+  if (!normalized.pages.length) return res.status(400).json({ error: 'Add at least one website page or document to audit' });
+
+  const company = {
+    name: String(req.body?.companyName || '').trim().slice(0, 120) || 'this company',
+    industryLabel: String(req.body?.industryLabel || '').trim().slice(0, 120) || 'business'
+  };
+  const report = await auditKnowledge({ company, documents: normalized.pages });
+  rememberWizardAudit(report);
+  res.json(report);
+});
 
 router.post('/analyze', async (req, res) => {
   if (isAnalyzeRateLimited(req.ip)) {
@@ -176,21 +234,9 @@ router.post('/complete', async (req, res) => {
     return res.status(409).json({ error: 'An account with this email already exists — sign in instead.' });
   }
 
-  const pages = [];
-  for (const p of rawPages.slice(0, MAX_PAGES_ON_COMPLETE)) {
-    // Omitted category -> CORE_OVERVIEW (older clients); an unknown value is
-    // rejected outright rather than silently re-filed somewhere else.
-    const category = parseCategory(p?.category);
-    if (!category.ok) return res.status(400).json({ error: category.error });
-    const sourceUrl = typeof p?.sourceUrl === 'string' && hostOf(p.sourceUrl) ? p.sourceUrl.slice(0, MAX_SOURCE_URL_LEN) : null;
-    const page = {
-      title: String(p?.title || '').trim().slice(0, MAX_TITLE_LEN),
-      content: String(p?.content || '').trim().slice(0, MAX_CONTENT_LEN),
-      category: category.value,
-      sourceUrl
-    };
-    if (page.title && page.content) pages.push(page);
-  }
+  const normalized = normalizePages(rawPages);
+  if (!normalized.ok) return res.status(400).json({ error: normalized.error });
+  const { pages } = normalized;
   if (!pages.length) return res.status(400).json({ error: 'None of the submitted pages had both a title and content' });
 
   // Crawled content (pages carrying a sourceUrl) can only be saved alongside
@@ -206,6 +252,10 @@ router.post('/complete', async (req, res) => {
   let created;
   try {
     created = await prisma.$transaction(async (tx) => {
+      // The email must have been verified by OTP (POST /api/v1/public/auth/verify-otp).
+      // Claimed here, inside the transaction: consumed only if the account is
+      // created, and one verification creates one account.
+      if (!(await claimVerification(tx, email, req.body?.emailVerificationToken))) throw new UnverifiedEmail();
       const tenant = await tx.tenant.create({
         data: { name: companyName, slug: makeSlug(companyName), industryLabel, signupEmail: email }
       });
@@ -222,6 +272,9 @@ router.post('/complete', async (req, res) => {
       return { tenant, apiKey: key, user };
     });
   } catch (e) {
+    if (e instanceof UnverifiedEmail) {
+      return res.status(403).json({ error: 'Verify your email address first — request a code and enter it in the wizard.', code: 'EMAIL_NOT_VERIFIED' });
+    }
     // Two signups racing on the same email: the unique index wins.
     if (e.code === 'P2002') return res.status(409).json({ error: 'An account with this email already exists — sign in instead.' });
     throw e;
@@ -231,6 +284,20 @@ router.post('/complete', async (req, res) => {
   // Starter questions are written in the background, usually before the
   // new client reaches the Test Bots page.
   scheduleFaqGeneration(created.tenant.id);
+  // The readiness report the visitor reviewed in the wizard, if it was for
+  // exactly these pages; otherwise (skipped, edited after, or a restart in
+  // between) a fresh audit runs in the background.
+  const reviewed = takeWizardAudit(contentHash(pages));
+  let readiness = null;
+  if (reviewed) {
+    readiness = { score: reviewed.readinessScore, level: reviewed.readinessLevel };
+    await saveTenantReadiness(created.tenant.id, reviewed).catch((err) => {
+      console.warn(`[register] tenant ${created.tenant.id}: could not save the readiness report: ${err.message}`);
+      scheduleTenantAudit(created.tenant.id);
+    });
+  } else {
+    scheduleTenantAudit(created.tenant.id);
+  }
 
   res.status(201).json({
     tenantId: created.tenant.id,
@@ -238,6 +305,7 @@ router.post('/complete', async (req, res) => {
     name: created.tenant.name,
     apiKey: created.apiKey, // shown once, on the dashboard's welcome banner
     documentsCreated: pages.length,
+    readiness, // { score, level } when the reviewed audit was kept; null while a fresh one runs
     // Signed straight in: the wizard lands the new client on /dashboard.
     token: signClientToken(created.user)
   });

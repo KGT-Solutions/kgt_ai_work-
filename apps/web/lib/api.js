@@ -52,6 +52,7 @@ async function send(path, init) {
   if (!res.ok) {
     const err = new Error(data.error || fallbackMessage(res.status));
     err.status = res.status;
+    err.data = data; // the API's extra fields, e.g. { retryAfter, attemptsLeft, code }
     throw err;
   }
   return data;
@@ -105,6 +106,12 @@ export const api = {
     formData.append('file', file);
     return requestMultipart('/api/v1/public/register/analyze-pdf', formData);
   },
+  // Signup email verification: a 6-digit code to the address; verifying returns
+  // the verificationToken /register/complete requires (as emailVerificationToken).
+  sendSignupOtp: (email) => request('/api/v1/public/auth/send-otp', { method: 'POST', body: { email } }),
+  verifySignupOtp: (email, otp) => request('/api/v1/public/auth/verify-otp', { method: 'POST', body: { email, otp } }),
+  // Readiness audit of the wizard's pages before anything is created: { readinessScore, readinessLevel, pillarScores, ... }
+  preflightAudit: (payload) => request('/api/v1/public/register/preflight-audit', { method: 'POST', body: payload }),
   completeRegistration: (payload) => request('/api/v1/public/register/complete', { method: 'POST', body: payload })
 };
 
@@ -140,7 +147,12 @@ function workspace(base, auth) {
     listLeads: ({ botType = 'all', status = 'all' } = {}) => r(`/leads?botType=${enc(botType)}&status=${enc(status)}`),
     updateLeadStatus: (id, status) => r(`/leads/${enc(id)}`, { method: 'PATCH', body: { status } }),
     getUsage: () => r('/usage'),
-    getDailyUsage: (days = 30) => r(`/usage/daily?days=${days}`)
+    getDailyUsage: (days = 30) => r(`/usage/daily?days=${days}`),
+    // Readiness audit: run now (saved), or read the saved one: { report, stale, running }
+    runReadinessAudit: () => r('/preflight-audit', { method: 'POST' }),
+    getReadiness: () => r('/readiness'),
+    // How the documents split between the bots: { totals, documents: [{ id, title, botScope, sections, counts }] }
+    getKnowledgeDistribution: () => r('/knowledge/distribution')
   };
 }
 

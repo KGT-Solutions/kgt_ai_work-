@@ -31,6 +31,14 @@ model Tenant {
   minConfidence     Float    @default(0.30)
   active            Boolean  @default(true)
   signupEmail       String?  // set when provisioned via the public self-serve wizard; null for an admin-created tenant
+  // Pre-flight knowledge audit (services/botAuditor.js): the latest report,
+  // its 0-100 score and level, and a hash of the documents it judged — a
+  // different hash now means documents changed since and the report is stale.
+  readinessScore       Int?
+  readinessLevel       String?   // Not Ready | Moderate | Production Ready
+  readinessReport      Json?
+  readinessContentHash String?
+  readinessAuditedAt   DateTime?
   createdAt         DateTime @default(now())
 
   users        TenantUser[]
@@ -100,6 +108,26 @@ model PasswordResetCode {
   @@index([userId])
 }
 
+// Proof that a signup email address belongs to the person signing up
+// (services/verificationService.js). One row per address: requesting a new
+// code replaces the old one. Only an HMAC of the 6-digit code is stored;
+// it expires after 10 minutes and locks after 5 wrong attempts. Once
+// verified it's valid for 2 hours and is consumed (usedAt) by the
+// /register/complete call that creates the account.
+model EmailVerification {
+  id         String    @id @default(uuid())
+  email      String    @unique // lower-cased
+  codeHash   String
+  expiresAt  DateTime
+  attempts   Int       @default(0)
+  verified   Boolean   @default(false)
+  verifiedAt DateTime?
+  usedAt     DateTime?
+  lastSentAt DateTime  @default(now()) // drives the resend cooldown
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+}
+
 // Widget/API credentials. Only a SHA-256 hash of each key is stored — the
 // plaintext is shown once when issued (utils/tenantApiKeys.js) and can't be
 // recovered, only rotated. Several keys per tenant, so a key can be replaced
@@ -149,6 +177,14 @@ enum DocumentCategory {
   CUSTOM_POLICY // pricing, policies, terms, manuals, spec sheets
 }
 
+// Mirrored as DOC_SCOPES in src/services/shared/botScope.js — keep in sync.
+enum BotScope {
+  AUTO    // each section classified on its own
+  BOTH    // both bots
+  SUPPORT // Support Bot only
+  SALES   // Sales Bot only
+}
+
 model TenantDocument {
   id         String           @id @default(uuid())
   tenant     Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
@@ -157,6 +193,9 @@ model TenantDocument {
   content    String           // plain markdown/text — parsed into chunks the same way docs/*.md files are
   category   DocumentCategory @default(CORE_OVERVIEW) // drives per-bot retrieval weighting (domains/tenantProfile.js)
   sourceUrl  String?          // set when this document came from the auto-scraper; null for a hand-authored one
+  // Which bot may use it (services/shared/botScope.js): AUTO classifies each
+  // section separately; BOTH / SUPPORT / SALES apply to the whole document.
+  botScope   BotScope         @default(AUTO)
   createdAt  DateTime         @default(now())
   updatedAt  DateTime         @updatedAt
 

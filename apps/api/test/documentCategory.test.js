@@ -112,11 +112,13 @@ describe('tenant bots: category-weighted retrieval through the real engine', () 
   const SAME =
     '## Setup and returns\n\nPlug in the device and hold the power button for five seconds. ' +
     'You can return any item within 30 days for a full refund.';
+  // botScope BOTH: these tests are about category weighting, so both bots
+  // must see every section (the Sales / Support split is tested below).
   const DOCS = [
-    { title: 'About Acme', content: SAME, category: 'CORE_OVERVIEW' },
-    { title: 'Help Center', content: SAME, category: 'FAQ' },
-    { title: 'Returns Policy', content: SAME, category: 'CUSTOM_POLICY' },
-    { title: 'Careers', content: '## Jobs\n\nWe hire designers.', category: 'CORE_OVERVIEW' }
+    { title: 'About Acme', content: SAME, category: 'CORE_OVERVIEW', botScope: 'BOTH' },
+    { title: 'Help Center', content: SAME, category: 'FAQ', botScope: 'BOTH' },
+    { title: 'Returns Policy', content: SAME, category: 'CUSTOM_POLICY', botScope: 'BOTH' },
+    { title: 'Careers', content: '## Jobs\n\nWe hire designers.', category: 'CORE_OVERVIEW', botScope: 'BOTH' }
   ];
 
   let originalFindMany;
@@ -175,6 +177,74 @@ describe('tenant bots: category-weighted retrieval through the real engine', () 
     }
     assert.match(result.answer, /quick note for our team/i);
     assert.equal(result.handoff, true);
+  });
+});
+
+describe('tenant bots: Sales / Support knowledge split through the real engine', () => {
+  const DOCS = [
+    { id: 'd1', title: 'About Acme', category: 'CORE_OVERVIEW', botScope: 'AUTO',
+      content: '## Who we are\n\nAcme makes smart thermostats for homes across India, founded in 2015 in Pune.' },
+    { id: 'd2', title: 'Pricing', category: 'CUSTOM_POLICY', botScope: 'AUTO',
+      content: '## Plans\n\nThe Basic plan is ₹499 per month and the Pro plan is ₹999 per month. Annual plans get a discount.' },
+    { id: 'd3', title: 'Help Center', category: 'FAQ', botScope: 'AUTO',
+      content: '## Thermostat not working\n\nIf the thermostat is not working, reset it: hold the button for 10 seconds, then set it up again.' },
+    // A page that mixes both: each section is classified on its own.
+    { id: 'd4', title: 'Product page', category: 'CORE_OVERVIEW', botScope: 'AUTO',
+      content: '## Compare plans and pricing\n\nPro adds remote control; compare tiers on price per month.\n\n' +
+        '## How to install\n\nStep 1: switch off power. Step 2: mount the plate. Step 3: set up the app.' },
+    // Explicit override: a document the tenant pinned to the Sales Bot.
+    { id: 'd5', title: 'Customer stories', category: 'CORE_OVERVIEW', botScope: 'SALES',
+      content: '## Ravi saved on bills\n\nRavi cut his electricity bill after installing Acme.' }
+  ];
+
+  let originalFindMany;
+  beforeEach(() => {
+    originalFindMany = prisma.tenantDocument.findMany;
+    prisma.tenantDocument.findMany = async () => DOCS;
+    invalidateTenantKnowledge(TENANT.id);
+    capturedPrompts = [];
+    generateAnswerMock.mock.resetCalls();
+  });
+  afterEach(() => {
+    prisma.tenantDocument.findMany = originalFindMany;
+    invalidateTenantKnowledge(TENANT.id);
+  });
+
+  const scopeOf = async (title) => (await createTenantSupportProfile(TENANT).resolveKnowledge()).find((c) => c.title === title).scope;
+
+  test('sections are scoped by what they are about; a mixed page splits; an explicit scope wins', async () => {
+    assert.equal(await scopeOf('Who we are'), 'both');
+    assert.equal(await scopeOf('Plans'), 'sales');
+    assert.equal(await scopeOf('Thermostat not working'), 'support');
+    assert.equal(await scopeOf('Compare plans and pricing'), 'sales');
+    assert.equal(await scopeOf('How to install'), 'support');
+    assert.equal(await scopeOf('Ravi saved on bills'), 'sales');
+  });
+
+  test('the Support Bot never sees sales-only sections, and the Sales Bot never sees support-only ones', async () => {
+    const support = createTenantSupportProfile(TENANT);
+    const sales = createTenantSalesProfile(TENANT);
+    const all = await support.resolveKnowledge();
+    const titles = (profile) => profile.filterChunks(all).map((c) => c.title).sort();
+    assert.deepEqual(titles(support), ['How to install', 'Thermostat not working', 'Who we are']);
+    assert.deepEqual(titles(sales), ['Compare plans and pricing', 'Plans', 'Ravi saved on bills', 'Who we are']);
+  });
+
+  // Everything the model was shown for one question (a bot with nothing
+  // relevant may make no call, or only the excerpt-free can't-answer call).
+  const promptsFor = async (profile, query) => {
+    capturedPrompts = [];
+    await getEngineAnswer({ profile, query, ctx: {} });
+    return capturedPrompts.map((p) => p.userPrompt).join('\n');
+  };
+
+  test('a pricing question reaches pricing excerpts only via the Sales Bot; a troubleshooting one only via Support', async () => {
+    const pricing = 'how much is the pro plan per month';
+    const fix = 'my thermostat is not working';
+    assert.match(await promptsFor(createTenantSalesProfile(TENANT), pricing), /₹999 per month/);
+    assert.doesNotMatch(await promptsFor(createTenantSupportProfile(TENANT), pricing), /₹999 per month/, 'support must not see the price list');
+    assert.match(await promptsFor(createTenantSupportProfile(TENANT), fix), /hold the button for 10 seconds/);
+    assert.doesNotMatch(await promptsFor(createTenantSalesProfile(TENANT), fix), /hold the button for 10 seconds/, 'sales must not see the troubleshooting guide');
   });
 });
 

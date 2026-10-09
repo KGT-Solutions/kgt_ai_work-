@@ -147,7 +147,7 @@ function retryAfterMs(res) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function callChatCompletionsStyle({ url, apiKey, model, modelEnv, extraParams = {}, systemPrompt, userPrompt, providerLabel }) {
+async function callChatCompletionsStyle({ url, apiKey, model, modelEnv, extraParams = {}, systemPrompt, userPrompt, maxTokens, providerLabel }) {
   const send = () => fetchWithTimeout(
     url,
     {
@@ -158,7 +158,7 @@ async function callChatCompletionsStyle({ url, apiKey, model, modelEnv, extraPar
       },
       body: JSON.stringify({
         model,
-        max_tokens: getMaxTokens(),
+        max_tokens: maxTokens || getMaxTokens(),
         temperature: getTemperature(),
         ...extraParams,
         messages: [
@@ -213,7 +213,7 @@ async function callChatCompletionsStyle({ url, apiKey, model, modelEnv, extraPar
   };
 }
 
-async function callGroq({ systemPrompt, userPrompt }) {
+async function callGroq({ systemPrompt, userPrompt, maxTokens }) {
   const apiKey = readKey('GROQ_API_KEY');
   if (!apiKey) throw new ChatConfigError('GROQ_API_KEY is not configured.');
   const model = modelFor('groq');
@@ -225,12 +225,13 @@ async function callGroq({ systemPrompt, userPrompt }) {
     extraParams: groqReasoningParams(model),
     systemPrompt,
     userPrompt,
+    maxTokens,
     providerLabel: 'Groq'
   });
   return { ...result, provider: 'groq' };
 }
 
-async function callOpenAI({ systemPrompt, userPrompt }) {
+async function callOpenAI({ systemPrompt, userPrompt, maxTokens }) {
   const apiKey = readKey('OPENAI_API_KEY');
   if (!apiKey) throw new ChatConfigError('OPENAI_API_KEY is not configured.');
   const model = modelFor('openai');
@@ -241,12 +242,13 @@ async function callOpenAI({ systemPrompt, userPrompt }) {
     modelEnv: 'OPENAI_MODEL',
     systemPrompt,
     userPrompt,
+    maxTokens,
     providerLabel: 'OpenAI'
   });
   return { ...result, provider: 'openai' };
 }
 
-async function callAnthropic({ systemPrompt, userPrompt }) {
+async function callAnthropic({ systemPrompt, userPrompt, maxTokens }) {
   const apiKey = readKey('ANTHROPIC_API_KEY');
   if (!apiKey) throw new ChatConfigError('ANTHROPIC_API_KEY is not configured.');
 
@@ -263,7 +265,7 @@ async function callAnthropic({ systemPrompt, userPrompt }) {
       },
       body: JSON.stringify({
         model,
-        max_tokens: getMaxTokens(),
+        max_tokens: maxTokens || getMaxTokens(),
         temperature: getTemperature(),
         system: systemPrompt,
         messages: [{ role: 'user', content: userPrompt }]
@@ -306,10 +308,11 @@ const CALLERS = { groq: callGroq, openai: callOpenAI, anthropic: callAnthropic }
  * ChatUpstreamError. Throws the last error if every provider fails, with
  * `err.attempts` listing every provider's failure so the caller can log the
  * whole chain in one line (the last error alone hides why the primary failed).
- * @param {{ systemPrompt: string, userPrompt: string }} args
+ * @param {{ systemPrompt: string, userPrompt: string, maxTokens?: number }} args
+ *   maxTokens: this call's completion budget, instead of LLM_MAX_TOKENS (e.g. a long JSON report)
  * @returns {Promise<{ text: string, provider: string, model: string, usage: { promptTokens: number, completionTokens: number } }>}
  */
-async function generateAnswer({ systemPrompt, userPrompt }) {
+async function generateAnswer({ systemPrompt, userPrompt, maxTokens }) {
   const chain = getProviderChain();
   let lastErr = new ChatConfigError('No LLM provider configured (set LLM_PRIMARY / LLM_FALLBACK).');
   const attempts = [];
@@ -322,7 +325,7 @@ async function generateAnswer({ systemPrompt, userPrompt }) {
       continue;
     }
     try {
-      const result = await caller({ systemPrompt, userPrompt });
+      const result = await caller({ systemPrompt, userPrompt, maxTokens });
       if (attempts.length) {
         // Answered, but not by the primary — worth knowing (a dead primary
         // key otherwise hides behind a working fallback indefinitely).

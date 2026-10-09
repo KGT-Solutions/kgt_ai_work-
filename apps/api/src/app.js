@@ -13,6 +13,7 @@ const clientAuthRoutes = require('./routes/clientAuth.routes');
 const tenantWorkspaceRoutes = require('./routes/tenantWorkspace.routes');
 const tenantChatRoutes = require('./routes/tenantChat.routes');
 const publicRegisterRoutes = require('./routes/publicRegister.routes');
+const publicAuthRoutes = require('./routes/publicAuth.routes');
 
 const app = express();
 // The API sits behind one proxy hop (Docker / the reverse proxy), so req.ip
@@ -55,6 +56,7 @@ app.use('/api/v1/client/workspace', requireClient, tenantWorkspaceRoutes);
 app.use('/api/v1/client', wrapRouterAsync(clientAuthRoutes));
 app.use('/api/v1/tenant-chat', wrapRouterAsync(tenantChatRoutes));
 app.use('/api/v1/public/register', wrapRouterAsync(publicRegisterRoutes));
+app.use('/api/v1/public/auth', wrapRouterAsync(publicAuthRoutes)); // signup email OTP
 
 app.use(errorHandler);
 

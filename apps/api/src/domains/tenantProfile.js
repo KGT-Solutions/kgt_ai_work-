@@ -5,20 +5,22 @@ const { extractTaggedHighlights } = require('../services/shared/tagHighlights');
 const { CATEGORIES, DEFAULT_CATEGORY } = require('../services/shared/documentCategory');
 const { answerCache } = require('../engine/answerCache');
 const { HANDOFF_ACTIONS } = require('./handoffActions');
+const { classifyChunk, botCanUse } = require('../services/shared/botScope');
 
 // The generic, industry-agnostic profile pair every resold tenant gets:
 // everything domain-specific comes from the Tenant row itself (name,
 // industryLabel, persona, thresholds) rather than a hand-written JS file
 // per industry — "same pipeline, different data."
 //
-// Dual-bot training: a tenant's scraped/edited TenantDocument rows are ONE
-// shared knowledge pool (loadTenantKnowledge below) — createTenantSupportProfile
-// and createTenantSalesProfile both read from it via the identical
-// resolveKnowledge() hook, but apply different personas, gating, and
-// response shaping on top. Nothing about the DATA is bot-specific; only the
-// PROFILE is. See the block comment above createTenantSalesProfile for
-// exactly how the two stay from cross-contaminating each other's behavior
-// despite sharing a knowledge base.
+// Dual-bot training: a tenant's scraped/edited TenantDocument rows are one
+// set of documents (loadTenantKnowledge below), but every section of them is
+// scoped to the Support Bot, the Sales Bot or both (services/shared/botScope.js),
+// and each profile's filterChunks keeps only its own scope plus "both". So
+// the Support Bot answers from manuals, FAQs and policies, the Sales Bot from
+// pricing, plans and pitch material, and company basics reach both. On top
+// of that each profile applies its own persona, gating and response shaping.
+// See the block comment above createTenantSalesProfile for how the two stay
+// from cross-contaminating each other's behavior.
 
 const SUPPORT_SENTINEL = 'NO_ANSWER_IN_TENANT_KB';
 const SALES_SENTINEL = 'NO_ANSWER_IN_TENANT_SALES_KB';
@@ -46,20 +48,35 @@ async function loadTenantKnowledge(tenantId) {
   // but don't cache them, or the old content would outlive the invalidation.
   const generation = answerCache.generation(tenantId);
   const documents = await prisma.tenantDocument.findMany({ where: { tenantId } });
-  const chunks = documents.flatMap((doc) =>
-    // Each TenantDocument.content is treated exactly like one .md file —
-    // same "## heading" chunking, and the same "<!-- tags: ... -->" support,
-    // as the filesystem loader. A scraped page's markdown (services/shared/
-    // crawler.js) and a hand-typed note in the Documents Tab editor chunk
-    // identically — there is no separate "scraped" code path downstream of
-    // this function. Every chunk inherits its document's category, which
-    // is what the per-bot chunkWeight below keys on.
-    parseIntoChunks(doc.title, doc.content).map((chunk) => ({ ...chunk, category: doc.category || DEFAULT_CATEGORY }))
-  );
+  const chunks = documents.flatMap(documentChunks);
 
   if (answerCache.generation(tenantId) === generation) chunkCacheByTenant.set(tenantId, chunks);
   return chunks;
 }
+
+/**
+ * One document's chunks, each with its category and bot scope. Each
+ * TenantDocument.content is treated exactly like one .md file — same
+ * "## heading" chunking, and the same "<!-- tags: ... -->" support, as the
+ * filesystem loader; a scraped page and a hand-typed note chunk identically.
+ * Every chunk inherits its document's category (what chunkWeight keys on).
+ * Its scope is classified with the document title in front of the section
+ * heading: a section headed "Overview" inside a document called "Pricing" is
+ * about pricing. Also used by the readiness audit and the distribution view,
+ * so all three see the same split.
+ * @param {{ id?: string, title: string, content: string, category?: string, botScope?: string }} doc
+ */
+function documentChunks(doc) {
+  return parseIntoChunks(doc.title, doc.content).map((chunk) => ({
+    ...chunk,
+    documentId: doc.id,
+    category: doc.category || DEFAULT_CATEGORY,
+    scope: classifyChunk({ ...chunk, title: `${doc.title} — ${chunk.title}` }, doc.botScope)
+  }));
+}
+
+// Each bot keeps only the knowledge scoped to it (plus "both").
+const scopedTo = (botType) => (chunks) => chunks.filter((chunk) => botCanUse(botType, chunk.scope));
 
 // ---------------------------------------------------------------------
 // Category-aware retrieval weighting. Multipliers on the lexical score,
@@ -306,6 +323,7 @@ function createTenantSupportProfile(tenant) {
     topK: 3,
     minScore: 0, // the real gate is minConfidence below; don't double-filter
     minConfidence: tenant.minConfidence,
+    filterChunks: scopedTo('support'), // manuals, FAQs, policies + company basics (services/shared/botScope.js)
     chunkWeight: makeChunkWeight(SUPPORT_CATEGORY_WEIGHTS),
     relativeMinScore: RELATIVE_MIN_SCORE,
     ticketing: true,
@@ -416,6 +434,7 @@ function createTenantSalesProfile(tenant) {
     // "no answer" below the tenant's threshold goes to a person, above it
     // the bot asks for more detail (formatNoAnswer).
     handoffBelow: tenant.minConfidence,
+    filterChunks: scopedTo('sales'), // pricing, plans, pitch material + company basics
     chunkWeight: makeChunkWeight(SALES_CATEGORY_WEIGHTS),
     relativeMinScore: RELATIVE_MIN_SCORE,
     ticketing: true, // an unanswerable sales question is still worth a human follow-up
@@ -464,6 +483,8 @@ module.exports = {
   createTenantSupportProfile,
   createTenantSalesProfile,
   invalidateTenantKnowledge,
+  loadTenantKnowledge,
+  documentChunks,
   SUPPORT_SENTINEL,
   SALES_SENTINEL,
   SUPPORT_CATEGORY_WEIGHTS,
