@@ -158,7 +158,11 @@ function isPrivateIPv6(ip) {
   return false;
 }
 
+// CRAWLER_ALLOW_PRIVATE_HOSTS=true lifts this guard so the E2E suite can scan
+// its fixture website on a private Docker network. It turns the crawler into
+// an SSRF tool, so production refuses to start with it (utils/assertProdSafety.js).
 async function assertPublicHost(hostname) {
+  if (String(process.env.CRAWLER_ALLOW_PRIVATE_HOSTS || '').toLowerCase() === 'true') return;
   let addresses;
   try {
     addresses = await dns.lookup(hostname, { all: true });

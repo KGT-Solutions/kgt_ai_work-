@@ -29,7 +29,7 @@ function ScoreCard({ bot, data, checking }) {
   const tone = scoreTone(data.score);
   const Icon = meta.icon;
   return (
-    <Card className="p-5">
+    <Card className="p-5" role="group" aria-label={`${meta.name} training`}>
       <div className="flex items-center justify-between gap-3">
         <span className="flex items-center gap-2 text-sm font-semibold text-fg">
           <Icon className={cx('h-4 w-4', meta.accent)} />{meta.name} training

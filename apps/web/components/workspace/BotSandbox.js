@@ -63,13 +63,16 @@ export default function BotSandbox({ ws, tenant }) {
   // answer — which carries the current preference — has the last word.
   const [deployed, setDeployed] = useState(() => botsFor(tenant.botPreference));
   const [split, setSplit] = useState(null);
+  const deployedAtMount = useRef(botsFor(tenant.botPreference).length);
   const [target, setTarget] = useState(() => (botsFor(tenant.botPreference).length === 1 ? botsFor(tenant.botPreference)[0] : 'both'));
   useEffect(() => {
     ws.getKnowledgeDistribution().then((d) => {
       setSplit(d);
       const bots = botsFor(d.botPreference);
       setDeployed(bots);
-      setTarget((t) => (bots.length === 1 ? bots[0] : t));
+      // One bot: send to it. Both: keep a choice made here, but not one left
+      // over from a stale single-bot session (that would hide the comparison).
+      setTarget((t) => (bots.length === 1 ? bots[0] : bots.length !== deployedAtMount.current ? 'both' : t));
     }).catch((e) => setSplit({ error: e.message })); // the panes still work on the session's preference
   }, [ws]);
   const single = deployed.length === 1;

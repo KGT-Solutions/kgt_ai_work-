@@ -1,0 +1,14 @@
+{
+  "name": "kgt-ai-hub-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "description": "End-to-end browser tests for KGT AI Hub (Playwright)",
+  "scripts": {
+    "test": "playwright test",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.0",
+    "yazl": "^3.3.1"
+  }
+}

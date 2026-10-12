@@ -96,3 +96,7 @@ backup_*.sql
 # Local tunnel/widget experiments — never commit (test pages embed live API keys)
 *.deb
 /test.html
+
+# End-to-end test output (e2e/)
+e2e/playwright-report/
+e2e/test-results/

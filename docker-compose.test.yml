@@ -1,0 +1,52 @@
+# Backend test suites in an offline sandbox: unit, integration, db and system
+# layers against a throwaway PostgreSQL, on a Docker network marked
+# `internal` — no route out, so any unintended call to an LLM provider, an
+# email service or a website fails instead of leaving the machine
+# (test/system/networkSandbox.test.js proves the sandbox is sealed).
+#
+#   docker compose -f docker-compose.test.yml up --build --abort-on-container-exit --exit-code-from api-tests
+#   docker compose -f docker-compose.test.yml down -v
+#
+# Separate project name, container names and volumes: never touches the real
+# kgt-ai-hub-postgres database or its data.
+name: kgt-ai-hub-tests
+
+services:
+  test-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: kgt
+      POSTGRES_PASSWORD: kgt
+      POSTGRES_DB: kgt_test
+    tmpfs:
+      - /var/lib/postgresql/data # throwaway: gone when the container stops
+    networks: [sandbox]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kgt -d kgt_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  api-tests:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile.test
+    environment:
+      TEST_DATABASE_URL: postgresql://kgt:kgt@test-postgres:5432/kgt_test?schema=public
+      NETWORK_SANDBOX: "1" # enables the sealed-network canary
+      # No secrets of any kind: every provider key is blank on purpose.
+      GROQ_API_KEY: ""
+      OPENAI_API_KEY: ""
+      ANTHROPIC_API_KEY: ""
+      SMTP_HOST: ""
+      RESEND_API_KEY: ""
+      PRISMA_HIDE_UPDATE_MESSAGE: "1"
+      CHECKPOINT_DISABLE: "1" # Prisma CLI telemetry/version check: no network
+    networks: [sandbox]
+    depends_on:
+      test-postgres:
+        condition: service_healthy
+
+networks:
+  sandbox:
+    internal: true

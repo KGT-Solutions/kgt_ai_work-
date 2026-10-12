@@ -38,11 +38,15 @@ function smtpConfig() {
   const port = Number.parseInt(env('SMTP_PORT'), 10) || 587;
   const secure = env('SMTP_SECURE') ? env('SMTP_SECURE').toLowerCase() === 'true' : port === 465;
   const user = env('SMTP_USER');
+  // SMTP_ALLOW_INSECURE=true: plaintext SMTP, for a local mail catcher
+  // (Mailpit in the E2E stack) only. Production refuses it (utils/assertProdSafety.js).
+  const insecure = env('SMTP_ALLOW_INSECURE').toLowerCase() === 'true';
   return {
     host,
     port,
     secure,
-    requireTLS: !secure, // STARTTLS or fail; never fall back to plaintext
+    requireTLS: !secure && !insecure, // STARTTLS or fail; never fall back to plaintext
+    ...(insecure ? { ignoreTLS: true } : {}),
     auth: user ? { user, pass: process.env.SMTP_PASS || '' } : undefined,
     connectionTimeout: 10_000,
     greetingTimeout: 10_000,

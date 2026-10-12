@@ -1,0 +1,22 @@
+# Test image for the API: every layer (unit, integration, db, system) runs
+# inside docker-compose.test.yml on a network with NO route to the internet.
+# Dependencies are installed at build time (which has network); the tests
+# themselves run offline. No .env is copied (.dockerignore).
+FROM node:20-alpine
+
+RUN apk add --no-cache openssl
+
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci
+
+COPY prisma ./prisma
+RUN npx prisma generate
+
+COPY src ./src
+COPY public ./public
+COPY scripts ./scripts
+COPY test ./test
+
+ENV NODE_ENV=test
+CMD ["node", "scripts/run-tests.js", "unit", "integration", "db", "system"]

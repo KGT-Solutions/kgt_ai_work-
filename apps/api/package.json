@@ -5,7 +5,12 @@
   "main": "src/server.js",
   "scripts": {
     "dev": "node src/server.js",
-    "test": "node --test test/",
+    "test": "node scripts/run-tests.js unit integration",
+    "test:unit": "node scripts/run-tests.js unit",
+    "test:integration": "node scripts/run-tests.js integration",
+    "test:db": "node scripts/run-tests.js db",
+    "test:system": "node scripts/run-tests.js system",
+    "test:all": "node scripts/run-tests.js unit integration db system",
     "seed": "node prisma/seed.js",
     "prisma:migrate": "prisma migrate dev",
     "prisma:generate": "prisma generate",

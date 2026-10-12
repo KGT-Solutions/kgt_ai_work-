@@ -105,6 +105,31 @@ function assertProdSafety(env = process.env) {
     });
   }
 
+  // Test-only switches (the sandboxed E2E stack): each one weakens a guard.
+  const on = (k) => String(env[k] || '').trim().toLowerCase() === 'true';
+  if (on('CRAWLER_ALLOW_PRIVATE_HOSTS')) {
+    problems.push({
+      key: 'CRAWLER_ALLOW_PRIVATE_HOSTS',
+      message: 'CRAWLER_ALLOW_PRIVATE_HOSTS lets the website crawler reach internal addresses (SSRF) and is for tests only',
+      fix: 'remove CRAWLER_ALLOW_PRIVATE_HOSTS from the env file'
+    });
+  }
+  if (on('SMTP_ALLOW_INSECURE')) {
+    problems.push({
+      key: 'SMTP_ALLOW_INSECURE',
+      message: 'SMTP_ALLOW_INSECURE sends email (including sign-in codes) without TLS and is for tests only',
+      fix: 'remove SMTP_ALLOW_INSECURE from the env file'
+    });
+  }
+  const llmBase = String(env.OPENAI_BASE_URL || '').trim();
+  if (llmBase && !/^https:\/\//i.test(llmBase)) {
+    problems.push({
+      key: 'OPENAI_BASE_URL',
+      message: 'OPENAI_BASE_URL must be an https:// URL when DEPLOY_ENV=production',
+      fix: 'remove OPENAI_BASE_URL (defaults to https://api.openai.com/v1) or set an https endpoint'
+    });
+  }
+
   if (problems.length) throw new ProdSafetyError(problems);
 }
 

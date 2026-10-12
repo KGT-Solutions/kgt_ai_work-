@@ -1,0 +1,301 @@
+const { test, describe, beforeEach, afterEach, mock } = require('node:test');
+const assert = require('node:assert/strict');
+
+// Mocked before chatEngine.js is required (it destructures generateAnswer) —
+// same pattern as chatEngine.test.js.
+const llmClient = require('../../src/engine/llmClient');
+let capturedPrompts = [];
+const generateAnswerMock = mock.method(llmClient, 'generateAnswer', async ({ systemPrompt, userPrompt }) => {
+  capturedPrompts.push({ systemPrompt, userPrompt });
+  return { text: 'You can return it within 30 days.', provider: 'mock', model: 'mock-1', usage: { promptTokens: 0, completionTokens: 0 } };
+});
+
+const prisma = require('../../src/lib/prisma');
+const { getEngineAnswer } = require('../../src/engine/chatEngine');
+const { rankItems } = require('../../src/services/shared/lexicalSearch');
+const { computeConfidence } = require('../../src/engine/confidence');
+const { parseCategory, suggestCategory, CATEGORY_VALUES } = require('../../src/services/shared/documentCategory');
+const {
+  createTenantSupportProfile,
+  createTenantSalesProfile,
+  invalidateTenantKnowledge,
+  SALES_SENTINEL,
+  SUPPORT_SENTINEL
+} = require('../../src/domains/tenantProfile');
+
+const TENANT = {
+  id: 'tenant-cat',
+  slug: 'acme',
+  name: 'Acme',
+  industryLabel: 'Home Goods',
+  persona: null,
+  outOfScopeMessage: "I don't have this info yet. Let me connect you with support.",
+  minConfidence: 0.3
+};
+
+describe('documentCategory: parseCategory', () => {
+  test('accepts every enum value (case-insensitive) and defaults a missing one to CORE_OVERVIEW', () => {
+    for (const v of CATEGORY_VALUES) assert.deepEqual(parseCategory(v.toLowerCase()), { ok: true, value: v });
+    assert.deepEqual(parseCategory(undefined), { ok: true, value: 'CORE_OVERVIEW' });
+    assert.deepEqual(parseCategory(''), { ok: true, value: 'CORE_OVERVIEW' });
+  });
+
+  test('rejects anything else instead of silently re-filing it', () => {
+    const result = parseCategory('PRICING');
+    assert.equal(result.ok, false);
+    assert.match(result.error, /CORE_OVERVIEW, FAQ, CUSTOM_POLICY/);
+  });
+});
+
+describe('documentCategory: suggestCategory (sector-neutral defaults for the wizard tabs)', () => {
+  const cases = [
+    [{ url: 'https://acme.example/', title: 'Acme — Customer support software' }, 'CORE_OVERVIEW', 'homepage, whatever its tagline says'],
+    [{ url: 'https://acme.example/about-us', title: 'About Acme' }, 'CORE_OVERVIEW', 'about page'],
+    [{ url: 'https://acme.example/help/faq', title: 'Help' }, 'FAQ', 'faq path'],
+    [{ url: 'https://clinic.example/patients/questions', title: 'Patients' }, 'FAQ', 'questions path (healthcare)'],
+    [{ url: 'https://acme.example/pricing', title: 'Plans' }, 'CUSTOM_POLICY', 'pricing path (SaaS)'],
+    [{ url: 'https://homes.example/tenancy-terms', title: 'Renting with us' }, 'CUSTOM_POLICY', 'terms path (real estate)'],
+    [{ url: 'https://shop.example/shipping-returns', title: 'Delivery' }, 'CUSTOM_POLICY', 'returns path (e-commerce)'],
+    [{ url: 'https://acme.example/blog/post', markdown: '## Is it safe?\n\nYes.\n\n## Is it fast?\n\nYes.\n\n## Is it cheap?\n\nYes.' }, 'FAQ', 'FAQ-shaped content'],
+    [{ title: 'Product Manual', source: 'pdf' }, 'CUSTOM_POLICY', 'PDF manual'],
+    [{ title: 'whey faq', source: 'pdf' }, 'FAQ', 'PDF FAQ'],
+    [{ title: 'Company Profile 2026', source: 'pdf' }, 'CUSTOM_POLICY', 'unlabelled PDF defaults to the manuals tab']
+  ];
+  for (const [input, expected, label] of cases) {
+    test(`${label} -> ${expected}`, () => assert.equal(suggestCategory(input), expected));
+  }
+});
+
+describe('lexicalSearch: itemWeight / relativeMinScore', () => {
+  const items = [
+    { title: 'Returns', content: 'Return items within 30 days.', category: 'CORE_OVERVIEW' },
+    { title: 'Returns', content: 'Return items within 30 days.', category: 'FAQ' },
+    { title: 'Careers', content: 'We are hiring engineers.', category: 'FAQ' }
+  ];
+
+  test('a weight reorders equal matches but the reported rawScore is untouched', () => {
+    const ranked = rankItems('return items', items, { minScore: 0, itemWeight: (i) => (i.category === 'FAQ' ? 2 : 1) });
+    assert.equal(ranked[0].item.category, 'FAQ');
+    assert.equal(ranked[0].rawScore, ranked[1].rawScore);
+    assert.equal(ranked[0].score, ranked[0].rawScore * 2);
+  });
+
+  test('a weight can never turn a non-match into a match, even with minScore 0', () => {
+    const ranked = rankItems('return items', items, { minScore: 0, itemWeight: () => 100 });
+    assert.ok(!ranked.some((r) => r.item.title === 'Careers'));
+  });
+
+  test('minScore is applied to the unweighted score', () => {
+    const lone = [{ title: 'X', content: 'return', category: 'FAQ' }];
+    const raw = rankItems('return', lone, { minScore: 0 })[0].rawScore;
+    assert.deepEqual(rankItems('return', lone, { minScore: raw + 1, itemWeight: () => 10 }), []);
+  });
+
+  test('relativeMinScore drops a weak tail match that would only pad the context', () => {
+    const pool = [
+      { title: 'Warranty', content: 'The warranty covers parts and labour for two years.' },
+      { title: 'Careers', content: 'Our warehouse team works hard.' } // weak, incidental overlap
+    ];
+    const withTail = rankItems('warranty parts labour years', pool.concat({ title: 'Misc', content: 'years' }), { minScore: 0 });
+    assert.equal(withTail.length, 2);
+    const trimmed = rankItems('warranty parts labour years', pool.concat({ title: 'Misc', content: 'years' }), {
+      minScore: 0,
+      relativeMinScore: 0.35
+    });
+    assert.deepEqual(trimmed.map((r) => r.item.title), ['Warranty']);
+  });
+});
+
+describe('tenant bots: category-weighted retrieval through the real engine', () => {
+  // The same section filed under all three categories -> identical raw
+  // scores, so ordering differences come purely from the category weights.
+  const SAME =
+    '## Setup and returns\n\nPlug in the device and hold the power button for five seconds. ' +
+    'You can return any item within 30 days for a full refund.';
+  // botScope BOTH: these tests are about category weighting, so both bots
+  // must see every section (the Sales / Support split is tested below).
+  const DOCS = [
+    { title: 'About Acme', content: SAME, category: 'CORE_OVERVIEW', botScope: 'BOTH' },
+    { title: 'Help Center', content: SAME, category: 'FAQ', botScope: 'BOTH' },
+    { title: 'Returns Policy', content: SAME, category: 'CUSTOM_POLICY', botScope: 'BOTH' },
+    { title: 'Careers', content: '## Jobs\n\nWe hire designers.', category: 'CORE_OVERVIEW', botScope: 'BOTH' }
+  ];
+
+  let originalFindMany;
+  beforeEach(() => {
+    originalFindMany = prisma.tenantDocument.findMany;
+    prisma.tenantDocument.findMany = async () => DOCS;
+    invalidateTenantKnowledge(TENANT.id);
+    capturedPrompts = [];
+    generateAnswerMock.mock.resetCalls();
+  });
+  afterEach(() => {
+    prisma.tenantDocument.findMany = originalFindMany;
+    invalidateTenantKnowledge(TENANT.id);
+  });
+
+  const firstExcerptKind = () => /\[Excerpt 1 — ([^—]+) —/.exec(capturedPrompts[0].userPrompt)[1].trim();
+
+  test('every chunk carries its document category', async () => {
+    const chunks = await createTenantSupportProfile(TENANT).resolveKnowledge();
+    assert.deepEqual(chunks.map((c) => c.category), ['CORE_OVERVIEW', 'FAQ', 'CUSTOM_POLICY', 'CORE_OVERVIEW']);
+  });
+
+  test('support puts the FAQ excerpt first for a how-to question', async () => {
+    await getEngineAnswer({ profile: createTenantSupportProfile(TENANT), query: 'how do I power on the device', ctx: {} });
+    assert.equal(firstExcerptKind(), 'FAQ');
+  });
+
+  test('sales puts the company-overview excerpt first for the same question', async () => {
+    await getEngineAnswer({ profile: createTenantSalesProfile(TENANT), query: 'how do I power on the device', ctx: {} });
+    assert.equal(firstExcerptKind(), 'Company overview');
+  });
+
+  test('a money/rules question puts the policy excerpt first for BOTH bots', async () => {
+    await getEngineAnswer({ profile: createTenantSupportProfile(TENANT), query: 'can I get a refund on a return', ctx: {} });
+    await getEngineAnswer({ profile: createTenantSalesProfile(TENANT), query: 'can I get a refund on a return', ctx: {} });
+    for (const { userPrompt } of capturedPrompts) {
+      assert.match(userPrompt, /\[Excerpt 1 — Policy \/ pricing \/ manual —/);
+    }
+  });
+
+  test('the support confidence gate uses the unweighted score, so weights never change gating', async () => {
+    let seen;
+    const profile = { ...createTenantSupportProfile(TENANT), minConfidence: 0.99, formatFallback: (_ctx, c) => (seen = c) };
+    await getEngineAnswer({ profile, query: 'power button', ctx: {} });
+    const chunks = await profile.resolveKnowledge();
+    const raw = rankItems('power button', chunks, { minScore: 0 })[0].rawScore;
+    assert.equal(seen, computeConfidence('power button', raw));
+  });
+
+  test('a question matching nothing is never answered from documents — for sales too, which has no confidence gate', async () => {
+    const result = await getEngineAnswer({ profile: createTenantSalesProfile(TENANT), query: 'zebra quantum saxophone', ctx: {} });
+    // At most the contextual can't-answer reply is written, and it never sees any excerpts.
+    assert.ok(generateAnswerMock.mock.callCount() <= 1);
+    for (const call of generateAnswerMock.mock.calls) {
+      assert.doesNotMatch(call.arguments[0].userPrompt, /KNOWLEDGE BASE EXCERPTS/);
+    }
+    assert.match(result.answer, /quick note for our team/i);
+    assert.equal(result.handoff, true);
+  });
+});
+
+describe('tenant bots: Sales / Support knowledge split through the real engine', () => {
+  const DOCS = [
+    { id: 'd1', title: 'About Acme', category: 'CORE_OVERVIEW', botScope: 'AUTO',
+      content: '## Who we are\n\nAcme makes smart thermostats for homes across India, founded in 2015 in Pune.' },
+    { id: 'd2', title: 'Pricing', category: 'CUSTOM_POLICY', botScope: 'AUTO',
+      content: '## Plans\n\nThe Basic plan is ₹499 per month and the Pro plan is ₹999 per month. Annual plans get a discount.' },
+    { id: 'd3', title: 'Help Center', category: 'FAQ', botScope: 'AUTO',
+      content: '## Thermostat not working\n\nIf the thermostat is not working, reset it: hold the button for 10 seconds, then set it up again.' },
+    // A page that mixes both: each section is classified on its own.
+    { id: 'd4', title: 'Product page', category: 'CORE_OVERVIEW', botScope: 'AUTO',
+      content: '## Compare plans and pricing\n\nPro adds remote control; compare tiers on price per month.\n\n' +
+        '## How to install\n\nStep 1: switch off power. Step 2: mount the plate. Step 3: set up the app.' },
+    // Explicit override: a document the tenant pinned to the Sales Bot.
+    { id: 'd5', title: 'Customer stories', category: 'CORE_OVERVIEW', botScope: 'SALES',
+      content: '## Ravi saved on bills\n\nRavi cut his electricity bill after installing Acme.' }
+  ];
+
+  let originalFindMany;
+  beforeEach(() => {
+    originalFindMany = prisma.tenantDocument.findMany;
+    prisma.tenantDocument.findMany = async () => DOCS;
+    invalidateTenantKnowledge(TENANT.id);
+    capturedPrompts = [];
+    generateAnswerMock.mock.resetCalls();
+  });
+  afterEach(() => {
+    prisma.tenantDocument.findMany = originalFindMany;
+    invalidateTenantKnowledge(TENANT.id);
+  });
+
+  const scopeOf = async (title) => (await createTenantSupportProfile(TENANT).resolveKnowledge()).find((c) => c.title === title).scope;
+
+  test('sections are scoped by what they are about; a mixed page splits; an explicit scope wins', async () => {
+    assert.equal(await scopeOf('Who we are'), 'both');
+    assert.equal(await scopeOf('Plans'), 'sales');
+    assert.equal(await scopeOf('Thermostat not working'), 'support');
+    assert.equal(await scopeOf('Compare plans and pricing'), 'sales');
+    assert.equal(await scopeOf('How to install'), 'support');
+    assert.equal(await scopeOf('Ravi saved on bills'), 'sales');
+  });
+
+  test('the Support Bot never sees sales-only sections, and the Sales Bot never sees support-only ones', async () => {
+    const support = createTenantSupportProfile(TENANT);
+    const sales = createTenantSalesProfile(TENANT);
+    const all = await support.resolveKnowledge();
+    const titles = (profile) => profile.filterChunks(all).map((c) => c.title).sort();
+    assert.deepEqual(titles(support), ['How to install', 'Thermostat not working', 'Who we are']);
+    assert.deepEqual(titles(sales), ['Compare plans and pricing', 'Plans', 'Ravi saved on bills', 'Who we are']);
+  });
+
+  // Everything the model was shown for one question (a bot with nothing
+  // relevant may make no call, or only the excerpt-free can't-answer call).
+  const promptsFor = async (profile, query) => {
+    capturedPrompts = [];
+    await getEngineAnswer({ profile, query, ctx: {} });
+    return capturedPrompts.map((p) => p.userPrompt).join('\n');
+  };
+
+  test('a pricing question reaches pricing excerpts only via the Sales Bot; a troubleshooting one only via Support', async () => {
+    const pricing = 'how much is the pro plan per month';
+    const fix = 'my thermostat is not working';
+    assert.match(await promptsFor(createTenantSalesProfile(TENANT), pricing), /₹999 per month/);
+    assert.doesNotMatch(await promptsFor(createTenantSupportProfile(TENANT), pricing), /₹999 per month/, 'support must not see the price list');
+    assert.match(await promptsFor(createTenantSupportProfile(TENANT), fix), /hold the button for 10 seconds/);
+    assert.doesNotMatch(await promptsFor(createTenantSalesProfile(TENANT), fix), /hold the button for 10 seconds/, 'sales must not see the troubleshooting guide');
+  });
+});
+
+describe('tenant bots: conversational prompt layer', () => {
+  const support = createTenantSupportProfile(TENANT).systemPrompt({});
+  const sales = createTenantSalesProfile(TENANT).systemPrompt({});
+
+  test('both prompts keep strict grounding, then add the shared voice rules after it', () => {
+    for (const p of [support, sales]) {
+      assert.ok(p.indexOf('GROUNDING RULES') < p.indexOf('HOW TO SOUND'));
+      assert.match(p, /never override the rules above/);
+      assert.match(p, /Never invent|Do not invent/);
+      assert.match(p, /no markdown/);
+      assert.match(p, /Never mention "excerpts"/);
+    }
+  });
+
+  test('each prompt tells the model to emit only its OWN sentinel when it cannot answer', () => {
+    assert.match(support, new RegExp(`output only ${SUPPORT_SENTINEL} exactly`));
+    assert.match(sales, new RegExp(`output only ${SALES_SENTINEL} exactly`));
+  });
+
+  test('both bots answer in "• " bullets; only support may number the steps of a procedure', () => {
+    for (const prompt of [support, sales]) {
+      assert.match(prompt, /starting with "• "/);
+      assert.match(prompt, /never "-" or "\*" as bullet/);
+    }
+    assert.match(support, /number the steps instead/);
+    assert.doesNotMatch(sales, /number the steps/);
+  });
+
+  test('neither bot asks for an email in a routine answer; each names when it may', () => {
+    for (const prompt of [support, sales]) assert.match(prompt, /do NOT ask for an email or contact details in a normal answer/);
+    assert.match(sales, /ONLY when they show clear commercial intent: they ask for a custom quote/);
+    assert.match(sales, /pricing overviews, plans, feature lists/);
+    assert.match(support, /ONLY when they explicitly ask for a person, a callback, a demo or follow-up support/);
+  });
+
+  test('the degraded (LLM-down) fallback is a polite message, never a knowledge-base excerpt', () => {
+    const ranked = [{ chunk: { title: 'Returns', content: '## Returns\n\n- **30 days** to return\n- Free pickup' }, score: 5 }];
+    for (const profile of [createTenantSupportProfile(TENANT), createTenantSalesProfile(TENANT)]) {
+      const result = profile.formatDegraded(ranked);
+      assert.equal(result.degraded, true);
+      assert.doesNotMatch(result.answer, /30 days|Free pickup|Returns|##|\*\*/);
+      assert.match(result.answer, /try again|ask again/i);
+    }
+  });
+
+  test('sales replies are told to end with one engagement question; support stays factual', () => {
+    assert.match(sales, /then ONE short, gentle question/);
+    assert.doesNotMatch(support, /ONE short, gentle question/);
+    assert.match(support, /No sales pitch/);
+  });
+});

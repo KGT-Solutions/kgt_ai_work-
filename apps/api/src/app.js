@@ -58,6 +58,10 @@ app.use('/api/v1/tenant-chat', wrapRouterAsync(tenantChatRoutes));
 app.use('/api/v1/public/register', wrapRouterAsync(publicRegisterRoutes));
 app.use('/api/v1/public/auth', wrapRouterAsync(publicAuthRoutes)); // signup email OTP
 
+// An unknown API path answers in JSON like every other API error, not with
+// Express's default HTML "Cannot GET" page.
+app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
+
 app.use(errorHandler);
 
 module.exports = app;

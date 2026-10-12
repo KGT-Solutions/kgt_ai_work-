@@ -549,20 +549,17 @@ Dumps contain personal data (leads, transcripts, emails): store them encrypted a
 
 ### 6.7 Tests
 
-```bash
-cd apps/api && npm test            # node:test, all suites
-```
-
-The API image does not contain `test/`. To run the suite on the exact production runtime, offline:
+Four layers — unit, integration, system and end-to-end — are described in full in **[TESTING.md](TESTING.md)**. In short:
 
 ```bash
-cd apps/api
-docker run --rm --network none --entrypoint sh \
-  -v "$PWD/src:/app/src:ro" -v "$PWD/test:/app/test:ro" -v "$PWD/public:/app/public:ro" \
-  -e NODE_ENV=test -w /app kgt_ai_work-api -c 'node --test test/'
+cd apps/api && npm test            # unit + integration: no database, no network (pre-commit)
+
+# Release gate — every layer, offline (Docker network with no route out):
+docker compose -f docker-compose.test.yml up --build --abort-on-container-exit --exit-code-from api-tests   # unit, integration, db, system
+docker compose -f docker-compose.e2e.yml  up --build --abort-on-container-exit --exit-code-from e2e         # Playwright journeys
 ```
 
-Tests mock Prisma, the mailer and the LLM; `--network none` guarantees no test can reach a real provider. The headless-Chromium crawler tests run only where Chromium exists (the image), and are skipped elsewhere.
+Neither stack reads `.env.docker`; LLM calls go to a fake server, email to Mailpit. The headless-Chromium crawler tests run only where Chromium exists, and are skipped elsewhere.
 
 ---
 

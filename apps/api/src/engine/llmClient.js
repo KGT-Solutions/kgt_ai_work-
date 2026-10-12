@@ -231,12 +231,19 @@ async function callGroq({ systemPrompt, userPrompt, maxTokens }) {
   return { ...result, provider: 'groq' };
 }
 
+// OPENAI_BASE_URL points the OpenAI client at any OpenAI-compatible server —
+// the E2E suite's fake LLM (e2e/fixtures/fakeLlm.js) uses it. Production
+// refuses a non-https value (utils/assertProdSafety.js).
+function openaiBaseUrl() {
+  return String(process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').trim().replace(/\/+$/, '');
+}
+
 async function callOpenAI({ systemPrompt, userPrompt, maxTokens }) {
   const apiKey = readKey('OPENAI_API_KEY');
   if (!apiKey) throw new ChatConfigError('OPENAI_API_KEY is not configured.');
   const model = modelFor('openai');
   const result = await callChatCompletionsStyle({
-    url: 'https://api.openai.com/v1/chat/completions',
+    url: `${openaiBaseUrl()}/chat/completions`,
     apiKey,
     model,
     modelEnv: 'OPENAI_MODEL',
@@ -349,7 +356,7 @@ function formatAttempts(attempts) {
 
 const MODEL_LIST_URLS = {
   groq: 'https://api.groq.com/openai/v1/models',
-  openai: 'https://api.openai.com/v1/models'
+  get openai() { return `${openaiBaseUrl()}/models`; }
 };
 
 /**

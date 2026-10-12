@@ -1,0 +1,137 @@
+# End-to-end suite: real browser (Playwright) → real web app → real API →
+# real PostgreSQL, all on a Docker network marked `internal` (no route out).
+# The outside world is replaced by local stand-ins:
+#   mailpit  catches every email over real SMTP (OTP codes, lead confirmations)
+#   stubs    a fake OpenAI-compatible LLM + a fixture company website to crawl
+#
+#   docker compose -f docker-compose.e2e.yml up --build --abort-on-container-exit --exit-code-from e2e
+#   docker compose -f docker-compose.e2e.yml down -v
+# (or docker-compose …, the standalone binary). Reports land in
+# e2e/playwright-report (HTML) and e2e/test-results (traces, videos of failures).
+#
+# Self-contained: no env file, no real secrets, its own project name and
+# throwaway database — never touches the real kgt-ai-hub-* containers.
+name: kgt-ai-hub-e2e
+
+x-sandbox: &sandbox
+  networks: [sandbox]
+
+services:
+  e2e-postgres:
+    <<: *sandbox
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: kgt
+      POSTGRES_PASSWORD: kgt
+      POSTGRES_DB: kgt_e2e_test
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kgt -d kgt_e2e_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  mailpit:
+    <<: *sandbox
+    image: axllent/mailpit:v1.27
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "1"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "1"
+
+  stubs:
+    <<: *sandbox
+    image: node:20-alpine
+    command: ["node", "/stubs/server.js"]
+    environment:
+      OPENAI_MODEL: fake-model
+    volumes:
+      - ./e2e/stubs:/stubs:ro
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  api:
+    <<: *sandbox
+    build:
+      context: ./apps/api
+    init: true
+    environment:
+      DATABASE_URL: postgresql://kgt:kgt@e2e-postgres:5432/kgt_e2e_test?schema=public
+      PGHOST: e2e-postgres
+      POSTGRES_USER: kgt
+      POSTGRES_DB: kgt_e2e_test
+      PORT: 4000
+      JWT_SECRET: e2e-only-jwt-secret-not-for-production
+      CORS_ORIGINS: http://web:3001
+      TRUST_PROXY_HOPS: 0
+      # Staff console account, created by the seed on start.
+      HUB_ADMIN_EMAIL: staff@e2e.test
+      HUB_ADMIN_PASSWORD: E2E-Staff-Password-1
+      # AI: the fake LLM only. Every real provider key is blank.
+      LLM_PRIMARY: openai
+      LLM_FALLBACK: ""
+      OPENAI_API_KEY: sk-e2e-fake
+      OPENAI_BASE_URL: http://stubs:8080/v1
+      OPENAI_MODEL: fake-model
+      GROQ_API_KEY: ""
+      ANTHROPIC_API_KEY: ""
+      # Email: real SMTP, into Mailpit.
+      SMTP_HOST: mailpit
+      SMTP_PORT: 1025
+      SMTP_ALLOW_INSECURE: "true"
+      SMTP_FROM: KGT Solutions <connect@e2e.test>
+      RESEND_API_KEY: ""
+      # The fixture website lives on this private network.
+      CRAWLER_ALLOW_PRIVATE_HOSTS: "true"
+      SIGNUP_RATE_LIMIT_MAX: 20
+      LEAD_SUMMARY_IDLE_SEC: 2
+      CHECKPOINT_DISABLE: "1"
+    depends_on:
+      e2e-postgres: { condition: service_healthy }
+      stubs: { condition: service_healthy }
+      mailpit: { condition: service_started }
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 3s
+      timeout: 3s
+      retries: 60
+
+  web:
+    <<: *sandbox
+    build:
+      context: ./apps/web
+      args:
+        NEXT_PUBLIC_API_URL: http://api:4000
+    depends_on:
+      api: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/login').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 3s
+      timeout: 3s
+      retries: 60
+
+  e2e:
+    <<: *sandbox
+    build:
+      context: ./e2e
+    environment:
+      CI: "1"
+      E2E_BASE_URL: http://web:3001
+      E2E_API_URL: http://api:4000
+      MAILPIT_URL: http://mailpit:8025
+      E2E_SITE_URL: http://stubs:8081/
+      E2E_STAFF_EMAIL: staff@e2e.test
+      E2E_STAFF_PASSWORD: E2E-Staff-Password-1
+    ipc: host # Chromium needs more shared memory than Docker's 64MB default
+    volumes:
+      - ./e2e/playwright-report:/e2e/playwright-report
+      - ./e2e/test-results:/e2e/test-results
+    depends_on:
+      web: { condition: service_healthy }
+
+networks:
+  sandbox:
+    internal: true
