@@ -2,16 +2,20 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const { PrismaClient } = require('@prisma/client');
-const { hashPassword } = require('../src/utils/password');
+const { hashPassword, verifyPassword } = require('../src/utils/password');
 const { issueApiKey, hashApiKey, keyPrefix } = require('../src/utils/tenantApiKeys');
 
 const prisma = new PrismaClient();
 
 // Idempotent: safe to run on every container start (RUN_SEED=true).
 //
-// 1. The first operator account, from HUB_ADMIN_EMAIL / HUB_ADMIN_PASSWORD.
-//    Never hardcoded — this repo is public. An existing operator's password
-//    is left alone; change it in the database, not by re-seeding.
+// 1. The staff (operator) account from HUB_ADMIN_EMAIL / HUB_ADMIN_PASSWORD.
+//    Never hardcoded — this repo is public. The env is the source of truth:
+//    if the password changed in the env file, the stored hash is updated on
+//    the next start (there's no other way to change an operator password).
+//    A placeholder password is never written in production. A new
+//    HUB_ADMIN_EMAIL creates that operator; operators under other emails are
+//    left in place (and named in the log), never deleted automatically.
 // 2. The showcase tenant, Flatbriz (Tenant #1), unless SEED_FLATBRIZ_TENANT=false:
 //    its knowledge base comes from prisma/seed-data/flatbriz/*.md and is only
 //    written when the tenant is first created, so later edits made in the
@@ -44,17 +48,39 @@ async function seedOperator() {
     return;
   }
   if (password.length < 10) throw new Error('HUB_ADMIN_PASSWORD must be at least 10 characters');
+  const production = process.env.DEPLOY_ENV === 'production';
+  const placeholder = PLACEHOLDER_PASSWORDS.includes(password.trim().toLowerCase());
+  if (placeholder && production) {
+    console.error(`[seed] ERROR: HUB_ADMIN_PASSWORD is still the placeholder "${password}" with DEPLOY_ENV=production — ` +
+      'set a real password in the env file and recreate the API container. The staff password was NOT changed.');
+  }
 
   const existing = await prisma.operator.findUnique({ where: { email } });
-  if (existing) {
-    console.log(`[seed] Operator ${email} already exists — left unchanged.`);
-    return;
+  if (!existing) {
+    await prisma.operator.create({
+      data: { email, name: process.env.HUB_ADMIN_NAME || 'Platform admin', passwordHash: hashPassword(password) }
+    });
+    console.log(`[seed] Created operator ${email}.${placeholder ? ' WARNING: it uses the placeholder password — change HUB_ADMIN_PASSWORD.' : ''}`);
+  } else if (verifyPassword(password, existing.passwordHash)) {
+    console.log(`[seed] Operator ${email}: password matches HUB_ADMIN_PASSWORD — unchanged.`);
+  } else if (placeholder && production) {
+    // Error already logged: keep the real password rather than downgrade it.
+  } else {
+    await prisma.operator.update({ where: { id: existing.id }, data: { passwordHash: hashPassword(password) } });
+    console.log(`[seed] Operator ${email}: password updated to match HUB_ADMIN_PASSWORD.`);
   }
-  await prisma.operator.create({
-    data: { email, name: process.env.HUB_ADMIN_NAME || 'Platform admin', passwordHash: hashPassword(password) }
-  });
-  console.log(`[seed] Created operator ${email}.`);
+
+  // After an email change the old operator still exists; say so instead of
+  // silently leaving a second admin login around.
+  const others = await prisma.operator.findMany({ where: { email: { not: email } }, select: { email: true } });
+  if (others.length) {
+    console.warn(`[seed] Note: ${others.length} other operator account(s) still exist (${others.map((o) => o.email).join(', ')}) ` +
+      'and can still sign in. Remove any you no longer use.');
+  }
 }
+
+// Passwords that must never protect a production staff account.
+const PLACEHOLDER_PASSWORDS = ['change-me-please', 'change-me', 'changeme', 'password123', 'admin12345'];
 
 function pinnedFlatbrizKey() {
   const key = String(process.env.FLATBRIZ_TENANT_API_KEY || '').trim();

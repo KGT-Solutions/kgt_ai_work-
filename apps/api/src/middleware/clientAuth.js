@@ -13,7 +13,7 @@ function signClientToken(user) {
 
 const TENANT_FIELDS = {
   id: true, slug: true, name: true, industryLabel: true, persona: true, active: true,
-  outOfScopeMessage: true, minConfidence: true, signupEmail: true, createdAt: true
+  outOfScopeMessage: true, minConfidence: true, signupEmail: true, botPreference: true, createdAt: true
 };
 
 async function requireClient(req, res, next) {

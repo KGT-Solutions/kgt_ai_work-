@@ -363,4 +363,8 @@ async function pdfToDocuments(buffer, filename) {
   };
 }
 
-module.exports = { pdfToDocuments, PdfIngestError, linesToSections, isPdfBuffer, MAX_DOCS };
+module.exports = {
+  pdfToDocuments, PdfIngestError, linesToSections, isPdfBuffer, MAX_DOCS,
+  // Shared with fileIngest.js, so .docx / .txt / .md arrive in the same shape.
+  splitLongSections, sectionsToDocuments, cleanText
+};

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { DOC_CATEGORIES, DEFAULT_CATEGORY, categoryLabel } from '../../lib/documentCategories';
 import { BOT_SCOPES, DEFAULT_BOT_SCOPE, botScopeLabel } from '../../lib/botScopes';
+import { WorkspaceTrainingCheck } from './TrainingCheckDrawer';
 import { Badge, Button, Card, CardHeader, Checkbox, EmptyState, Field, Input, Segmented, Select, Skeleton, Spinner, Textarea, cx } from '../ui';
 import { useToast } from '../ui/toast';
 import { IconCheck, IconDocs, IconGlobe, IconPencil, IconSearch, IconTrash, IconUpload, IconX, IconAlert } from '../ui/icons';
@@ -10,14 +11,12 @@ import { IconCheck, IconDocs, IconGlobe, IconPencil, IconSearch, IconTrash, Icon
 // `ws` (clientWorkspace() or staffWorkspace(id)), so it can only ever reach
 // the tenant the session is allowed to.
 
-const MAX_PDF_MB = 10;
-const MAX_TEXT_KB = 200;
+const MAX_FILE_MB = 10; // one document; mirrors the API (services/shared/fileIngest.js)
+const MAX_ZIP_MB = 25;  // a .zip of documents
 // Must match CRAWL_CONSENT_STATEMENT in apps/api/src/services/shared/crawlConsent.js.
 const CRAWL_CONSENT_TEXT =
   'I am an authorized representative and legally permit the KGT Solutions AI crawler to access and extract content from this domain.';
 
-const isPdf = (f) => /\.pdf$/i.test(f.name) || f.type === 'application/pdf';
-const isText = (f) => /\.(txt|md|markdown)$/i.test(f.name) || /^text\/(plain|markdown)$/.test(f.type);
 
 export default function DocumentManager({ ws, audience }) {
   const toast = useToast();
@@ -51,6 +50,9 @@ export default function DocumentManager({ ws, audience }) {
           {mode === 'website' && <WebsiteImport ws={ws} audience={audience} onAdded={load} />}
         </div>
       </Card>
+
+      {/* On-demand: shows the last scores; a new check runs only when asked. Re-read whenever the documents reload. */}
+      <WorkspaceTrainingCheck ws={ws} refreshKey={docs} title="Check training status" />
 
       <Card>
         <div className="flex flex-col gap-3 border-b border-white/[0.06] px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
@@ -117,21 +119,18 @@ function UploadZone({ ws, onAdded }) {
       const f = it.file;
       patch(it.id, { status: 'parsing' });
       try {
-        if (isPdf(f)) {
-          if (f.size > MAX_PDF_MB * 1024 * 1024) throw new Error(`Larger than ${MAX_PDF_MB}MB`);
-          const r = await ws.uploadPdf(f, category);
-          added += r.documentsCreated;
-          patch(it.id, { status: 'done', detail: `${r.documentsCreated} section${r.documentsCreated === 1 ? '' : 's'}${r.truncated ? ' (long file — first part only)' : ''}` });
-        } else if (isText(f)) {
-          if (f.size > MAX_TEXT_KB * 1024) throw new Error(`Text files are limited to ${MAX_TEXT_KB}KB`);
-          const content = (await f.text()).trim();
-          if (!content) throw new Error('The file is empty');
-          await ws.createDocument({ title: f.name.replace(/\.(txt|md|markdown)$/i, ''), content, category: category || DEFAULT_CATEGORY });
-          added += 1;
-          patch(it.id, { status: 'done', detail: `Added to ${categoryLabel(category || DEFAULT_CATEGORY)}` });
-        } else {
-          throw new Error('Use a PDF, .txt or .md file');
-        }
+        // Every supported type goes to the API's file parser (services/shared/fileIngest.js).
+        if (!/\.(pdf|docx|txt|md|markdown|zip)$/i.test(f.name)) throw new Error('Use PDF, Word (.docx), .txt, .md or a .zip of them');
+        const limit = /\.zip$/i.test(f.name) ? MAX_ZIP_MB : MAX_FILE_MB;
+        if (f.size > limit * 1024 * 1024) throw new Error(`Larger than ${limit}MB`);
+        const r = await ws.uploadFile(f, { category });
+        added += r.documentsCreated;
+        const skipped = (r.files || []).filter((x) => !x.ok);
+        patch(it.id, {
+          status: 'done',
+          detail: `${r.documentsCreated} document${r.documentsCreated === 1 ? '' : 's'} added${skipped.length ? ` · ${skipped.length} file${skipped.length === 1 ? '' : 's'} skipped` : ''}`,
+          skipped
+        });
       } catch (err) {
         patch(it.id, { status: 'error', detail: err.message });
       }
@@ -158,13 +157,13 @@ function UploadZone({ ws, onAdded }) {
         className={cx('relative flex cursor-pointer flex-col items-center justify-center rounded-xl border border-dashed px-6 py-10 text-center transition focus-within:ring-4 focus-within:ring-brand-400/10',
           drag ? 'border-brand-400/70 bg-brand-400/[0.06] shadow-glow' : 'border-white/15 bg-white/[0.015] hover:border-white/25 hover:bg-white/[0.03]',
           busy && 'pointer-events-none opacity-70')}>
-        <input ref={inputRef} type="file" multiple accept="application/pdf,.pdf,.txt,.md,.markdown,text/plain,text/markdown"
+        <input ref={inputRef} type="file" multiple accept=".pdf,.docx,.txt,.md,.markdown,.zip,application/pdf,application/zip,text/plain,text/markdown"
           className="absolute h-px w-px opacity-0" onChange={(e) => handleFiles(e.target.files)} disabled={busy} />
         <span className="mb-3 flex h-11 w-11 items-center justify-center rounded-xl border border-white/10 bg-white/[0.04] text-brand-300">
           <IconUpload className="h-5 w-5" />
         </span>
         <p className="text-sm font-medium text-fg">Drop files here, or click to browse</p>
-        <p className="mt-1 text-xs text-fg-3">PDF up to {MAX_PDF_MB}MB · .txt and .md up to {MAX_TEXT_KB}KB · several at once</p>
+        <p className="mt-1 text-xs text-fg-3">PDF, Word (.docx), .txt or .md up to {MAX_FILE_MB}MB · or a .zip of them up to {MAX_ZIP_MB}MB · several at once</p>
       </label>
 
       {items.length > 0 && (
@@ -178,7 +177,8 @@ function UploadZone({ ws, onAdded }) {
                 {i.status === 'error' && <IconAlert className="h-4 w-4 text-rose-300" />}
               </span>
               <span className="min-w-0 flex-1 truncate text-fg">{i.name}</span>
-              <span className={cx('shrink-0 text-xs', i.status === 'error' ? 'text-rose-300' : 'text-fg-3')}>
+              <span className={cx('shrink-0 text-xs', i.status === 'error' ? 'text-rose-300' : 'text-fg-3')}
+                title={i.skipped?.length ? i.skipped.map((s) => `${s.name}: ${s.reason}`).join('\n') : undefined}>
                 {i.status === 'queued' ? 'Waiting' : i.status === 'parsing' ? 'Parsing…' : i.detail}
               </span>
             </li>

@@ -8,6 +8,9 @@ const express = require('express');
 // documents). Prisma is an in-memory store; the LLM is a mock.
 
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret-for-readiness-routes';
+// Every request here comes from 127.0.0.1: lift the per-IP limits above what the tests use.
+process.env.PREFLIGHT_AUDIT_RATE_LIMIT_MAX = '100';
+process.env.SIGNUP_RATE_LIMIT_MAX = '100';
 // Belt and braces: no provider key, so even a missed mock can never reach a
 // real LLM (dotenv never overrides a variable that's already set).
 for (const k of ['GROQ_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY']) process.env[k] = '';
@@ -31,9 +34,9 @@ const { signToken } = require('../src/utils/authTokens');
 
 const long = (s, n) => Array.from({ length: n }, (_, i) => `${s} ${i}.`).join(' ');
 const PAGES = [
-  { title: 'About Acme', content: `## Who we are\n\n${long('Acme builds smart thermostats', 80)}`, category: 'CORE_OVERVIEW' },
-  { title: 'Pricing', content: `## Plans\n\n${long('Pro costs ₹999 per month', 80)}`, category: 'CUSTOM_POLICY', botScope: 'sales' },
-  { title: 'Help', content: `## Not working\n\n${long('Reset the device if it is not working', 80)}`, category: 'FAQ' }
+  { title: 'About Acme', content: `## Who we are\n\n${long('Acme builds smart thermostats', 160)}`, category: 'CORE_OVERVIEW' },
+  { title: 'Pricing', content: `## Plans\n\n${long('Pro costs ₹999 per month', 160)}`, category: 'CUSTOM_POLICY', botScope: 'sales' },
+  { title: 'Help', content: `## Not working\n\n${long('Reset the device if it is not working', 160)}`, category: 'FAQ' }
 ];
 
 let tenants, docs, server, base;
@@ -69,7 +72,10 @@ beforeEach(() => {
   prisma.$transaction = async (fn) => fn(tx);
   prisma.tenantUser.findUnique = async () => null;
   prisma.tenant.findUnique = async ({ where }) => byId(where.id) || null;
-  prisma.tenant.update = async ({ where, data }) => Object.assign(byId(where.id), data);
+  prisma.tenant.update = async ({ where, data, select }) => {
+    const t = Object.assign(byId(where.id), data);
+    return select ? Object.fromEntries(Object.keys(select).map((k) => [k, t[k]])) : t;
+  };
   prisma.tenantDocument.findMany = async ({ where }) => docs.filter((d) => d.tenantId === where.tenantId);
   prisma.tenantDocument.count = async ({ where }) => docs.filter((d) => d.tenantId === where.tenantId).length;
   prisma.tenantDocument.findFirst = async ({ where }) => docs.find((d) => d.id === where.id && d.tenantId === where.tenantId) || null;
@@ -90,7 +96,8 @@ describe('signup wizard: /preflight-audit then /complete', () => {
     assert.equal(body.readinessScore, 90);
     assert.equal(body.readinessLevel, 'Production Ready');
     assert.equal(body.pillarScores.length, 5);
-    assert.deepEqual(body.criticalGaps, ['No support hours']);
+    assert.deepEqual(body.criticalGaps, ['Support Bot: No support hours', 'Sales Bot: No support hours']);
+    assert.deepEqual([body.bots.support.score, body.bots.sales.score], [90, 90]);
     assert.ok(body.distribution.supportBot > 0 && body.distribution.salesBot > 0);
     assert.equal(tenants.length, 0);
   });
@@ -116,10 +123,77 @@ describe('signup wizard: /preflight-audit then /complete', () => {
     assert.equal(tenants[0].readinessContentHash, contentHash(docs));
   });
 
+  test('a Support-only signup: audited as such, saved on the tenant, and the reviewed report kept', async () => {
+    const audit = await json(await post('/register/preflight-audit', { companyName: 'Acme', industryLabel: 'Smart home', pages: PAGES, botPreference: 'support' }));
+    assert.equal(audit.body.botPreference, 'support');
+    assert.match(generateAnswerMock.mock.calls[0].arguments[0].systemPrompt, /one AI chat assistant[\s\S]*"support": the Support Bot/);
+    const { status, body } = await json(await post('/register/complete', {
+      companyName: 'Acme', email: 'sol@acme.test', password: 'a-long-password', industryLabel: 'Smart home', pages: PAGES,
+      botPreference: 'support', emailVerificationToken: signToken('signup', { email: 'sol@acme.test', verificationId: 'v1' })
+    }));
+    assert.equal(status, 201);
+    assert.equal(body.botPreference, 'support');
+    assert.equal(tenants[0].botPreference, 'support');
+    assert.equal(auditCalls(), 1, 'the support-only report was reused, not redone');
+    assert.equal(tenants[0].readinessContentHash, contentHash(docs, 'support'));
+  });
+
+  test('a different preference at /complete than in the audit gets a fresh audit', async () => {
+    // Pages of its own: earlier tests leave "both" audits of PAGES in the wizard cache.
+    const pages = [...PAGES, { title: 'Contact', content: '## Reach us\n\nCall our Pune office on weekdays.' }];
+    await post('/register/preflight-audit', { companyName: 'Acme', industryLabel: 'Smart home', pages, botPreference: 'sales' });
+    const { body } = await json(await signup(pages)); // defaults to both
+    assert.equal(body.readiness, null);
+    assert.equal(body.botPreference, 'both');
+  });
+
   test('bad input is rejected before any model call', async () => {
+    assert.equal((await post('/register/preflight-audit', { pages: PAGES, botPreference: 'marketing' })).status, 400);
     assert.equal((await post('/register/preflight-audit', { pages: [] })).status, 400);
     assert.equal((await post('/register/preflight-audit', { pages: [{ ...PAGES[0], botScope: 'marketing' }] })).status, 400);
     assert.equal(generateAnswerMock.mock.callCount(), 0);
+  });
+});
+
+describe('file uploads: PDF / Word / text / ZIP', () => {
+  const yazl = require('yazl');
+  const makeZip = (entries) => new Promise((resolve) => {
+    const zip = new yazl.ZipFile();
+    for (const [name, data] of Object.entries(entries)) zip.addBuffer(Buffer.from(data), name);
+    zip.end();
+    const parts = [];
+    zip.outputStream.on('data', (c) => parts.push(c)).on('end', () => resolve(Buffer.concat(parts)));
+  });
+  const upload = (path, buffer, name, fields = {}) => {
+    const form = new FormData();
+    for (const [k, v] of Object.entries(fields)) form.append(k, v);
+    form.append('file', new Blob([buffer]), name);
+    return fetch(`${base}${path}`, { method: 'POST', body: form });
+  };
+
+  test('wizard /analyze-file: a zip of documents comes back as reviewable pages, nothing saved', async () => {
+    const zip = await makeZip({ 'pricing.md': '# Plans\nPro is ₹999 per month.', 'help.txt': '# Reset\nHold the button.', 'logo.png': 'x' });
+    const { status, body } = await json(await upload('/register/analyze-file', zip, 'docs.zip'));
+    assert.equal(status, 200);
+    assert.deepEqual(body.pages.map((p) => p.sourceFile).sort(), ['help.txt', 'pricing.md']);
+    assert.ok(body.pages.every((p) => p.content && p.category && p.url === null));
+    assert.deepEqual(body.files.find((f) => f.name === 'logo.png'), { name: 'logo.png', ok: false, reason: 'unsupported type' });
+    assert.equal(docs.length, 0);
+  });
+
+  test('wizard /analyze-file refuses an unsupported type', async () => {
+    const res = await upload('/register/analyze-file', Buffer.from('x'), 'tool.exe');
+    assert.equal(res.status, 415);
+  });
+
+  test('workspace /documents/file saves every document, with the chosen category and bot scope', async () => {
+    tenants.push({ id: 't1', name: 'Acme', industryLabel: 'Smart home' });
+    prisma.tenantDocument.createMany = async ({ data }) => { docs.push(...data); return { count: data.length }; };
+    const zip = await makeZip({ 'a.md': '# A\nAlpha.', 'b.md': '# B\nBeta.' });
+    const { status, body } = await json(await upload('/ws/documents/file', zip, 'kb.zip', { category: 'FAQ', botScope: 'SUPPORT' }));
+    assert.equal(status, 201);
+    assert.equal(body.documentsCreated, 2);
+    assert.ok(docs.every((d) => d.tenantId === 't1' && d.category === 'FAQ' && d.botScope === 'SUPPORT'));
   });
 });
 
@@ -152,7 +226,22 @@ describe('workspace: readiness and the knowledge split', () => {
     assert.deepEqual(byTitle.Pricing.sections, [{ title: 'Plans', scope: 'sales' }]);
     assert.deepEqual(byTitle.Help.sections, [{ title: 'Not working', scope: 'support' }]);
     assert.equal(byTitle['About Acme'].sections[0].scope, 'both');
-    assert.deepEqual(body.totals, { support: 1, sales: 1, both: 1, supportBot: 2, salesBot: 2, total: 3 });
+    assert.deepEqual(body.totals, { support: 1, sales: 1, both: 1, supportBot: 2, salesBot: 2, total: 3, deployed: ['support', 'sales'] });
+  });
+
+  test('PATCH /bot-preference switches to one bot: the split view and the readiness report follow', async () => {
+    await post('/ws/preflight-audit', {});
+    const res = await fetch(`${base}/ws/bot-preference`, {
+      method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ botPreference: 'Sales' })
+    });
+    assert.deepEqual(await res.json(), { botPreference: 'sales' });
+    assert.equal(tenants[0].botPreference, 'sales');
+    assert.equal((await json(await fetch(`${base}/ws/readiness`))).body.stale, true, 'audited for both bots; now only sales');
+    const { body } = await json(await fetch(`${base}/ws/knowledge/distribution`));
+    assert.equal(body.botPreference, 'sales');
+    assert.equal(body.totals.salesBot, 3, 'one bot uses every section');
+    const bad = await fetch(`${base}/ws/bot-preference`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: '{}' });
+    assert.equal(bad.status, 400);
   });
 
   test('an invalid botScope is rejected', async () => {

@@ -4,6 +4,7 @@ const { issueApiKey } = require('../utils/tenantApiKeys');
 const workspaceRoutes = require('./tenantWorkspace.routes');
 const { usageBreakdowns } = require('../services/usageStats');
 const { answerCache } = require('../engine/answerCache');
+const { parseBotPreference } = require('../services/shared/botScope');
 
 // KGT staff only — mounted behind requireOperator in app.js. The master
 // view across every client company, plus create / inspect / activate /
@@ -18,7 +19,7 @@ function makeSlug(name) {
 
 const TENANT_FIELDS = {
   id: true, slug: true, name: true, industryLabel: true, persona: true, active: true,
-  outOfScopeMessage: true, minConfidence: true, signupEmail: true, createdAt: true
+  outOfScopeMessage: true, minConfidence: true, signupEmail: true, botPreference: true, createdAt: true
 };
 
 // Per-tenant metrics for the master overview, computed in a handful of
@@ -117,9 +118,15 @@ router.patch('/:tenantId', async (req, res) => {
     data.minConfidence = n;
   }
   if (req.body?.outOfScopeMessage !== undefined) data.outOfScopeMessage = String(req.body.outOfScopeMessage).slice(0, 500);
+  if (req.body?.botPreference !== undefined) {
+    const botPreference = parseBotPreference(req.body.botPreference, null);
+    if (!botPreference.ok || !botPreference.value) return res.status(400).json({ error: botPreference.error || 'botPreference cannot be empty' });
+    data.botPreference = botPreference.value;
+  }
 
   const updated = await prisma.tenant.update({ where: { id: tenant.id }, data, select: TENANT_FIELDS });
-  // persona is part of both bots' prompts: answers cached under the old one are stale.
+  // persona is part of both bots' prompts, and botPreference changes the
+  // knowledge each bot answers from: answers cached under the old ones are stale.
   answerCache.invalidateTenant(tenant.id);
   res.json(updated);
 });

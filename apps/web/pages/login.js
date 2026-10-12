@@ -7,7 +7,11 @@ import { api } from '../lib/api';
 export default function ClientLogin() {
   return (
     <AuthShell title="Sign in" heading="Welcome back" subheading="Sign in to manage your Support and Sales bots."
-      footer={<>New to KGT AI Hub? <Link href="/register" className="font-medium text-brand-300 hover:text-brand-200">Create your bots</Link></>}>
+      footer={<>
+        New to KGT AI Hub? <Link href="/register" className="font-medium text-brand-300 hover:text-brand-200">Create your bots</Link>
+        <span className="mx-2 text-fg-3">·</span>
+        KGT staff? <Link href="/admin/login" className="font-medium text-fg-2 hover:text-fg">Staff console</Link>
+      </>}>
       <SignInForm kind="client" signIn={api.clientLogin} checkSession={api.clientMe} destination="/dashboard" forgotHref="/forgot-password" />
     </AuthShell>
   );

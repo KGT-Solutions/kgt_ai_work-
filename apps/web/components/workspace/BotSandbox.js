@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Badge, Button, Card, Segmented, Spinner, cx } from '../ui';
 import { IconBolt, IconSend, IconShield, IconSpark } from '../ui/icons';
 import { ChatText } from '../ui/ChatText';
+import { botsFor } from '../../lib/botPreferences';
 
 // Side-by-side sandbox: one composer, the Support Bot and the Sales Bot
 // answering in their own panes. Runs through ws.chat, i.e. the signed-in
@@ -57,7 +58,22 @@ function useStarterFaqs(ws) {
 }
 
 export default function BotSandbox({ ws, tenant }) {
-  const [target, setTarget] = useState('both');
+  // Only the bots this company deploys (Tenant.botPreference). The session's
+  // tenant can lag a change made on the Overview, so the knowledge split's
+  // answer — which carries the current preference — has the last word.
+  const [deployed, setDeployed] = useState(() => botsFor(tenant.botPreference));
+  const [split, setSplit] = useState(null);
+  const [target, setTarget] = useState(() => (botsFor(tenant.botPreference).length === 1 ? botsFor(tenant.botPreference)[0] : 'both'));
+  useEffect(() => {
+    ws.getKnowledgeDistribution().then((d) => {
+      setSplit(d);
+      const bots = botsFor(d.botPreference);
+      setDeployed(bots);
+      setTarget((t) => (bots.length === 1 ? bots[0] : t));
+    }).catch((e) => setSplit({ error: e.message })); // the panes still work on the session's preference
+  }, [ws]);
+  const single = deployed.length === 1;
+  const visibleBots = BOTS.filter((b) => deployed.includes(b.id));
   const [threads, setThreads] = useState({ support: [], sales: [] });
   const [sessions, setSessions] = useState({});
   const [pending, setPending] = useState({ support: false, sales: false });
@@ -96,15 +112,17 @@ export default function BotSandbox({ ws, tenant }) {
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <Segmented label="View" value={view} onChange={setView}
-          options={[{ value: 'chat', label: 'Compare answers' }, { value: 'knowledge', label: 'Knowledge split' }]} />
+          options={[{ value: 'chat', label: single ? 'Test chat' : 'Compare answers' }, { value: 'knowledge', label: single ? 'Knowledge' : 'Knowledge split' }]} />
         <p className="text-xs text-fg-3">
-          {view === 'chat' ? 'Ask both bots the same question to see how each answers from its own knowledge.'
-            : 'Which sections of your documents each bot answers from.'}
+          {view === 'chat'
+            ? (single ? `Only your ${deployed[0] === 'sales' ? 'Sales' : 'Support'} Bot is deployed — switch on the Overview page.`
+              : 'Ask both bots the same question to see how each answers from its own knowledge.')
+            : single ? 'The sections of your documents your bot answers from.' : 'Which sections of your documents each bot answers from.'}
         </p>
       </div>
-      {view === 'knowledge' && <KnowledgeSplit ws={ws} />}
-      <div className={cx('grid gap-4 lg:grid-cols-2', view !== 'chat' && 'hidden')}>
-        {BOTS.map((bot) => {
+      {view === 'knowledge' && <KnowledgeSplit data={split} deployed={deployed} />}
+      <div className={cx('grid gap-4', !single && 'lg:grid-cols-2', view !== 'chat' && 'hidden')}>
+        {visibleBots.map((bot) => {
           const tailored = faqs?.[bot.faqKey] || [];
           return (
             <BotPane key={bot.id} bot={bot} tenant={tenant} thread={threads[bot.id]} pending={pending[bot.id]}
@@ -117,8 +135,10 @@ export default function BotSandbox({ ws, tenant }) {
 
       <Card className={cx('p-3', view !== 'chat' && 'hidden')}>
         <form onSubmit={(e) => { e.preventDefault(); send(); }} className="flex flex-col gap-3 sm:flex-row sm:items-center">
-          <Segmented label="Send to" value={target} onChange={setTarget}
-            options={[{ value: 'both', label: 'Both' }, { value: 'support', label: 'Support' }, { value: 'sales', label: 'Sales' }]} />
+          {!single && (
+            <Segmented label="Send to" value={target} onChange={setTarget}
+              options={[{ value: 'both', label: 'Both' }, { value: 'support', label: 'Support' }, { value: 'sales', label: 'Sales' }]} />
+          )}
           <input ref={inputRef} value={input} onChange={(e) => setInput(e.target.value)} aria-label="Message"
             placeholder={target === 'both' ? 'Ask both bots the same question…' : `Ask the ${target === 'support' ? 'Support' : 'Sales'} Bot…`}
             className="h-10 min-w-0 flex-1 rounded-lg border border-white/10 bg-panel-2/80 px-3.5 text-sm text-fg placeholder:text-fg-3 focus:border-brand-400/60 focus:outline-none focus:ring-4 focus:ring-brand-400/10" />
@@ -218,20 +238,18 @@ function BotPane({ bot, tenant, thread, pending, starters, tailored, generating,
 // The Sales / Support split (GET /knowledge/distribution): for each bot,
 // the document sections it may answer from — its own plus those shared with
 // both. Fix a misfiled document from Documents → edit → "Used by".
-function KnowledgeSplit({ ws }) {
-  const [data, setData] = useState(null);
-  const [error, setError] = useState('');
-  useEffect(() => { ws.getKnowledgeDistribution().then(setData).catch((e) => setError(e.message)); }, [ws]);
-
-  if (error) return <Card className="p-5 text-sm text-rose-200">{error}</Card>;
+// With one bot deployed it answers from every section, so that's what's listed.
+function KnowledgeSplit({ data, deployed }) {
+  if (data?.error) return <Card className="p-5 text-sm text-rose-200">{data.error}</Card>;
   if (!data) return <Card className="flex items-center gap-2 p-5 text-sm text-fg-3"><Spinner className="h-4 w-4" />Loading the knowledge split…</Card>;
+  const single = deployed.length === 1;
 
   return (
-    <div className="grid gap-4 lg:grid-cols-2">
-      {BOTS.map((bot) => {
+    <div className={cx('grid gap-4', !single && 'lg:grid-cols-2')}>
+      {BOTS.filter((b) => deployed.includes(b.id)).map((bot) => {
         const own = bot.id;
         const docs = data.documents
-          .map((d) => ({ ...d, sections: d.sections.filter((s) => s.scope === own || s.scope === 'both') }))
+          .map((d) => ({ ...d, sections: d.sections.filter((s) => single || s.scope === own || s.scope === 'both') }))
           .filter((d) => d.sections.length);
         const Icon = bot.icon;
         return (
@@ -241,7 +259,7 @@ function KnowledgeSplit({ ws }) {
                 <Icon className={cx('h-4 w-4', bot.tone === 'blue' ? 'text-brand-300' : 'text-green-300')} />{bot.name}
               </span>
               <span className="text-xs text-fg-3 tabular-nums">
-                {data.totals[`${own}Bot`]} sections · {data.totals[own]} its own · {data.totals.both} shared
+                {single ? `${data.totals[`${own}Bot`]} sections` : `${data.totals[`${own}Bot`]} sections · ${data.totals[own]} its own · ${data.totals.both} shared`}
               </span>
             </div>
             <ul className="flex-1 divide-y divide-white/[0.05] overflow-y-auto">
@@ -251,7 +269,7 @@ function KnowledgeSplit({ ws }) {
                   <p className="truncate text-[13px] font-medium text-fg">{d.title}</p>
                   <div className="mt-1 flex flex-wrap gap-1.5">
                     {d.sections.map((s, i) => (
-                      <Badge key={i} tone={s.scope === 'both' ? 'neutral' : bot.tone}>{s.title}{s.scope === 'both' ? ' · shared' : ''}</Badge>
+                      <Badge key={i} tone={single || s.scope === 'both' ? 'neutral' : bot.tone}>{s.title}{!single && s.scope === 'both' ? ' · shared' : ''}</Badge>
                     ))}
                   </div>
                 </li>

@@ -11,8 +11,10 @@ const { hashPassword } = require('../utils/password');
 const { signClientToken } = require('../middleware/clientAuth');
 const { crawlConsentRecord, hostOf } = require('../services/shared/crawlConsent');
 const { scheduleFaqGeneration } = require('../services/tenantFaqs');
-const { parseBotScope } = require('../services/shared/botScope');
-const { claimVerification } = require('../services/verificationService');
+const { parseBotScope, parseBotPreference } = require('../services/shared/botScope');
+const { claimVerification, ACCOUNT_EXISTS } = require('../services/verificationService');
+const { maskAddress } = require('../services/mailer');
+const { ingestUpload, FileIngestError, MAX_UPLOAD_BYTES } = require('../services/shared/fileIngest');
 
 class UnverifiedEmail extends Error {}
 const {
@@ -40,8 +42,9 @@ const isAnalyzeRateLimited = createIpRateLimiter({ max: 8, windowMs: 10 * 60 * 1
 // the endpoint can't be used to probe which emails already have accounts.
 const isCompleteRateLimited = createIpRateLimiter({ max: Number(process.env.SIGNUP_RATE_LIMIT_MAX) || 3, windowMs: 60 * 60 * 1000 });
 const isPdfRateLimited = createIpRateLimiter({ max: 10, windowMs: 10 * 60 * 1000 });
-// Each readiness check is an LLM call paid by us, on a public route.
-const isAuditRateLimited = createIpRateLimiter({ max: Number(process.env.PREFLIGHT_AUDIT_RATE_LIMIT_MAX) || 6, windowMs: 10 * 60 * 1000 });
+// Each readiness check is an LLM call paid by us, on a public route. The wizard
+// re-checks after every upload on its Training screen, hence room for a dozen.
+const isAuditRateLimited = createIpRateLimiter({ max: Number(process.env.PREFLIGHT_AUDIT_RATE_LIMIT_MAX) || 12, windowMs: 10 * 60 * 1000 });
 
 // Room for a full crawl (crawler.js MAX_PAGES = 12) plus several uploaded
 // documents: the wizard lets a company combine both sources.
@@ -142,7 +145,10 @@ router.post('/preflight-audit', async (req, res) => {
     name: String(req.body?.companyName || '').trim().slice(0, 120) || 'this company',
     industryLabel: String(req.body?.industryLabel || '').trim().slice(0, 120) || 'business'
   };
-  const report = await auditKnowledge({ company, documents: normalized.pages });
+  // botPreference: which bots will be deployed (the wizard's "Choose your AI workforce" step).
+  const botPreference = parseBotPreference(req.body?.botPreference);
+  if (!botPreference.ok) return res.status(400).json({ error: botPreference.error });
+  const report = await auditKnowledge({ company, documents: normalized.pages, botPreference: botPreference.value });
   rememberWizardAudit(report);
   res.json(report);
 });
@@ -209,9 +215,54 @@ router.post('/analyze-pdf', pdfUploadMiddleware, async (req, res) => {
   }
 });
 
+// Any supported file — PDF, Word (.docx), .txt, .md, or a .zip of them —
+// parsed and returned as pages, like /analyze-pdf; nothing is saved.
+// files[] says what happened to each file (inside a zip, some may be skipped).
+const fileUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_UPLOAD_BYTES, files: 1, fields: 0 } });
+
+function fileUploadMiddleware(req, res, next) {
+  if (isPdfRateLimited(req.ip)) {
+    return res.status(429).json({ error: 'Too many uploads from this address. Please wait a few minutes and try again.' });
+  }
+  fileUpload.single('file')(req, res, (err) => {
+    if (!err) return next();
+    if (err instanceof multer.MulterError) {
+      if (err.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: `Uploads are limited to ${MAX_UPLOAD_BYTES / (1024 * 1024)}MB` });
+      return res.status(400).json({ error: 'Upload exactly one file in a field named "file"' });
+    }
+    next(err);
+  });
+}
+
+router.post('/analyze-file', fileUploadMiddleware, async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'Attach a file in a field named "file"' });
+  try {
+    const { pages, files } = await ingestUpload(req.file.buffer, req.file.originalname);
+    res.json({
+      files,
+      pages: pages.map((p) => ({
+        title: p.title,
+        content: p.markdown,
+        url: null,
+        sourceFile: p.sourceFile,
+        category: suggestCategory({ title: p.title, markdown: p.markdown, source: 'pdf' })
+      }))
+    });
+  } catch (e) {
+    if (e instanceof FileIngestError || e instanceof PdfIngestError) return res.status(e.statusCode).json({ error: e.message });
+    throw e;
+  }
+});
+
 router.post('/complete', async (req, res) => {
+  // Every refusal is logged with its reason: a signup that silently never
+  // completes otherwise looks, later, like a login bug ("Invalid email or password").
+  const refuse = (status, body) => {
+    console.warn(`[register] signup refused (${status}) for ${maskAddress(String(req.body?.email || '').trim().toLowerCase())}: ${body.code || body.error}`);
+    return res.status(status).json(body);
+  };
   if (isCompleteRateLimited(req.ip)) {
-    return res.status(429).json({
+    return refuse(429, {
       error: 'Too many signup attempts from this address. Please try again later, or reach out to us directly.'
     });
   }
@@ -222,29 +273,31 @@ router.post('/complete', async (req, res) => {
   const contactName = String(req.body?.contactName || '').trim().slice(0, 120) || null;
   const industryLabel = String(req.body?.industryLabel || '').trim().slice(0, 120);
   const rawPages = Array.isArray(req.body?.pages) ? req.body.pages : [];
+  const botPreference = parseBotPreference(req.body?.botPreference); // support | sales | both (default)
+  if (!botPreference.ok) return refuse(400, { error: botPreference.error });
 
-  if (!companyName) return res.status(400).json({ error: 'companyName is required' });
-  if (!isValidEmail(email)) return res.status(400).json({ error: 'A valid business email is required' });
+  if (!companyName) return refuse(400, { error: 'companyName is required' });
+  if (!isValidEmail(email)) return refuse(400, { error: 'A valid business email is required' });
   if (password.length < MIN_PASSWORD_LEN) {
-    return res.status(400).json({ error: `Choose a password of at least ${MIN_PASSWORD_LEN} characters` });
+    return refuse(400, { error: `Choose a password of at least ${MIN_PASSWORD_LEN} characters` });
   }
-  if (!industryLabel) return res.status(400).json({ error: 'industryLabel is required' });
-  if (!rawPages.length) return res.status(400).json({ error: 'Add at least one website page or document to train on' });
+  if (!industryLabel) return refuse(400, { error: 'industryLabel is required' });
+  if (!rawPages.length) return refuse(400, { error: 'Add at least one website page or document to train on' });
   if (await prisma.tenantUser.findUnique({ where: { email }, select: { id: true } })) {
-    return res.status(409).json({ error: 'An account with this email already exists — sign in instead.' });
+    return refuse(409, { error: ACCOUNT_EXISTS });
   }
 
   const normalized = normalizePages(rawPages);
-  if (!normalized.ok) return res.status(400).json({ error: normalized.error });
+  if (!normalized.ok) return refuse(400, { error: normalized.error });
   const { pages } = normalized;
-  if (!pages.length) return res.status(400).json({ error: 'None of the submitted pages had both a title and content' });
+  if (!pages.length) return refuse(400, { error: 'None of the submitted pages had both a title and content' });
 
   // Crawled content (pages carrying a sourceUrl) can only be saved alongside
   // the crawl authorization, which is recorded as a TenantConsent row.
   const consent = req.body?.websiteConsent;
   const consentHost = consent?.authorized === true ? hostOf(String(consent.url || '')) : null;
   if (pages.some((p) => p.sourceUrl) && !consentHost) {
-    return res.status(400).json({ error: 'Crawled pages require websiteConsent: { authorized: true, url }' });
+    return refuse(400, { error: 'Crawled pages require websiteConsent: { authorized: true, url }' });
   }
 
   // Tenant, its first API key, documents, crawl consent and the client's
@@ -257,7 +310,7 @@ router.post('/complete', async (req, res) => {
       // created, and one verification creates one account.
       if (!(await claimVerification(tx, email, req.body?.emailVerificationToken))) throw new UnverifiedEmail();
       const tenant = await tx.tenant.create({
-        data: { name: companyName, slug: makeSlug(companyName), industryLabel, signupEmail: email }
+        data: { name: companyName, slug: makeSlug(companyName), industryLabel, signupEmail: email, botPreference: botPreference.value }
       });
       const { key } = await issueApiKey(tx, tenant.id, 'Website widget');
       await tx.tenantDocument.createMany({ data: pages.map((p) => ({ tenantId: tenant.id, ...p })) });
@@ -273,12 +326,13 @@ router.post('/complete', async (req, res) => {
     });
   } catch (e) {
     if (e instanceof UnverifiedEmail) {
-      return res.status(403).json({ error: 'Verify your email address first — request a code and enter it in the wizard.', code: 'EMAIL_NOT_VERIFIED' });
+      return refuse(403, { error: 'Verify your email address first — request a code and enter it in the wizard.', code: 'EMAIL_NOT_VERIFIED' });
     }
     // Two signups racing on the same email: the unique index wins.
-    if (e.code === 'P2002') return res.status(409).json({ error: 'An account with this email already exists — sign in instead.' });
+    if (e.code === 'P2002') return refuse(409, { error: ACCOUNT_EXISTS });
     throw e;
   }
+  console.log(`[register] account created for ${maskAddress(email)} (tenant ${created.tenant.slug})`);
   // No invalidateTenantKnowledge call needed — this tenant's knowledge
   // cache has never been populated, so there's nothing stale to clear.
   // Starter questions are written in the background, usually before the
@@ -287,7 +341,7 @@ router.post('/complete', async (req, res) => {
   // The readiness report the visitor reviewed in the wizard, if it was for
   // exactly these pages; otherwise (skipped, edited after, or a restart in
   // between) a fresh audit runs in the background.
-  const reviewed = takeWizardAudit(contentHash(pages));
+  const reviewed = takeWizardAudit(contentHash(pages, botPreference.value));
   let readiness = null;
   if (reviewed) {
     readiness = { score: reviewed.readinessScore, level: reviewed.readinessLevel };
@@ -306,6 +360,7 @@ router.post('/complete', async (req, res) => {
     apiKey: created.apiKey, // shown once, on the dashboard's welcome banner
     documentsCreated: pages.length,
     readiness, // { score, level } when the reviewed audit was kept; null while a fresh one runs
+    botPreference: botPreference.value,
     // Signed straight in: the wizard lands the new client on /dashboard.
     token: signClientToken(created.user)
   });

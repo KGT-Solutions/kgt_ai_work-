@@ -15,6 +15,7 @@ export default function SignInForm({ kind, signIn, checkSession, destination, fo
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [elsewhere, setElsewhere] = useState(null); // the right sign-in page, when the API says these credentials belong there
 
   const next = typeof router.query.next === 'string' && router.query.next.startsWith('/') && !router.query.next.startsWith('//')
     ? router.query.next : destination;
@@ -29,12 +30,14 @@ export default function SignInForm({ kind, signIn, checkSession, destination, fo
     if (loading) return;
     setLoading(true);
     setError('');
+    setElsewhere(null);
     try {
       const { token } = await signIn(email.trim(), password);
       setToken(kind, token);
       router.push(next);
     } catch (err) {
       setError(err.message);
+      if (err.data?.signInPath?.startsWith('/')) setElsewhere(err.data.signInPath);
       setLoading(false);
     }
   };
@@ -57,7 +60,11 @@ export default function SignInForm({ kind, signIn, checkSession, destination, fo
       } htmlFor={`${kind}-password`}>
         <Input id={`${kind}-password`} type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />
       </Field>
-      {error && <p className="rounded-lg border border-rose-400/25 bg-rose-500/10 px-3 py-2 text-[13px] text-rose-100" role="alert">{error}</p>}
+      {error && (
+        <p className="rounded-lg border border-rose-400/25 bg-rose-500/10 px-3 py-2 text-[13px] text-rose-100" role="alert">
+          {error} {elsewhere && <Link href={elsewhere} className="font-medium underline">Go to the staff console</Link>}
+        </p>
+      )}
       <Button type="submit" variant="primary" className="w-full" loading={loading} disabled={!email.trim() || !password}>Sign in</Button>
     </form>
   );

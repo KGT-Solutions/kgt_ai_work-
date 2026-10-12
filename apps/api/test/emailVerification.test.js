@@ -165,7 +165,7 @@ describe('claimVerification (used by /register/complete)', () => {
   test('refused: no token, another address, another token type, or a verification over 2 hours old', async () => {
     assert.equal(await claimVerification(tx, 'ana@acme.test', undefined), false);
     assert.equal(await claimVerification(tx, 'bob@acme.test', token), false);
-    assert.equal(await claimVerification(tx, 'ana@acme.test', signToken('reset', { email: 'ana@acme.test', verificationId: rows[0].id })), false);
+    assert.equal(await claimVerification(tx, 'ana@acme.test', signToken('client', { email: 'ana@acme.test', verificationId: rows[0].id })), false);
     rows[0].verifiedAt = new Date(Date.now() - 2.1 * 60 * 60 * 1000);
     assert.equal(await claimVerification(tx, 'ana@acme.test', token), false);
     assert.equal(rows[0].usedAt, null);

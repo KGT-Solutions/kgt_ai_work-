@@ -2,48 +2,49 @@ import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { SERIES } from '../../lib/chartColors';
 import TimeSeriesChart from '../charts/TimeSeriesChart';
-import { Badge, Card, CardHeader, Skeleton, cx } from '../ui';
+import { Badge, Card, CardHeader, Segmented, Skeleton, cx } from '../ui';
 import { useToast } from '../ui/toast';
 import { IconArrowRight, IconBot, IconCheck, IconDocs, IconKey } from '../ui/icons';
 import { Stat } from './UsagePanel';
-import BotReadinessPanel from './BotReadinessPanel';
+import { WorkspaceTrainingCheck } from './TrainingCheckDrawer';
+import { DEFAULT_BOT_PREFERENCE, botPreferenceLabel } from '../../lib/botPreferences';
 
-const READINESS_POLL_MS = 5000;
-
-// The saved pre-flight audit (written at signup, or by "Run again" here).
-// While the API reports one running in the background — right after signup,
-// when the wizard's report couldn't be reused — it polls until it lands.
-function ReadinessCard({ ws }) {
+// Which bots are deployed, and the on-demand training check
+// (TrainingCheckDrawer): collapsed to one row with the last scores; a new
+// check runs only when asked. Switching bots makes the saved report stale,
+// so the drawer is told to re-read it.
+function ReadinessCard({ ws, tenant }) {
   const toast = useToast();
-  const [state, setState] = useState(null); // { report, stale, running }
-  const [busy, setBusy] = useState(false);
+  const [preference, setPreference] = useState(tenant.botPreference || DEFAULT_BOT_PREFERENCE);
+  const [reloadKey, setReloadKey] = useState(0);
 
-  useEffect(() => {
-    let alive = true;
-    let timer;
-    const load = () => ws.getReadiness().then((s) => {
-      if (!alive) return;
-      setState(s);
-      if (s.running) timer = setTimeout(load, READINESS_POLL_MS);
-    }).catch(() => alive && setState({ report: null, stale: false, running: false }));
-    load();
-    return () => { alive = false; clearTimeout(timer); };
-  }, [ws]);
-
-  const run = async () => {
-    setBusy(true);
+  const changePreference = async (next) => {
+    if (next === preference) return;
+    const previous = preference;
+    setPreference(next);
     try {
-      const report = await ws.runReadinessAudit();
-      setState({ report, stale: false, running: false });
+      await ws.setBotPreference(next);
+      toast.success(`Now deploying: ${botPreferenceLabel(next)}. Run a training check to see how ready it is.`);
+      setReloadKey((k) => k + 1);
     } catch (e) {
+      setPreference(previous);
       toast.error(e.message);
-    } finally {
-      setBusy(false);
     }
   };
 
-  if (!state) return <Skeleton className="h-40" />;
-  return <BotReadinessPanel report={state.report} stale={state.stale} loading={busy || state.running} onRun={run} />;
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-semibold text-fg">Deployed bots</h3>
+          <p className="text-xs text-fg-3">One bot answers from all your knowledge; with both, it&apos;s split between Sales and Support.</p>
+        </div>
+        <Segmented label="Deployed bots" value={preference} onChange={changePreference}
+          options={[{ value: 'support', label: 'Support only' }, { value: 'sales', label: 'Sales only' }, { value: 'both', label: 'Both' }]} />
+      </div>
+      <WorkspaceTrainingCheck ws={ws} refreshKey={reloadKey} title="Check training status" />
+    </div>
+  );
 }
 
 // Landing page of a workspace: are the bots live, what's left to set up, and
@@ -95,7 +96,7 @@ export default function Overview({ ws, tenant, base }) {
         <Stat label="Open tickets" value={data && data.tickets.filter((t) => t.status === 'open').length} />
       </div>
 
-      <ReadinessCard ws={ws} />
+      <ReadinessCard ws={ws} tenant={tenant} />
 
       <div className="grid gap-6 lg:grid-cols-[1.6fr_1fr]">
         <Card>

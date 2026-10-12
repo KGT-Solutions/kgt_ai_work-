@@ -6,49 +6,67 @@ const llm = require('../engine/llmClient');
 const { logUsage } = require('../engine/usageTracking');
 const { buildDigest } = require('./tenantFaqs');
 const { documentChunks } = require('../domains/tenantProfile');
-const { scopeCounts } = require('./shared/botScope');
+const { scopeCounts, parseBotPreference, botsFor, botCanUse } = require('./shared/botScope');
 
-// Pre-flight readiness audit: before a company launches its bots, how well
-// do its documents equip them? One LLM call reads a digest of the content
-// and scores five pillars; the score, level, gaps and recommendations come
-// back as a report. Used:
-//   - by the signup wizard, after scanning / uploads and before "Create my
-//     bots" (POST /api/v1/public/register/preflight-audit, nothing saved);
+// Pre-flight training readiness: before a company launches its bots, how well
+// do its documents equip EACH of them? One LLM call reads a digest of the
+// content, scores five shared pillars, and lists what's missing for each bot.
+// Used:
+//   - by the signup wizard, after scanning / uploads and before "Deploy"
+//     (POST /api/v1/public/register/preflight-audit, nothing saved);
 //   - on an existing workspace (POST .../workspace/preflight-audit), where
 //     the report is saved on the Tenant row and marked stale when documents change.
 //
-// The overall score is computed HERE from the pillar scores and fixed
-// weights, never taken from the model, then capped by how much content there
-// actually is: a model can be generous about three short paragraphs, a
-// character count can't. When no LLM is configured or the call fails, a
-// keyword-coverage estimate stands in (method: "heuristic"), so the wizard is
-// never blocked by an outage.
+// Every deployed bot gets its own training score, level, gaps and
+// requirements (report.bots.support / report.bots.sales):
+//   - the score is computed HERE from the pillar scores with that bot's own
+//     weights (BOT_WEIGHTS) — never taken from the model;
+//   - it's then capped by how much text THAT bot can actually use (the
+//     Sales / Support split decides which sections it sees), because a model
+//     can be generous about three short paragraphs and a character count can't.
+// The overall readinessScore is the LOWEST deployed bot's score: "Production
+// Ready" means every bot the company launches is ready, not their average.
+// When no LLM is configured or the call fails, a keyword-coverage estimate
+// stands in (method: "heuristic"), so the wizard is never blocked by an outage.
 
 const PILLARS = Object.freeze([
-  { id: 'identity', label: 'Company Identity & Core Offerings', weight: 15,
+  { id: 'identity', label: 'Company Identity & Core Offerings',
     lookFor: 'who the company is, what it offers, who it serves, where it operates, how to reach it' },
-  { id: 'features', label: 'Product / Service Features & Specs', weight: 20,
+  { id: 'features', label: 'Product / Service Features & Specs',
     lookFor: 'what each product or service does, key features, specifications, limits, integrations, requirements' },
-  { id: 'pricing', label: 'Pricing, Packaging & Licensing', weight: 20,
+  { id: 'pricing', label: 'Pricing, Packaging & Licensing',
     lookFor: 'actual prices, plans or tiers and what each includes, billing terms, discounts, licensing, trials' },
-  { id: 'support', label: 'Support Manuals & Troubleshooting FAQs', weight: 25,
+  { id: 'support', label: 'Support Manuals & Troubleshooting FAQs',
     lookFor: 'how-to steps, setup, common problems and fixes, account help, support hours and contact, SLAs, returns / refunds / warranty' },
-  { id: 'sales', label: 'Sales Pitch, Objections & Competitive Differentiators', weight: 20,
+  { id: 'sales', label: 'Sales Pitch, Objections & Competitive Differentiators',
     lookFor: 'why choose them, benefits and outcomes, proof (case studies, customers), answers to objections, comparisons with alternatives' }
 ]);
 const PILLAR_IDS = PILLARS.map((p) => p.id);
+
+// What each bot is trained on. Each row sums to 100; a 0 means that pillar
+// doesn't count toward the bot's score.
+const BOT_WEIGHTS = Object.freeze({
+  support: { identity: 15, features: 20, pricing: 5, support: 60, sales: 0 },
+  sales: { identity: 15, features: 25, pricing: 30, support: 0, sales: 30 }
+});
+const BOT_LABEL = { support: 'Support Bot', sales: 'Sales Bot' };
+const BOT_NEEDS = {
+  support: 'existing customers: setup and how-to steps, troubleshooting, FAQs, operating hours and contact, SLAs, returns / refunds / warranty',
+  sales: 'prospects: offerings, product features, pricing tiers and what each includes, proof, objection handling, comparisons'
+};
 
 const LEVELS = Object.freeze({ NOT_READY: 'Not Ready', MODERATE: 'Moderate', READY: 'Production Ready' });
 const READY_AT = 80;
 const MODERATE_AT = 50;
 const levelFor = (score) => (score >= READY_AT ? LEVELS.READY : score >= MODERATE_AT ? LEVELS.MODERATE : LEVELS.NOT_READY);
 
-// Content caps on the overall score (characters of document text). Below
-// these there simply isn't enough material for two bots, whatever it says.
+// Caps on a bot's score by the characters of text it can use. Below these
+// there simply isn't enough material for it, whatever the model says.
 const CONTENT_CAPS = [{ under: 800, cap: 25 }, { under: 2500, cap: 60 }, { under: 6000, cap: 85 }];
+const capFor = (characters) => CONTENT_CAPS.find((c) => characters < c.under)?.cap ?? 100;
 
 const AUDIT_DIGEST_BUDGET = 20000;
-const AUDIT_MAX_TOKENS = 2500; // the JSON report is far longer than a chat answer (reasoning models need headroom too)
+const AUDIT_MAX_TOKENS = 3000; // the JSON report is far longer than a chat answer (reasoning models need headroom too)
 const MAX_TEXT = 220;
 const MAX_PILLAR_GAPS = 4;
 const MAX_CRITICAL_GAPS = 8;
@@ -58,31 +76,39 @@ const MAX_RECOMMENDATIONS = 8;
  * Order-independent fingerprint of a document set: the same pages give the
  * same hash however they were listed. Fields beyond these don't change what
  * the bots know, so they don't change the hash.
+ * The bot preference is part of it too (except the default "both", so
+ * reports saved before preferences existed stay current): switching from
+ * both bots to one changes what the report should say.
  * @param {Array<{ title: string, content: string, category?: string, botScope?: string }>} documents
+ * @param {string} [botPreference]
  */
-function contentHash(documents) {
+function contentHash(documents, botPreference = 'both') {
   const rows = documents
     .map((d) => JSON.stringify([String(d.title || '').trim(), String(d.content || '').trim(), d.category || 'CORE_OVERVIEW', d.botScope || 'AUTO']))
     .sort();
+  if (botPreference && botPreference !== 'both') rows.push(`botPreference:${botPreference}`);
   return crypto.createHash('sha256').update(rows.join('\n')).digest('hex');
 }
 
-function buildAuditPrompt({ company, digest, stats }) {
+function buildAuditPrompt({ company, digest, stats, botPreference = 'both' }) {
+  const bots = botsFor(botPreference);
   const pillarLines = PILLARS.map((p) => `- "${p.id}" (${p.label}): ${p.lookFor}`).join('\n');
+  const botLines = bots.map((b) => `- "${b}": the ${BOT_LABEL[b]}, for ${BOT_NEEDS[b]}`).join('\n');
+  const perBot = (example) => `{${bots.map((b) => `"${b}": [${example}]`).join(', ')}}`;
   const systemPrompt = [
-    `You audit the knowledge base that will power two AI chat assistants for ${company.name} (${company.industryLabel}):`,
-    'a Support Bot for existing customers and a Sales Bot for prospects. Both may ONLY answer from this content, so',
-    'anything missing here forces them to hand off or, worse, guess. Judge how ready the content is.',
+    `You audit the knowledge base that will train ${bots.length > 1 ? 'two AI chat assistants' : 'one AI chat assistant'} for ${company.name} (${company.industryLabel}):`,
+    botLines,
+    `${bots.length > 1 ? 'Each' : 'It'} may ONLY answer from this content, so anything missing forces it to hand off or, worse, guess.`,
     '',
-    'Score each pillar 0-100 for how completely a bot could answer typical customer questions in that area',
+    'Score each pillar 0-100 for how completely an assistant could answer typical customer questions in that area',
     'WITHOUT guessing: 0 = absent, 25 = mentioned in passing, 50 = partial, 75 = solid with a few specifics missing,',
     '100 = thorough and specific. Pillars:',
     pillarLines,
     '',
-    'Then list:',
-    '- "criticalGaps": specific missing facts whose absence would make a bot guess or fail on common questions',
-    '  (e.g. "No prices for any plan", "No support hours or contact channel"). Most important first.',
-    '- "recommendations": concrete documents or pages to add (e.g. "Upload your price list PDF",',
+    `Then, separately for ${bots.length > 1 ? 'EACH assistant' : 'the assistant'}:`,
+    '- "criticalGaps": specific missing facts whose absence would make that assistant guess or fail on its',
+    '  common questions (e.g. "No prices for any plan", "No support hours or contact channel"). Most important first.',
+    '- "requirements": concrete documents or pages to add to fully train it (e.g. "Upload your price list PDF",',
     '  "Add your returns policy page"). Most valuable first.',
     '',
     'Rules:',
@@ -93,7 +119,7 @@ function buildAuditPrompt({ company, digest, stats }) {
     '',
     'Reply with ONLY this JSON object:',
     '{"pillars": {"identity": {"score": 0, "summary": "...", "gaps": ["..."]}, "features": {...}, "pricing": {...},',
-    ' "support": {...}, "sales": {...}}, "criticalGaps": ["..."], "recommendations": ["..."]}'
+    ` "support": {...}, "sales": {...}}, "criticalGaps": ${perBot('"..."')}, "requirements": ${perBot('"..."')}}`
   ].join('\n');
   const userPrompt = `Documents: ${stats.documents}, sections: ${stats.sections}, characters: ${stats.characters}` +
     `${stats.truncated ? ' (digest below is an excerpt)' : ''}\n<content>\n${digest}\n</content>`;
@@ -119,11 +145,16 @@ const clampScore = (n) => {
   const v = Math.round(Number(n));
   return Number.isFinite(v) ? Math.min(100, Math.max(0, v)) : null;
 };
+// Per-bot lists: { support: [...], sales: [...] }. A plain array (a model
+// ignoring the per-bot shape) applies to every bot rather than being lost.
+const perBotList = (value, max) => Object.fromEntries(['support', 'sales'].map((b) =>
+  [b, cleanList(Array.isArray(value) ? value : value?.[b], max)]));
 
 /**
  * Parses and validates the model's reply. Tolerates code fences and prose
  * around the JSON; every pillar must have a numeric score.
- * @returns {{ pillars: Record<string, { score: number, summary: string, gaps: string[] }>, criticalGaps: string[], recommendations: string[] }}
+ * @returns {{ pillars: Record<string, { score: number, summary: string, gaps: string[] }>,
+ *   criticalGaps: { support: string[], sales: string[] }, requirements: { support: string[], sales: string[] } }}
  * @throws {Error} when the reply isn't usable
  */
 function parseAuditResponse(text) {
@@ -146,8 +177,8 @@ function parseAuditResponse(text) {
   }
   return {
     pillars,
-    criticalGaps: cleanList(data?.criticalGaps, MAX_CRITICAL_GAPS),
-    recommendations: cleanList(data?.recommendations, MAX_RECOMMENDATIONS)
+    criticalGaps: perBotList(data?.criticalGaps, MAX_CRITICAL_GAPS),
+    requirements: perBotList(data?.requirements ?? data?.recommendations, MAX_RECOMMENDATIONS)
   };
 }
 
@@ -178,16 +209,55 @@ function heuristicPillars(documents) {
   return pillars;
 }
 
+// One bot's training readiness from the shared pillar scores.
+function botReadiness(bot, { pillarData, chunks, preference, model, hasDocs }) {
+  const weights = BOT_WEIGHTS[bot];
+  const usable = chunks.filter((c) => botCanUse(bot, c.scope, preference));
+  const characters = usable.reduce((n, c) => n + c.content.length, 0);
+  const pillars = PILLARS.filter((p) => weights[p.id] > 0)
+    .map((p) => ({ id: p.id, label: p.label, weight: weights[p.id], score: pillarData[p.id].score, summary: pillarData[p.id].summary }));
+  const weighted = Math.round(pillars.reduce((n, p) => n + p.score * p.weight, 0) / 100);
+  const cap = usable.length ? capFor(characters) : 0;
+  const score = Math.min(weighted, cap);
+
+  // Facts the model can't see: what this bot can actually read.
+  const structural = [];
+  if (hasDocs && !usable.length) {
+    structural.push(bot === 'support'
+      ? 'The Support Bot has no knowledge it can use: add manuals, FAQs or policies.'
+      : 'The Sales Bot has no knowledge it can use: add pricing, plans or product pages.');
+  } else if (usable.length && weighted > cap) {
+    structural.push(`Only ${characters.toLocaleString('en-US')} characters of content for the ${BOT_LABEL[bot]} — too little to answer reliably.`);
+  }
+  const ownGaps = model ? model.criticalGaps[bot] : pillars.filter((p) => p.score < 40).flatMap((p) => pillarData[p.id].gaps);
+  const requirements = model?.requirements[bot]?.length ? model.requirements[bot]
+    : pillars.filter((p) => p.score < 50).map((p) => `Add content covering ${p.label.toLowerCase()}.`);
+
+  return {
+    score,
+    level: levelFor(score),
+    sections: usable.length,
+    characters,
+    pillars,
+    criticalGaps: [...structural, ...ownGaps].slice(0, MAX_CRITICAL_GAPS),
+    requirements: requirements.slice(0, MAX_RECOMMENDATIONS)
+  };
+}
+
 /**
  * Audits a document set. Never throws on model trouble: falls back to the
  * keyword estimate and says so in `method` / `notice`.
  * @param {{ company: { name: string, industryLabel: string }, documents: Array<{ title: string, content: string, category?: string, botScope?: string }>,
- *           tenantId?: string }} params  tenantId: bill the LLM call to this tenant
+ *           tenantId?: string, botPreference?: 'support'|'sales'|'both' }} params
+ *   tenantId: bill the LLM call to this tenant; botPreference: which bots will
+ *   be deployed — only those are scored
  */
-async function auditKnowledge({ company, documents, tenantId = null }) {
+async function auditKnowledge({ company, documents, tenantId = null, botPreference = 'both' }) {
+  const preference = parseBotPreference(botPreference).ok ? parseBotPreference(botPreference).value : 'both';
+  const deployed = botsFor(preference);
   const docs = documents.filter((d) => String(d.title || '').trim() && String(d.content || '').trim());
   const chunks = docs.flatMap(documentChunks);
-  const distribution = scopeCounts(chunks);
+  const distribution = scopeCounts(chunks, preference);
   const characters = docs.reduce((n, d) => n + String(d.content).length, 0);
   const digest = buildDigest(docs, AUDIT_DIGEST_BUDGET);
   const stats = { documents: docs.length, sections: chunks.length, characters, truncated: digest.length < characters };
@@ -202,7 +272,7 @@ async function auditKnowledge({ company, documents, tenantId = null }) {
     notice = 'AI audit unavailable (no model configured) — showing a keyword-based estimate.';
   } else {
     try {
-      const answer = await llm.generateAnswer({ ...buildAuditPrompt({ company, digest, stats }), maxTokens: AUDIT_MAX_TOKENS });
+      const answer = await llm.generateAnswer({ ...buildAuditPrompt({ company, digest, stats, botPreference: preference }), maxTokens: AUDIT_MAX_TOKENS });
       if (tenantId) await logUsage({ ctx: { tenantId }, provider: answer.provider, model: answer.model, usage: answer.usage });
       model = parseAuditResponse(answer.text);
     } catch (err) {
@@ -213,35 +283,33 @@ async function auditKnowledge({ company, documents, tenantId = null }) {
   }
 
   const pillarData = model?.pillars || (docs.length ? heuristicPillars(docs) : Object.fromEntries(PILLAR_IDS.map((id) => [id, { score: 0, summary: 'No content yet.', gaps: [] }])));
-  const pillarScores = PILLARS.map((p) => ({ id: p.id, label: p.label, weight: p.weight, ...pillarData[p.id] }));
-  const weighted = Math.round(pillarScores.reduce((n, p) => n + p.score * p.weight, 0) / 100);
-  const cap = CONTENT_CAPS.find((c) => characters < c.under)?.cap ?? 100;
-  const readinessScore = Math.min(weighted, cap);
+  const bots = Object.fromEntries(deployed.map((bot) => [bot, botReadiness(bot, { pillarData, chunks, preference, model, hasDocs: docs.length > 0 })]));
+  const readinessScore = Math.min(...deployed.map((b) => bots[b].score));
 
-  // Facts the model can't see: how the content splits between the bots.
-  const structuralGaps = [];
-  if (!docs.length) structuralGaps.push('No knowledge added yet — scan your website or upload documents.');
-  else {
-    if (distribution.supportBot === 0) structuralGaps.push('The Support Bot has no knowledge it can use: add manuals, FAQs or policies.');
-    if (distribution.salesBot === 0) structuralGaps.push('The Sales Bot has no knowledge it can use: add pricing, plans or product pages.');
-    if (cap < 100 && weighted > cap) structuralGaps.push(`Only ${characters.toLocaleString('en-US')} characters of content — too little for two bots to answer reliably.`);
-  }
-  const criticalGaps = [...structuralGaps, ...(model?.criticalGaps || pillarScores.flatMap((p) => p.gaps))].slice(0, MAX_CRITICAL_GAPS);
-  const recommendations = model?.recommendations?.length ? model.recommendations
-    : pillarScores.filter((p) => p.score < 50).map((p) => `Add content covering ${p.label.toLowerCase()}.`);
+  // Combined lists (every deployed bot's, labelled when there are two) for
+  // views that show one list — the per-bot lists are the primary output.
+  const label = (bot, item) => (deployed.length > 1 ? `${BOT_LABEL[bot]}: ${item}` : item);
+  const combined = (key) => [...new Set(deployed.flatMap((b) => bots[b][key].map((item) => label(b, item))))];
+  const criticalGaps = docs.length ? combined('criticalGaps').slice(0, MAX_CRITICAL_GAPS * 2)
+    : ['No knowledge added yet — scan your website or upload documents.'];
 
   return {
     readinessScore,
     readinessLevel: levelFor(readinessScore),
-    pillarScores,
+    botPreference: preference,
+    bots,
+    // The shared pillar scores, each marked with whether a deployed bot is trained on it.
+    pillarScores: PILLARS.map((p) => ({
+      id: p.id, label: p.label, ...pillarData[p.id], inScope: deployed.some((b) => BOT_WEIGHTS[b][p.id] > 0)
+    })),
     criticalGaps,
-    recommendations,
+    recommendations: combined('requirements').slice(0, MAX_RECOMMENDATIONS * 2),
     distribution,
     stats,
     method,
     notice,
     thresholds: { ready: READY_AT, moderate: MODERATE_AT },
-    contentHash: contentHash(docs),
+    contentHash: contentHash(docs, preference),
     auditedAt: new Date().toISOString()
   };
 }
@@ -291,9 +359,11 @@ async function tenantDocumentsForAudit(tenantId) {
 
 /** Audits a tenant's saved documents and stores the report. */
 async function auditTenant(tenantId) {
-  const tenant = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { id: true, name: true, industryLabel: true } });
+  const tenant = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { id: true, name: true, industryLabel: true, botPreference: true } });
   if (!tenant) return null;
-  const report = await auditKnowledge({ company: tenant, documents: await tenantDocumentsForAudit(tenantId), tenantId });
+  const report = await auditKnowledge({
+    company: tenant, documents: await tenantDocumentsForAudit(tenantId), tenantId, botPreference: tenant.botPreference || 'both'
+  });
   await saveTenantReadiness(tenantId, report);
   return report;
 }
@@ -315,19 +385,20 @@ const isTenantAuditRunning = (tenantId) => running.has(tenantId);
  */
 async function tenantReadiness(tenantId) {
   const [tenant, documents] = await Promise.all([
-    prisma.tenant.findUnique({ where: { id: tenantId }, select: { readinessReport: true, readinessContentHash: true } }),
+    prisma.tenant.findUnique({ where: { id: tenantId }, select: { readinessReport: true, readinessContentHash: true, botPreference: true } }),
     tenantDocumentsForAudit(tenantId)
   ]);
   const report = tenant?.readinessReport || null;
   return {
     report,
-    stale: !!report && tenant.readinessContentHash !== contentHash(documents),
+    stale: !!report && tenant.readinessContentHash !== contentHash(documents, tenant.botPreference || 'both'),
     running: isTenantAuditRunning(tenantId)
   };
 }
 
 module.exports = {
   PILLARS,
+  BOT_WEIGHTS,
   LEVELS,
   READY_AT,
   MODERATE_AT,

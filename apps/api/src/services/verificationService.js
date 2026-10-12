@@ -23,6 +23,9 @@ const CODE_TTL_MS = 10 * 60 * 1000;
 const VERIFIED_TTL_MS = 2 * 60 * 60 * 1000; // matches the signup token's TTL
 const RESEND_COOLDOWN_MS = 60 * 1000;
 const MAX_ATTEMPTS = 5;
+// One account per email address: refused at send-otp (before a code goes out)
+// and again at /register/complete, backed by the unique index on TenantUser.email.
+const ACCOUNT_EXISTS = 'An account with this email address already exists. Please sign in instead.';
 
 class VerificationError extends Error {
   constructor(statusCode, message, extra = {}) {
@@ -79,7 +82,7 @@ async function sendSignupOtp(rawEmail) {
   const email = normalizeEmail(rawEmail);
   if (!isValidEmail(email)) throw new VerificationError(400, 'Enter a valid email address.');
   if (await prisma.tenantUser.findUnique({ where: { email }, select: { id: true } })) {
-    throw new VerificationError(409, 'An account with this email already exists — sign in instead.');
+    throw new VerificationError(409, ACCOUNT_EXISTS);
   }
 
   const existing = await prisma.emailVerification.findUnique({ where: { email }, select: { lastSentAt: true } });
@@ -174,6 +177,7 @@ module.exports = {
   claimVerification,
   otpEmail,
   VerificationError,
+  ACCOUNT_EXISTS,
   CODE_TTL_MS,
   RESEND_COOLDOWN_MS,
   MAX_ATTEMPTS

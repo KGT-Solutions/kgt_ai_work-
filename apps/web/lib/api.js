@@ -92,15 +92,21 @@ export const api = {
   // ── Client company
   clientLogin: (email, password) => request('/api/v1/client/login', { method: 'POST', body: { email, password } }),
   clientMe: () => request('/api/v1/client/me', { auth: 'client' }),
-  // Forgot password: email → 6-digit code → reset token → new password
-  requestResetCode: (email) => request('/api/v1/client/password/forgot', { method: 'POST', body: { email } }),
-  verifyResetCode: (email, code) => request('/api/v1/client/password/verify', { method: 'POST', body: { email, code } }),
-  resetPassword: (resetToken, password) => request('/api/v1/client/password/reset', { method: 'POST', body: { resetToken, password } }),
+  // Forgot password: a 6-digit code to the account's email (404 EMAIL_NOT_FOUND
+  // when there's no account), then the code + new password in one call.
+  requestPasswordReset: (email) => request('/api/v1/public/auth/forgot-password', { method: 'POST', body: { email } }),
+  resetPassword: (email, otp, newPassword) => request('/api/v1/public/auth/reset-password', { method: 'POST', body: { email, otp, newPassword } }),
 
   // ── Public signup wizard (pages/register.js) — no auth
   // authorized: the visitor ticked the crawl-authorization box — the API refuses to crawl without it.
   analyzeCompanyUrl: (url, { authorized } = {}) =>
     request('/api/v1/public/register/analyze', { method: 'POST', body: { url, authorized: authorized === true } }),
+  // Any supported file: PDF, Word (.docx), .txt, .md or a .zip of them -> { pages, files }
+  analyzeCompanyFile: (file) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return requestMultipart('/api/v1/public/register/analyze-file', formData);
+  },
   analyzeCompanyPdf: (file) => {
     const formData = new FormData();
     formData.append('file', file);
@@ -133,6 +139,14 @@ function workspace(base, auth) {
       formData.append('file', file);
       return requestMultipart(`${base}/documents/pdf`, formData, auth);
     },
+    // Any supported file (PDF, .docx, .txt, .md, .zip): { documentsCreated, files }
+    uploadFile: (file, { category, botScope } = {}) => {
+      const formData = new FormData();
+      if (category) formData.append('category', category);
+      if (botScope) formData.append('botScope', botScope);
+      formData.append('file', file);
+      return requestMultipart(`${base}/documents/file`, formData, auth);
+    },
     importWebsite: (url, { authorized } = {}) => r('/scrape', { method: 'POST', body: { url, authorized: authorized === true } }),
     listApiKeys: () => r('/api-keys'),
     createApiKey: (label) => r('/api-keys', { method: 'POST', body: { label } }),
@@ -152,7 +166,9 @@ function workspace(base, auth) {
     runReadinessAudit: () => r('/preflight-audit', { method: 'POST' }),
     getReadiness: () => r('/readiness'),
     // How the documents split between the bots: { totals, documents: [{ id, title, botScope, sections, counts }] }
-    getKnowledgeDistribution: () => r('/knowledge/distribution')
+    getKnowledgeDistribution: () => r('/knowledge/distribution'),
+    // Which bots the company deploys: 'support' | 'sales' | 'both'
+    setBotPreference: (botPreference) => r('/bot-preference', { method: 'PATCH', body: { botPreference } })
   };
 }
 

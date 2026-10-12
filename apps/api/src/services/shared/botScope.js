@@ -93,19 +93,45 @@ function parseBotScope(value, fallback = DEFAULT_DOC_SCOPE) {
   return DOC_SCOPES.includes(upper) ? { ok: true, value: upper } : { ok: false, error: `botScope must be one of ${DOC_SCOPES.join(', ')}` };
 }
 
-/** Whether a bot may use a chunk of this scope. */
-const botCanUse = (botType, scope) => (BOT_SCOPES[botType] || []).includes(scope || SCOPES.BOTH);
+/**
+ * Whether a bot may use a chunk of this scope. The split only applies when
+ * the company deploys both bots (Tenant.botPreference "both"): it keeps two
+ * bots distinct. A company running a single bot has nothing to separate it
+ * from, so that bot uses every section — a Support-only company still wants
+ * its bot to know the price list.
+ * @param {string} [botPreference] the tenant's: 'support' | 'sales' | 'both' (default)
+ */
+const botCanUse = (botType, scope, botPreference = 'both') =>
+  (botPreference !== 'both' && botPreference === botType) || (BOT_SCOPES[botType] || []).includes(scope || SCOPES.BOTH);
+
+// ── Which bots a company deploys (Tenant.botPreference).
+const BOT_PREFERENCES = Object.freeze(['support', 'sales', 'both']);
+const DEFAULT_BOT_PREFERENCE = 'both';
+
+/** @returns {{ ok: true, value: string } | { ok: false, error: string }} */
+function parseBotPreference(value, fallback = DEFAULT_BOT_PREFERENCE) {
+  if (value === undefined || value === null || value === '') return { ok: true, value: fallback };
+  const lower = String(value).trim().toLowerCase();
+  return BOT_PREFERENCES.includes(lower) ? { ok: true, value: lower } : { ok: false, error: `botPreference must be one of ${BOT_PREFERENCES.join(', ')}` };
+}
+
+/** The bots a preference deploys, e.g. 'both' -> ['support', 'sales']. */
+const botsFor = (botPreference) => (botPreference === 'support' || botPreference === 'sales' ? [botPreference] : ['support', 'sales']);
 
 /**
- * How a set of chunks splits between the bots.
+ * How a set of chunks splits between the bots: supportBot / salesBot are the
+ * sections each bot can use, given which bots are deployed.
  * @param {Array<{ scope?: string }>} chunks
+ * @param {string} [botPreference]
  */
-function scopeCounts(chunks) {
+function scopeCounts(chunks, botPreference = DEFAULT_BOT_PREFERENCE) {
   const counts = { support: 0, sales: 0, both: 0 };
   for (const c of chunks) counts[c.scope in counts ? c.scope : 'both'] += 1;
-  return { ...counts, supportBot: counts.support + counts.both, salesBot: counts.sales + counts.both, total: chunks.length };
+  const usable = (bot) => chunks.filter((c) => botCanUse(bot, c.scope, botPreference)).length;
+  return { ...counts, supportBot: usable('support'), salesBot: usable('sales'), total: chunks.length, deployed: botsFor(botPreference) };
 }
 
 module.exports = {
-  SCOPES, DOC_SCOPES, DEFAULT_DOC_SCOPE, BOT_SCOPES, classifyChunk, scoreSection, parseBotScope, botCanUse, scopeCounts
+  SCOPES, DOC_SCOPES, DEFAULT_DOC_SCOPE, BOT_SCOPES, BOT_PREFERENCES, DEFAULT_BOT_PREFERENCE,
+  classifyChunk, scoreSection, parseBotScope, parseBotPreference, botsFor, botCanUse, scopeCounts
 };

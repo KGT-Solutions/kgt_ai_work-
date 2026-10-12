@@ -13,7 +13,7 @@ import { api } from '../../lib/api';
 
 const EMPTY = ['', '', '', '', '', ''];
 
-export default function EmailVerificationStep({ email, verified, onVerified, onChangeEmail, onNext }) {
+export default function EmailVerificationStep({ email, verified, onVerified, onChangeEmail, onNext, nextLabel = 'Continue', doneHint = 'You can continue setting up your bots.' }) {
   const [code, setCode] = useState(EMPTY);
   const [phase, setPhase] = useState(verified ? 'done' : 'idle'); // idle | sending | sent | verifying | done
   const [error, setError] = useState('');
@@ -100,7 +100,7 @@ export default function EmailVerificationStep({ email, verified, onVerified, onC
               <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-emerald-400/15 text-emerald-300"><IconCheck className="h-3.5 w-3.5" /></span>
               <div>
                 <p className="text-sm font-medium text-emerald-100">Email verified</p>
-                <p className="mt-0.5 text-[13px] text-emerald-200/80">Next, add the knowledge your bots will learn from.</p>
+                <p className="mt-0.5 text-[13px] text-emerald-200/80">{doneHint}</p>
               </div>
             </div>
           ) : (
@@ -133,7 +133,7 @@ export default function EmailVerificationStep({ email, verified, onVerified, onC
         </div>
         <div className={cx('flex flex-col-reverse gap-3 border-t border-white/[0.06] px-6 py-4 sm:flex-row sm:justify-between')}>
           <Button onClick={onChangeEmail}><IconArrowLeft className="h-4 w-4" />Back</Button>
-          <Button variant="primary" onClick={onNext} disabled={!done}>Add knowledge <IconArrowRight className="h-4 w-4" /></Button>
+          <Button variant="primary" onClick={onNext} disabled={!done}>{nextLabel} <IconArrowRight className="h-4 w-4" /></Button>
         </div>
       </Card>
     </div>

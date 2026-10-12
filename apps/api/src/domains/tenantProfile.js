@@ -75,8 +75,9 @@ function documentChunks(doc) {
   }));
 }
 
-// Each bot keeps only the knowledge scoped to it (plus "both").
-const scopedTo = (botType) => (chunks) => chunks.filter((chunk) => botCanUse(botType, chunk.scope));
+// Each bot keeps only the knowledge scoped to it (plus "both") — unless the
+// company deploys just this one bot, which then uses all of it.
+const scopedTo = (botType, tenant) => (chunks) => chunks.filter((chunk) => botCanUse(botType, chunk.scope, tenant.botPreference || 'both'));
 
 // ---------------------------------------------------------------------
 // Category-aware retrieval weighting. Multipliers on the lexical score,
@@ -323,7 +324,7 @@ function createTenantSupportProfile(tenant) {
     topK: 3,
     minScore: 0, // the real gate is minConfidence below; don't double-filter
     minConfidence: tenant.minConfidence,
-    filterChunks: scopedTo('support'), // manuals, FAQs, policies + company basics (services/shared/botScope.js)
+    filterChunks: scopedTo('support', tenant), // manuals, FAQs, policies + company basics (services/shared/botScope.js)
     chunkWeight: makeChunkWeight(SUPPORT_CATEGORY_WEIGHTS),
     relativeMinScore: RELATIVE_MIN_SCORE,
     ticketing: true,
@@ -434,7 +435,7 @@ function createTenantSalesProfile(tenant) {
     // "no answer" below the tenant's threshold goes to a person, above it
     // the bot asks for more detail (formatNoAnswer).
     handoffBelow: tenant.minConfidence,
-    filterChunks: scopedTo('sales'), // pricing, plans, pitch material + company basics
+    filterChunks: scopedTo('sales', tenant), // pricing, plans, pitch material + company basics
     chunkWeight: makeChunkWeight(SALES_CATEGORY_WEIGHTS),
     relativeMinScore: RELATIVE_MIN_SCORE,
     ticketing: true, // an unanswerable sales question is still worth a human follow-up

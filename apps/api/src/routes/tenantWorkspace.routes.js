@@ -12,7 +12,9 @@ const { handleChat } = require('../services/tenantChat');
 const { scheduleFaqGeneration, isFaqGenerationRunning } = require('../services/tenantFaqs');
 const { usageBreakdowns } = require('../services/usageStats');
 const { wrapRouterAsync } = require('../utils/wrapAsync');
-const { parseBotScope, scopeCounts } = require('../services/shared/botScope');
+const { parseBotScope, parseBotPreference, scopeCounts } = require('../services/shared/botScope');
+const { answerCache } = require('../engine/answerCache');
+const { ingestUpload, FileIngestError, MAX_UPLOAD_BYTES } = require('../services/shared/fileIngest');
 const { documentChunks } = require('../domains/tenantProfile');
 const { auditTenant, tenantReadiness } = require('../services/botAuditor');
 
@@ -105,6 +107,49 @@ router.post('/documents', async (req, res) => {
   });
   invalidateTenantKnowledge(req.tenant.id); // next chat request re-reads from the DB
   res.status(201).json(doc);
+});
+
+// ── Any supported file (PDF, .docx, .txt, .md, or a .zip of them), parsed
+// by services/shared/fileIngest.js. multipart: file, optional category and
+// botScope applied to every document created. Returns files[] so the client
+// can show which files in a zip were skipped and why.
+const fileUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_UPLOAD_BYTES, files: 1, fields: 3 } });
+
+router.post('/documents/file', (req, res, next) => fileUpload.single('file')(req, res, (err) => {
+  if (!err) return next();
+  if (err instanceof multer.MulterError) {
+    return res.status(err.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({
+      error: err.code === 'LIMIT_FILE_SIZE' ? `Uploads are limited to ${MAX_UPLOAD_BYTES / (1024 * 1024)}MB` : 'Upload exactly one file in a field named "file"'
+    });
+  }
+  next(err);
+}), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'Attach a file in a field named "file"' });
+  const chosen = req.body?.category ? parseCategory(req.body.category) : null;
+  if (chosen && !chosen.ok) return res.status(400).json({ error: chosen.error });
+  const botScope = parseBotScope(req.body?.botScope);
+  if (!botScope.ok) return res.status(400).json({ error: botScope.error });
+
+  let parsed;
+  try {
+    parsed = await ingestUpload(req.file.buffer, req.file.originalname);
+  } catch (e) {
+    if (e instanceof FileIngestError || e instanceof PdfIngestError) return res.status(e.statusCode).json({ error: e.message });
+    throw e;
+  }
+  if (!(await roomForDocuments(req.tenant.id, parsed.pages.length))) return res.status(409).json(TOO_MANY_DOCS);
+
+  const docs = parsed.pages.map((p) => ({
+    tenantId: req.tenant.id,
+    title: p.title.slice(0, MAX_TITLE_LEN),
+    content: p.markdown,
+    category: chosen ? chosen.value : suggestCategory({ title: p.title, markdown: p.markdown, source: 'pdf' }),
+    botScope: botScope.value
+  }));
+  await prisma.tenantDocument.createMany({ data: docs });
+  invalidateTenantKnowledge(req.tenant.id);
+  scheduleFaqGeneration(req.tenant.id);
+  res.status(201).json({ fileName: req.file.originalname, documentsCreated: docs.length, files: parsed.files });
 });
 
 // multipart: file (the PDF), optional category. With a category, every
@@ -313,15 +358,30 @@ router.get('/knowledge/distribution', async (req, res) => {
     orderBy: { createdAt: 'desc' },
     select: { id: true, title: true, content: true, category: true, botScope: true }
   });
+  const botPreference = req.tenant.botPreference || 'both';
   const perDoc = docs.map((doc) => {
     const chunks = documentChunks(doc);
     return {
       id: doc.id, title: doc.title, category: doc.category, botScope: doc.botScope,
       sections: chunks.map((c) => ({ title: c.title, scope: c.scope })),
-      counts: scopeCounts(chunks)
+      counts: scopeCounts(chunks, botPreference)
     };
   });
-  res.json({ totals: scopeCounts(perDoc.flatMap((d) => d.sections)), documents: perDoc });
+  res.json({ botPreference, totals: scopeCounts(perDoc.flatMap((d) => d.sections), botPreference), documents: perDoc });
+});
+
+// Which bots this company deploys: { botPreference: 'support' | 'sales' | 'both' }.
+// Changes what each bot may answer from (one bot alone uses all the
+// knowledge) and what the readiness audit judges, so cached answers are
+// dropped and the saved report shows as stale until re-run.
+router.patch('/bot-preference', async (req, res) => {
+  const botPreference = parseBotPreference(req.body?.botPreference, null);
+  if (!botPreference.ok || !botPreference.value) return res.status(400).json({ error: botPreference.error || 'botPreference is required' });
+  const updated = await prisma.tenant.update({
+    where: { id: req.tenant.id }, data: { botPreference: botPreference.value }, select: { botPreference: true }
+  });
+  answerCache.invalidateTenant(req.tenant.id);
+  res.json(updated);
 });
 
 // ── API keys. Plaintext is returned only by the POST that issues a key;
