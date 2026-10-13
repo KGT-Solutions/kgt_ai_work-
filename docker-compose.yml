@@ -10,10 +10,10 @@ services:
   postgres:
     image: postgres:16-alpine
     container_name: kgt-ai-hub-postgres
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-kgthub}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kgthub}
-      POSTGRES_DB: ${POSTGRES_DB:-kgthub}
+    # Same file as the API so credentials stay in sync even when compose is
+    # started without `--env-file` (interpolation would otherwise force the
+    # default kgthub/kgthub password and break an existing volume).
+    env_file: ${HUB_ENV_FILE:-.env.docker}
     ports:
       - "${POSTGRES_PORT:-5440}:5432"
     volumes:
@@ -38,15 +38,13 @@ services:
     ports:
       - "${API_PORT:-4100}:4000"
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-kgthub}:${POSTGRES_PASSWORD:-kgthub}@postgres:5432/${POSTGRES_DB:-kgthub}?schema=public
       PGHOST: postgres
-      POSTGRES_USER: ${POSTGRES_USER:-kgthub}
-      POSTGRES_DB: ${POSTGRES_DB:-kgthub}
       PORT: 4000
-      # Secrets (JWT_SECRET, HUB_ADMIN_*, LLM keys) come ONLY from env_file.
-      # Listing them here as ${VAR:-} would override env_file with whatever
-      # the shell had at `compose up` time — an empty value whenever compose
-      # runs without --env-file.
+      # DATABASE_URL is built in docker-entrypoint.sh from POSTGRES_* in
+      # env_file. Do not interpolate it here: ${POSTGRES_PASSWORD:-kgthub}
+      # overrides .env.docker whenever compose is run without --env-file.
+      # Secrets (JWT_SECRET, HUB_ADMIN_*, LLM keys) come ONLY from env_file
+      # for the same reason.
     depends_on:
       postgres:
         condition: service_healthy
