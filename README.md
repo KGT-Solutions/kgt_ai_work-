@@ -13,6 +13,21 @@ Both bots share one knowledge base per tenant, split into three categories —
 **Company overview**, **FAQs**, and **Policies / pricing / manuals** — which
 each bot weights differently.
 
+## Documentation
+
+| Document | Covers |
+|---|---|
+| [docs/PROCESS_FLOW.md](docs/PROCESS_FLOW.md) | **the end-to-end process flow** — signup, ingestion, readiness, deployment, a chat turn, handoffs, operations |
+| [docs/SPECIFICATIONS.md](docs/SPECIFICATIONS.md) | **product specifications and features** — capabilities, limits and thresholds, with screenshots of the live platform |
+| [docs/pdf/](docs/pdf/) | both documents as branded PDFs for sharing outside the repo |
+| [docs/DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md) | local setup, repository map, conventions, how to make common changes |
+| [docs/INTEGRATION_GUIDE.md](docs/INTEGRATION_GUIDE.md) | embedding the widget and calling the chat API |
+| [docs/OPERATIONS_RUNBOOK.md](docs/OPERATIONS_RUNBOOK.md) | routine checks, incident procedures, backup/restore |
+| [DOCUMENTATION.md](DOCUMENTATION.md) | reference: architecture, schema, security, env vars, API tables |
+| [TESTING.md](TESTING.md) | the four test layers and the release gate |
+
+Start with [docs/](docs/) if you are new to the project.
+
 ## Repository layout
 
 ```

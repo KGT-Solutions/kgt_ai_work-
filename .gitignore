@@ -100,3 +100,19 @@ backup_*.sql
 # End-to-end test output (e2e/)
 e2e/playwright-report/
 e2e/test-results/
+
+# ── Documentation PDFs ──────────────────────────────────────────────
+# The build pipeline is source and must be tracked: the generic `build/`
+# rule above matches any directory named build, which would otherwise
+# swallow docs/pdf/build/ whole. Un-exclude the directory, then ignore
+# only the artifacts regenerated inside it.
+!docs/pdf/build/
+docs/pdf/build/assets/*.woff2
+docs/pdf/build/assets/mermaid.min.js
+docs/pdf/build/assets/geist.css
+docs/pdf/build/assets/fonts.css
+docs/pdf/build/*.html
+docs/pdf/build/*-bleed.pdf
+docs/pdf/build/*-body.pdf
+docs/pdf/build/__pycache__/
+.DS_Store

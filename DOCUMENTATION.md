@@ -7,6 +7,7 @@
 | Repository | `kgt_ai_work` (monorepo: `apps/api`, `apps/web`) |
 | Audience | Business stakeholders (§1), developers (§2–§4), system administrators (§5–§7) |
 | Applies to | Schema at migration `20261010090000_bot_preference` |
+| Companion docs | [Process flow](docs/PROCESS_FLOW.md) · [Developer guide](docs/DEVELOPER_GUIDE.md) · [Integration guide](docs/INTEGRATION_GUIDE.md) · [Operations runbook](docs/OPERATIONS_RUNBOOK.md) · [Testing](TESTING.md) |
 
 ---
 
@@ -21,6 +22,10 @@
 7. [Known limitations](#7-known-limitations)
 8. [Appendix A — HTTP API reference](#appendix-a--http-api-reference)
 9. [Appendix B — Troubleshooting](#appendix-b--troubleshooting)
+
+> This document is the **reference** view. For the step-by-step process view —
+> what happens in what order, and which file owns each decision — see
+> [docs/PROCESS_FLOW.md](docs/PROCESS_FLOW.md).
 
 ---
 
