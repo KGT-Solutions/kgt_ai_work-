@@ -23,6 +23,7 @@ const {
   captureLead, summarizeLead, confirmationEmail, buildSummaryPrompt, cleanSummary, confirmationCooldownMs
 } = require('../../src/services/leads');
 const { runTenantChat } = require('../../src/services/tenantChat');
+const { resetAlertThrottle } = require('../../src/services/teamAlerts');
 
 const TENANT = {
   id: 'tenant-l', slug: 'acme', name: 'Acme <Labs>', industryLabel: 'Property management', persona: null,
@@ -30,7 +31,21 @@ const TENANT = {
 };
 
 let leads, messages, sessions, tickets;
-const waitForBackground = () => new Promise((resolve) => setTimeout(resolve, 20));
+// The confirmation (with its retries), the team alert and the summary run in
+// the background. A fixed wait was flaky when the whole suite runs in
+// parallel (a loaded machine can take longer than 20ms for the retry chain),
+// so wait until the mails sent and the leads' state stop changing: 5 quiet
+// polls in a row, up to 3s.
+async function waitForBackground() {
+  let last = null;
+  let quiet = 0;
+  for (let i = 0; i < 300 && quiet < 5; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const state = `${sendMailMock.mock.callCount()}|${JSON.stringify(leads.map((l) => [l.summaryStatus, !!l.confirmationSentAt, l.chatSummary]))}`;
+    quiet = state === last ? quiet + 1 : 0;
+    last = state;
+  }
+}
 
 beforeEach(() => {
   leads = []; messages = []; sessions = []; tickets = [];
@@ -60,6 +75,14 @@ beforeEach(() => {
 
   prisma.chatSession.findFirst = async ({ where }) => sessions.find((s) => s.id === where.id && s.tenantId === where.tenantId) || null;
   prisma.chatSession.create = async ({ data }) => { const s = { id: `s${sessions.length + 1}`, ...data }; sessions.push(s); return s; };
+  prisma.chatSession.update = async ({ where, data }) => Object.assign(sessions.find((s) => s.id === where.id) || {}, data);
+  prisma.chatSession.updateMany = async ({ where, data }) => {
+    const hit = sessions.filter((s) => s.id === where.id && s.tenantId === where.tenantId);
+    for (const s of hit) Object.assign(s, data);
+    return { count: hit.length };
+  };
+  prisma.tenantUser.findMany = async () => []; // no dashboard users: team alerts need a teamEmail
+  resetAlertThrottle();
   prisma.chatMessage.findMany = async ({ where, take }) => {
     const rows = messages.filter((m) => m.sessionId === where.sessionId && (!where.role || m.role === where.role) &&
       (where.answered === undefined || !!m.answered === where.answered));
@@ -122,7 +145,7 @@ describe('recap of the bot\'s answers', () => {
     assert.match(mail.text, /request has been registered/);
   });
 
-  test('only the visitor is emailed — never internal staff, even if CHAT_ALERT_EMAIL is still set', async () => {
+  test('the legacy CHAT_ALERT_EMAIL is ignored: with no team address on file, only the visitor is emailed', async () => {
     process.env.CHAT_ALERT_EMAIL = 'aditya@kgt.test,sales@kgt.test';
     try {
       chat();
@@ -134,6 +157,32 @@ describe('recap of the bot\'s answers', () => {
     } finally {
       process.env.CHAT_ALERT_EMAIL = '';
     }
+  });
+
+  test("the tenant's team gets a lead alert that replies straight to the visitor; only for a new lead", async () => {
+    chat();
+    const tenant = { ...TENANT, teamEmail: 'team@acme.test' };
+    await captureLead({ tenant, botType: 'sales', sessionId: 's1', email: 'ana@x.com' });
+    await waitForBackground();
+    const alert = sendMailMock.mock.calls.map((c) => c.arguments[0]).find((m) => m.label?.startsWith('lead alert'));
+    assert.ok(alert, 'a lead alert was sent');
+    assert.deepEqual(alert.to, ['team@acme.test']);
+    assert.equal(alert.replyTo, 'ana@x.com');
+    assert.match(alert.subject, /New sales lead: ana@x\.com/);
+    assert.match(alert.html, /Acme &lt;Labs&gt;/); // tenant name escaped
+
+    sendMailMock.mock.resetCalls();
+    await captureLead({ tenant, botType: 'sales', sessionId: 's1', email: 'ana@x.com' });
+    await waitForBackground();
+    assert.equal(sendMailMock.mock.calls.filter((c) => c.arguments[0].label?.startsWith('lead alert')).length, 0);
+  });
+
+  test('alertTeam: false (the dashboard sandbox) sends no team alert', async () => {
+    chat();
+    await captureLead({ tenant: { ...TENANT, teamEmail: 'team@acme.test' }, botType: 'sales', sessionId: 's1', email: 'ana@x.com', alertTeam: false });
+    await waitForBackground();
+    assert.equal(sendMailMock.mock.callCount(), 1);
+    assert.equal(sendMailMock.mock.calls[0].arguments[0].to, 'ana@x.com');
   });
 });
 
@@ -308,6 +357,15 @@ describe('summarizeLead', () => {
     assert.match(generateAnswerMock.mock.calls[0].arguments[0].userPrompt, /Visitor: How much for 40 seats\?/);
   });
 
+  test("the summary is copied onto the lead's conversation for the Sessions view", async () => {
+    sessions.push({ id: 's1', tenantId: TENANT.id, summary: null, summaryStatus: 'none' });
+    const lead = await prisma.lead.create({ data: { tenantId: TENANT.id, botType: 'sales', sessionId: 's1', email: 'ana@x.com' } });
+    await summarizeLead(lead.id);
+    assert.equal(sessions[0].summary, leads[0].chatSummary);
+    assert.equal(sessions[0].summaryStatus, 'ready');
+    assert.ok(sessions[0].summarizedAt instanceof Date);
+  });
+
   test('an LLM failure marks the summary failed but keeps the transcript', async () => {
     generateAnswerMock.mock.mockImplementationOnce(async () => { throw new Error('upstream down'); });
     const lead = await prisma.lead.create({ data: { tenantId: TENANT.id, botType: 'support', sessionId: 's1', email: 'ana@x.com' } });
@@ -351,6 +409,28 @@ describe('through runTenantChat', () => {
     assert.equal(sendMailMock.mock.callCount(), 1);
     // The summary ran after this turn was stored, so it includes the email message.
     assert.equal(leads[0].fullTranscript.at(-2).content, 'sure, ana@x.com');
+  });
+
+  test('a handoff from a website visitor alerts the team once per conversation; the bookkeeping is updated', async () => {
+    const tenant = { ...TENANT, teamEmail: 'team@acme.test' };
+    await runTenantChat({ tenant, body: { query: 'Can I talk to a real person?', botType: 'support' } });
+    await waitForBackground();
+    const alerts = () => sendMailMock.mock.calls.map((c) => c.arguments[0]).filter((m) => m.label?.startsWith('handoff alert'));
+    assert.equal(alerts().length, 1);
+    assert.deepEqual(alerts()[0].to, ['team@acme.test']);
+    assert.match(alerts()[0].text, /Question: Can I talk to a real person\?/);
+    assert.equal(sessions[0].botType, 'support');
+    assert.ok(sessions[0].lastMessageAt instanceof Date);
+
+    await runTenantChat({ tenant, body: { query: 'I want to speak to a human', botType: 'support', sessionId: sessions[0].id } });
+    await waitForBackground();
+    assert.equal(alerts().length, 1, 'throttled within the same conversation');
+  });
+
+  test("the dashboard's own test chat never alerts the team", async () => {
+    await runTenantChat({ tenant: { ...TENANT, teamEmail: 'team@acme.test' }, body: { query: 'Can I talk to a real person?' }, sandbox: true });
+    await waitForBackground();
+    assert.equal(sendMailMock.mock.callCount(), 0);
   });
 
   test('an ordinary question creates no lead', async () => {

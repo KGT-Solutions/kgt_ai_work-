@@ -160,6 +160,18 @@ function workspace(base, auth) {
     // botType: 'all' | 'sales' | 'support'; status: 'all' | 'NEW' | 'CONTACTED' — filtered by the API.
     listLeads: ({ botType = 'all', status = 'all' } = {}) => r(`/leads?botType=${enc(botType)}&status=${enc(status)}`),
     updateLeadStatus: (id, status) => r(`/leads/${enc(id)}`, { method: 'PATCH', body: { status } }),
+    // Every conversation with its AI summary and leads: { sessions, nextCursor }, 30 per page.
+    listSessions: ({ botType = 'all', cursor } = {}) =>
+      r(`/sessions?botType=${enc(botType)}${cursor ? `&cursor=${enc(cursor)}` : ''}`),
+    // One conversation: its summary, leads and every message, oldest first.
+    getSession: (id) => r(`/sessions/${enc(id)}`),
+    summarizeSession: (id) => r(`/sessions/${enc(id)}/summarize`, { method: 'POST' }),
+    // Conversations where a bot missed (under 25% confidence, or no knowledge-base answer), each with its question:
+    // { below, totalSessions, totalWeakAnswers, sessions, nextPage }
+    listImprovements: ({ botType = 'all', page = 0 } = {}) => r(`/improvements?botType=${enc(botType)}&page=${page}`),
+    // Who gets lead and needs-attention alerts: { teamEmail, recipients, lowConfidenceBelow }
+    getNotifications: () => r('/notifications'),
+    updateNotifications: (teamEmail) => r('/notifications', { method: 'PATCH', body: { teamEmail } }),
     getUsage: () => r('/usage'),
     getDailyUsage: (days = 30) => r(`/usage/daily?days=${days}`),
     // Readiness audit: run now (saved), or read the saved one: { report, stale, running }

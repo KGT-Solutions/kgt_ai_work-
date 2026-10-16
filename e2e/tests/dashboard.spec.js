@@ -76,7 +76,11 @@ test('admin configures bots, tests them side by side and captures a lead', async
     }).toPass({ timeout: 30_000 });
     await row.getByRole('button', { name: /Details/ }).click();
     await expect(row.getByText('AI summary')).toBeVisible();
-    await expect(row.getByText(/Recommended next step: Schedule a demo call/)).toBeVisible();
+    await expect(row.getByText(/Schedule a demo call this week/)).toBeVisible();
+    // Summary first: the raw chat stays folded until asked for.
+    await expect(row.getByText('Can I book a demo?')).toHaveCount(0);
+    await row.getByRole('button', { name: /View full transcript/ }).click();
+    await expect(row.getByText('Can I book a demo?')).toBeVisible();
     await row.getByRole('button', { name: 'Mark contacted' }).click();
     await expect(row.getByRole('button', { name: 'Mark as new' })).toBeVisible();
   });

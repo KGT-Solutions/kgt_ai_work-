@@ -18,7 +18,10 @@ async function waitForEmail(to, { subject, since = 0, timeoutMs = 20_000 } = {})
     const hit = (await search(to)).find((m) => (!subject || subject.test(m.Subject)) && new Date(m.Created).getTime() >= since);
     if (hit) {
       const full = await (await fetch(`${MAILPIT}/api/v1/message/${hit.ID}`)).json();
-      return { subject: full.Subject, text: full.Text || '', html: full.HTML || '' };
+      return {
+        subject: full.Subject, text: full.Text || '', html: full.HTML || '',
+        replyTo: (full.ReplyTo || []).map((a) => a.Address)
+      };
     }
     await new Promise((r) => setTimeout(r, 400));
   }
@@ -33,4 +36,9 @@ async function waitForCode(to, opts) {
   return code;
 }
 
-module.exports = { waitForEmail, waitForCode };
+/** How many emails to `to` have a subject matching `subject` (for "sent exactly once" checks). */
+async function countEmails(to, subject) {
+  return (await search(to)).filter((m) => subject.test(m.Subject)).length;
+}
+
+module.exports = { waitForEmail, waitForCode, countEmails };

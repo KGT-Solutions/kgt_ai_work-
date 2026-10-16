@@ -20,8 +20,14 @@ describe('tenant isolation (real PostgreSQL)', { skip: skipReason }, () => {
     tokenA = await signIn(server.base, a);
     tokenB = await signIn(server.base, b);
     docB = await prisma.tenantDocument.findFirst({ where: { tenantId: b.tenant.id } });
-    sessionB = await prisma.chatSession.create({ data: { tenantId: b.tenant.id } });
+    sessionB = await prisma.chatSession.create({
+      data: { tenantId: b.tenant.id, botType: 'sales', messageCount: 2, lastMessageAt: new Date(), summary: 'Intent: Bravo secret plans' }
+    });
     await prisma.chatMessage.create({ data: { sessionId: sessionB.id, role: 'user', content: 'Bravo private question', botType: 'sales' } });
+    // A weak answer, so Bravo's session is an Improvements item (for Bravo only).
+    await prisma.chatMessage.create({
+      data: { sessionId: sessionB.id, role: 'assistant', content: 'Bravo weak answer', botType: 'sales', confidence: 0.1 }
+    });
     leadB = await prisma.lead.create({ data: { tenantId: b.tenant.id, botType: 'sales', email: 'prospect@bravo.test', sessionId: sessionB.id } });
     await prisma.supportTicket.create({ data: { tenantId: b.tenant.id, query: 'Bravo ticket', transcript: [], botType: 'support' } });
   });
@@ -34,6 +40,7 @@ describe('tenant isolation (real PostgreSQL)', { skip: skipReason }, () => {
 
   const as = (token) => ({
     get: (path) => http(server.base, 'GET', `/api/v1/client/workspace${path}`, { token }),
+    post: (path, body) => http(server.base, 'POST', `/api/v1/client/workspace${path}`, { token, body }),
     patch: (path, body) => http(server.base, 'PATCH', `/api/v1/client/workspace${path}`, { token, body }),
     del: (path) => http(server.base, 'DELETE', `/api/v1/client/workspace${path}`, { token })
   });
@@ -82,7 +89,46 @@ describe('tenant isolation (real PostgreSQL)', { skip: skipReason }, () => {
     assert.notEqual(r.body.sessionId, sessionB.id);
     const created = await prisma.chatSession.findUnique({ where: { id: r.body.sessionId } });
     assert.equal(created.tenantId, a.tenant.id);
-    assert.equal(await prisma.chatMessage.count({ where: { sessionId: sessionB.id } }), 1, 'nothing was added to the other company\'s chat');
+    assert.equal(await prisma.chatMessage.count({ where: { sessionId: sessionB.id } }), 2, 'nothing was added to the other company\'s chat');
+  });
+
+  test('session history, improvements and alert settings: never another company\'s, by listing or by id', async () => {
+    const A = as(tokenA);
+    const sessions = await A.get('/sessions');
+    assert.equal(sessions.status, 200);
+    assert.ok(!sessions.body.sessions.some((s) => s.id === sessionB.id));
+    assert.ok(!JSON.stringify(sessions.body).includes('Bravo'));
+    // A cursor naming the other company's session matches nothing of theirs either.
+    const cursored = await A.get(`/sessions?cursor=${sessionB.id}`);
+    assert.ok(!JSON.stringify(cursored.body).includes('Bravo'));
+
+    const improvements = await A.get('/improvements');
+    assert.equal(improvements.status, 200);
+    assert.ok(!improvements.body.sessions.some((s) => s.id === sessionB.id));
+    assert.ok(!JSON.stringify(improvements.body).includes('Bravo'));
+    // Not vacuous: Bravo does see its own weak answer.
+    const own = await as(tokenB).get('/improvements');
+    assert.deepEqual(own.body.sessions.map((s) => s.id), [sessionB.id]);
+    assert.equal(own.body.sessions[0].weak[0].question, 'Bravo private question');
+
+    assert.equal((await A.get(`/sessions/${sessionB.id}`)).status, 404);
+    assert.equal((await A.post(`/sessions/${sessionB.id}/summarize`)).status, 404);
+    const after = await prisma.chatSession.findUnique({ where: { id: sessionB.id } });
+    assert.equal(after.summaryStatus, 'none', 'no summary run was started on their session');
+    assert.equal(after.summary, 'Intent: Bravo secret plans');
+
+    assert.equal((await A.patch('/notifications', { teamEmail: 'alpha-team@example.test' })).status, 200);
+    assert.equal((await prisma.tenant.findUnique({ where: { id: b.tenant.id } })).teamEmail, null, 'only the caller\'s own setting changes');
+    const bravoSettings = await as(tokenB).get('/notifications');
+    assert.ok(!JSON.stringify(bravoSettings.body).includes('alpha-team'));
+  });
+
+  test('the widget cannot end another company\'s conversation', async () => {
+    const r = await http(server.base, 'POST', `/api/v1/tenant-chat/${a.tenant.slug}/session/end`, {
+      apiKey: a.apiKey, body: { sessionId: sessionB.id }
+    });
+    assert.equal(r.status, 204, 'same answer as for any id, so ids cannot be probed');
+    assert.equal((await prisma.chatSession.findUnique({ where: { id: sessionB.id } })).endedAt, null);
   });
 
   test('each company\'s bots only ever load their own knowledge', async () => {

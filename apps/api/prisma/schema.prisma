@@ -39,6 +39,9 @@ model Tenant {
   // all of the knowledge and the readiness audit judges only its scope
   // (services/shared/botScope.js, services/botAuditor.js).
   botPreference     String   @default("both")
+  // Where lead and low-confidence alerts go (services/teamAlerts.js). Null =
+  // the signup email, then the tenant's dashboard users. Lower-cased.
+  teamEmail         String?
   // Pre-flight knowledge audit (services/botAuditor.js): the latest report,
   // its 0-100 score and level, and a hash of the documents it judged — a
   // different hash now means documents changed since and the report is stale.
@@ -214,15 +217,31 @@ model TenantDocument {
   @@index([tenantId, category])
 }
 
+// One conversation with one visitor. botType, lastMessageAt and messageCount
+// are kept up to date on every turn (services/tenantChat.js). summary is the
+// AI summary of the whole conversation (services/chatSessions.js), written
+// once it goes idle or ends; for a conversation that produced a lead, the
+// lead's summary (services/leads.js) is copied here instead of a second call.
 model ChatSession {
-  id             String   @id @default(uuid())
-  tenant         Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  id             String    @id @default(uuid())
+  tenant         Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   tenantId       String
-  externalUserId String?  // identity from whatever host app is embedding the widget — opaque to us
-  startedAt      DateTime @default(now())
+  externalUserId String?   // identity from whatever host app is embedding the widget — opaque to us
+  startedAt      DateTime  @default(now())
+  // support | sales — the bot of the first turn (CHECK constraint in
+  // migration 20261016090000_session_summaries_team_alerts)
+  botType        String?
+  lastMessageAt  DateTime?
+  messageCount   Int       @default(0)
+  endedAt        DateTime? // the widget reported the page closed (POST /session/end)
+  summary        String?
+  summaryStatus  String    @default("none") // none | pending | ready | failed
+  summarizedAt   DateTime? // when the last attempt finished; older than lastMessageAt = stale
   messages       ChatMessage[]
 
   @@index([tenantId])
+  @@index([tenantId, lastMessageAt])
+  @@index([lastMessageAt])
 }
 
 model ChatMessage {

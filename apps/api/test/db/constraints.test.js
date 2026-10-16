@@ -25,6 +25,16 @@ describe('database constraints (real PostgreSQL)', { skip: skipReason }, () => {
       /TenantUser_email_normalised_check/);
   });
 
+  test('emails are stored only lower-cased and trimmed — the database refuses anything else, on both tables', async () => {
+    const lower = `${uid('case')}@example.test`;
+    for (const variant of [lower.toUpperCase(), ` ${lower}`, `${lower} `, `Case${lower}`]) {
+      await rejects(prisma.tenantUser.create({ data: { tenantId: t.tenant.id, email: variant, passwordHash: 'x:y' } }),
+        /TenantUser_email_normalised_check/);
+      await rejects(prisma.tenant.create({ data: { name: 'C', slug: uid('c'), industryLabel: 'x', signupEmail: variant } }),
+        /Tenant_signupEmail_normalised_check/);
+    }
+  });
+
   test('one self-serve company per signup email', async () => {
     const email = `${uid('signup')}@example.test`;
     const first = await prisma.tenant.create({ data: { name: 'S1', slug: uid('s1'), industryLabel: 'x', signupEmail: email } });

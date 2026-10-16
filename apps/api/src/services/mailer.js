@@ -1,7 +1,8 @@
 const nodemailer = require('nodemailer');
 
-// Transactional email: password-reset codes and the visitor's lead
-// confirmation. Nothing here emails internal staff. Transports, first one
+// Transactional email: password-reset codes, the visitor's lead
+// confirmation, and alerts to a tenant's own team (services/teamAlerts.js:
+// new lead, low-confidence answer, handoff). Transports, first one
 // configured wins:
 //   1. SMTP via nodemailer, when SMTP_HOST is set (Microsoft 365);
 //   2. Resend's HTTP API, when RESEND_API_KEY and a sender are set (kept so

@@ -2,6 +2,7 @@ const express = require('express');
 const prisma = require('../lib/prisma');
 const { findValidApiKey, shouldTouchLastUsed } = require('../utils/tenantApiKeys');
 const { handleChat } = require('../services/tenantChat');
+const { endSession } = require('../services/chatSessions');
 
 // Public chat endpoint used by the embed widget and customers' own apps:
 //   POST /api/v1/tenant-chat/:slug/chat   header X-Tenant-Api-Key: tk_...
@@ -34,5 +35,16 @@ router.use('/:slug', async (req, res, next) => {
 });
 
 router.post('/:slug/chat', handleChat);
+
+// The widget reports its page closing: body { sessionId }. The conversation
+// is summarized now instead of after the idle delay (services/chatSessions.js).
+// 204 either way for a well-formed id, so the endpoint can't be used to probe
+// which session ids exist.
+router.post('/:slug/session/end', async (req, res) => {
+  const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId.slice(0, 64) : '';
+  if (!sessionId) return res.status(400).json({ error: 'sessionId is required' });
+  await endSession({ tenantId: req.tenant.id, sessionId });
+  res.status(204).end();
+});
 
 module.exports = router;

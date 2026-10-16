@@ -96,7 +96,8 @@ async function getEngineAnswer({ profile, query, ctx = {} }) {
     if (bridge) result.answer = bridge.text;
     if (bridge?.offTopic) {
       // Off-topic ("what's the capital of France?"): a kind redirect, not a
-      // knowledge gap — no handoff, no ticket.
+      // knowledge gap — no handoff, no ticket, no team alert (offTopic).
+      result.offTopic = true;
       await profile.onResult?.(result, query, ctx);
       return result;
     }
@@ -162,6 +163,7 @@ async function getEngineAnswer({ profile, query, ctx = {} }) {
     else if (handoff || !profile.formatNoAnswer) result = profile.formatFallback(ctx, confidence);
     else result = profile.formatNoAnswer(ctx, confidence);
     if (bridge) result.answer = bridge.text;
+    if (bridge?.offTopic) result.offTopic = true;
     if (handoff) {
       result.handoff = true;
       if (profile.ticketing) result.awaitingContact = true;

@@ -3,6 +3,7 @@ const { assertProdSafety, ProdSafetyError } = require('./utils/assertProdSafety'
 const { describeLlmConfig, verifyLlmModels } = require('./engine/llmClient');
 const { verifyMailer, mailFrom } = require('./services/mailer');
 const { confirmationCooldownMs } = require('./services/leads');
+const { startSessionSummaryWorker } = require('./services/chatSessions');
 
 // A config problem gets a readable list of what to fix, not a stack trace.
 try {
@@ -69,4 +70,7 @@ process.on('unhandledRejection', (err) => {
 const port = process.env.PORT || 4000;
 app.listen(port, () => {
   console.log(`KGT AI Hub API running at http://localhost:${port}`);
+  // Summarizes idle conversations for the Sessions view (services/chatSessions.js).
+  // Here, not in app.js, so tests that load the app don't start it.
+  startSessionSummaryWorker();
 });

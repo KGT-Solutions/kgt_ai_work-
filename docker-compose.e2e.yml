@@ -88,6 +88,9 @@ services:
       CRAWLER_ALLOW_PRIVATE_HOSTS: "true"
       SIGNUP_RATE_LIMIT_MAX: 20
       LEAD_SUMMARY_IDLE_SEC: 2
+      # Idle conversations summarized within seconds, not minutes (leadsAndSummaries.spec.js).
+      SESSION_SUMMARY_IDLE_SEC: 2
+      SESSION_SUMMARY_SWEEP_SEC: 2
       CHECKPOINT_DISABLE: "1"
     depends_on:
       e2e-postgres: { condition: service_healthy }

@@ -9,7 +9,7 @@
 //   - readiness audit  -> JSON report; the Support pillar scores low until the
 //                         knowledge contains a refund / return policy, then high
 //                         (drives the wizard's "Path to 100%" upload test);
-//   - lead summary     -> a fixed executive summary;
+//   - lead / session summary -> a fixed executive summary;
 //   - anything else    -> a short bullet-point chat answer.
 // GET /__calls lists every prompt received, for debugging a failed run.
 const http = require('http');
@@ -43,10 +43,15 @@ function auditReport(content) {
   };
 }
 
+// The labelled format the API's summary prompt asks for (services/leads.js
+// buildSummaryPrompt), which the dashboard lays out label by label.
 const SUMMARY = [
-  'Visitor intent: Wants a product demo of the Northwind smart thermostat.',
-  'Key details: Asked about plans before requesting a demo.',
-  'Recommended next step: Schedule a demo call this week.'
+  'Intent: Wants a product demo of the Northwind smart thermostat.',
+  'Key questions:',
+  '• Asked about plans before requesting a demo.',
+  'Outcome: Handed to the team for a follow-up.',
+  'Follow-up actions:',
+  '• Schedule a demo call this week.'
 ].join('\n');
 
 const STARTERS = {

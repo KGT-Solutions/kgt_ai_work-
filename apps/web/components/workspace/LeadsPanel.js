@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Badge, Button, ButtonLink, Card, CardHeader, EmptyState, Segmented, Skeleton, Spinner, cx } from '../ui';
 import { useToast } from '../ui/toast';
 import { IconChevronDown, IconInbox, IconMail } from '../ui/icons';
+import { BOTS, SummaryText, TranscriptToggle, intentLine } from './ConversationParts';
 
 // Visitors who left an email in a bot conversation (services/leads.js on the
 // API), newest first. Each card shows the AI summary's one-line intent; open
@@ -9,10 +10,6 @@ import { IconChevronDown, IconInbox, IconMail } from '../ui/icons';
 // still being written, the list refreshes itself every few seconds. The bot
 // and status filters are applied by the API (GET /leads?botType=&status=).
 
-const BOTS = {
-  sales: { label: 'Sales bot', tone: 'green' },
-  support: { label: 'Support bot', tone: 'blue' }
-};
 const STATUSES = {
   NEW: { label: 'New', tone: 'warning' },
   CONTACTED: { label: 'Contacted', tone: 'success' }
@@ -20,14 +17,6 @@ const STATUSES = {
 const BOT_FILTERS = [{ value: 'all', label: 'All bots' }, { value: 'sales', label: 'Sales' }, { value: 'support', label: 'Support' }];
 const STATUS_FILTERS = [{ value: 'all', label: 'All' }, { value: 'NEW', label: 'New' }, { value: 'CONTACTED', label: 'Contacted' }];
 const POLL_MS = 8000;
-
-// "Intent: ..." is the summary's first line (the prompt asks for it); fall
-// back to the first line of whatever the model wrote.
-function intentLine(summary) {
-  const lines = String(summary || '').split('\n').map((l) => l.trim()).filter(Boolean);
-  const intent = lines.find((l) => /^intent:/i.test(l)) || lines[0] || '';
-  return intent.replace(/^intent:\s*/i, '');
-}
 
 function SummaryPreview({ lead }) {
   if (lead.summaryStatus === 'pending') {
@@ -39,24 +28,7 @@ function SummaryPreview({ lead }) {
   return <p className="text-[13px] leading-relaxed text-fg-2">{intentLine(lead.chatSummary)}</p>;
 }
 
-function Transcript({ messages }) {
-  if (!messages?.length) return <p className="text-[13px] text-fg-3">The conversation isn't available.</p>;
-  return (
-    <ol className="flex max-h-96 flex-col gap-2 overflow-y-auto pr-1">
-      {messages.map((m, i) => (
-        <li key={i} className={cx('max-w-[85%] whitespace-pre-line rounded-xl px-3 py-2 text-[13px] leading-relaxed',
-          m.role === 'user' ? 'self-end bg-cyan-400/10 text-fg' : 'self-start bg-white/[0.04] text-fg-2')}>
-          <span className="mb-0.5 block text-[10.5px] font-medium uppercase tracking-wide text-fg-3">
-            {m.role === 'user' ? 'Visitor' : 'Assistant'}
-          </span>
-          {m.content}
-        </li>
-      ))}
-    </ol>
-  );
-}
-
-function LeadCard({ lead, onStatus, busy }) {
+function LeadCard({ lead, onStatus, busy, onOpenSession }) {
   const [open, setOpen] = useState(false);
   const bot = BOTS[lead.botType] || BOTS.support;
   const status = STATUSES[lead.status] || STATUSES.NEW;
@@ -88,27 +60,29 @@ function LeadCard({ lead, onStatus, busy }) {
       </div>
 
       {open && (
-        <div className="grid gap-5 border-t border-white/[0.06] p-4 lg:grid-cols-2">
+        <div className="space-y-4 border-t border-white/[0.06] p-4">
           <section>
             <h4 className="mb-2 text-[11px] font-medium uppercase tracking-[0.1em] text-fg-3">AI summary</h4>
-            {lead.chatSummary
-              ? <p className="whitespace-pre-line text-[13px] leading-relaxed text-fg-2">{lead.chatSummary}</p>
-              : <SummaryPreview lead={lead} />}
+            {lead.chatSummary ? <SummaryText summary={lead.chatSummary} /> : <SummaryPreview lead={lead} />}
             {lead.confirmationSentAt && (
               <p className="mt-3 text-xs text-fg-3">Confirmation email sent {new Date(lead.confirmationSentAt).toLocaleString()}</p>
             )}
+            {lead.sessionId && onOpenSession && (
+              <button type="button" onClick={() => onOpenSession(lead.sessionId)}
+                className="mt-3 text-xs font-medium text-brand-300 underline-offset-2 hover:underline">
+                Open session #{lead.sessionId.slice(0, 8)}
+              </button>
+            )}
           </section>
-          <section>
-            <h4 className="mb-2 text-[11px] font-medium uppercase tracking-[0.1em] text-fg-3">Conversation</h4>
-            <Transcript messages={lead.fullTranscript} />
-          </section>
+          <TranscriptToggle messages={lead.fullTranscript} showMeta={false} />
         </div>
       )}
     </li>
   );
 }
 
-export default function LeadsPanel({ ws }) {
+// onOpenSession(sessionId): optional, shows the lead's conversation in the Sessions view.
+export default function LeadsPanel({ ws, onOpenSession }) {
   const toast = useToast();
   const [data, setData] = useState(null); // { leads, counts } for the current filters
   const [botFilter, setBotFilter] = useState('all');
@@ -173,7 +147,9 @@ export default function LeadsPanel({ ws }) {
           <EmptyState icon={<IconInbox className="h-5 w-5" />} title="Nothing matches these filters" />
         ) : (
           <ul className="space-y-3">
-            {leads.map((lead) => <LeadCard key={lead.id} lead={lead} onStatus={setStatus} busy={busyId === lead.id} />)}
+            {leads.map((lead) => (
+              <LeadCard key={lead.id} lead={lead} onStatus={setStatus} busy={busyId === lead.id} onOpenSession={onOpenSession} />
+            ))}
           </ul>
         )}
       </div>

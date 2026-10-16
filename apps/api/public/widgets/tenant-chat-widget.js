@@ -299,6 +299,25 @@
     return true;
   }
 
+  // Leaving the page ends this widget's conversations (sessionIds live only
+  // in memory), so tell the API: it summarizes them now instead of after the
+  // idle delay. keepalive lets the request outlive the page; sendBeacon can't
+  // carry the API key header. Best-effort: the idle sweep covers a miss, and
+  // a page restored from the back/forward cache simply carries on chatting.
+  window.addEventListener('pagehide', function () {
+    for (var bot in sessionIds) {
+      if (!sessionIds[bot]) continue;
+      try {
+        fetch(apiBase + '/api/v1/tenant-chat/' + encodeURIComponent(tenantSlug) + '/session/end', {
+          method: 'POST',
+          keepalive: true,
+          headers: { 'Content-Type': 'application/json', 'x-tenant-api-key': apiKey },
+          body: JSON.stringify({ sessionId: sessionIds[bot] })
+        }).catch(function () {});
+      } catch (e) { /* keepalive unsupported: the idle sweep summarizes it */ }
+    }
+  });
+
   function mount() {
     document.body.appendChild(panel);
     document.body.appendChild(launcher);

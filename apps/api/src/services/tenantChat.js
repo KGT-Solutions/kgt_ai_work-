@@ -4,6 +4,8 @@ const { createTenantSupportProfile, createTenantSalesProfile } = require('../dom
 const { createIpRateLimiter } = require('../utils/ipRateLimit');
 const { pickFollowUps } = require('./followUps');
 const { trackLeadActivity } = require('./leads');
+const { recordTurn } = require('./chatSessions');
+const { notifyIfNeedsAttention } = require('./teamAlerts');
 
 // One chat turn for one tenant. Shared by every way a tenant's bots are
 // reached — the embed widget (API key), the client dashboard (client JWT)
@@ -48,12 +50,13 @@ class ChatRequestError extends Error {
 }
 
 /**
- * @param {{ tenant: object, body: object }} args  body: { query, botType? (or bot), sessionId?, externalUserId? }
+ * @param {{ tenant: object, body: object, sandbox?: boolean }} args  body: { query, botType? (or bot), sessionId?, externalUserId? }
+ *   sandbox: the dashboard's test chat (client or staff), not a website visitor
  * @returns {Promise<object>} the bot's result (without its confidence score) plus followUps
  *   (0-3 suggested next questions), sessionId and the botType that answered
  * @throws {ChatRequestError} for invalid input (400) or rate limiting (429)
  */
-async function runTenantChat({ tenant, body }) {
+async function runTenantChat({ tenant, body, sandbox = false }) {
   const query = String(body?.query || '').trim();
   if (!query) throw new ChatRequestError('query is required', 400);
   if (query.length > MAX_QUERY_LEN) throw new ChatRequestError(`query must be ${MAX_QUERY_LEN} characters or fewer`, 400);
@@ -106,15 +109,23 @@ async function runTenantChat({ tenant, body }) {
   // The confidence score is stored here (and on tickets) for staff and
   // tenant review, never sent to the chat client; neither is the email just
   // captured, which goes to the lead record, nor the answered flag.
-  const { confidence, contactEmail, answered, ...reply } = result;
+  // offTopic only steers the team alert below.
+  const { confidence, contactEmail, answered, offTopic, ...reply } = result;
   await prisma.chatMessage.createMany({
     data: [
       { sessionId: session.id, role: 'user', content: query, botType },
       { sessionId: session.id, role: 'assistant', content: reply.answer, confidence: confidence ?? null, botType, answered: !!answered }
     ]
   });
-  // After the messages are written, so the lead's transcript includes this turn.
-  await trackLeadActivity({ tenant, botType, sessionId: session.id, contactEmail: reply.contactCaptured ? contactEmail : null });
+  // After the messages are written, so the lead's transcript and the alert include this turn.
+  await recordTurn({ session, botType });
+  // Team alerts are for real visitors, not the team testing its own bots.
+  const alertTeam = !sandbox;
+  await trackLeadActivity({
+    tenant, botType, sessionId: session.id, contactEmail: reply.contactCaptured ? contactEmail : null, alertTeam
+  });
+  // A handoff or an answer below 50% confidence: tell the team now (throttled; not awaited).
+  if (alertTeam) notifyIfNeedsAttention({ tenant, botType, sessionId: session.id, query, result });
 
   // No suggested questions while the bot is waiting for an email: the reply
   // just asked for one, and chips would pull the visitor away from answering.
@@ -131,7 +142,8 @@ async function runTenantChat({ tenant, body }) {
 // Express helper: run a turn and map input errors to their status codes.
 async function handleChat(req, res, next) {
   try {
-    res.json(await runTenantChat({ tenant: req.tenant, body: req.body }));
+    // req.actor is set only behind the dashboard's gatekeepers; the widget route has none.
+    res.json(await runTenantChat({ tenant: req.tenant, body: req.body, sandbox: !!req.actor }));
   } catch (err) {
     if (err instanceof ChatRequestError) return res.status(err.statusCode).json({ error: err.message });
     next(err);

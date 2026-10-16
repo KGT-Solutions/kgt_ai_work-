@@ -1,5 +1,6 @@
 const express = require('express');
 const multer = require('multer');
+const { Prisma } = require('@prisma/client');
 const prisma = require('../lib/prisma');
 const { issueApiKey } = require('../utils/tenantApiKeys');
 const { invalidateTenantKnowledge } = require('../domains/tenantProfile');
@@ -17,6 +18,8 @@ const { answerCache } = require('../engine/answerCache');
 const { ingestUpload, FileIngestError, MAX_UPLOAD_BYTES } = require('../services/shared/fileIngest');
 const { documentChunks } = require('../domains/tenantProfile');
 const { auditTenant, tenantReadiness } = require('../services/botAuditor');
+const { runSessionSummary } = require('../services/chatSessions');
+const { teamRecipients, parseTeamEmail, lowConfidenceBelow } = require('../services/teamAlerts');
 
 // Everything one tenant can do with its own bots: documents, PDF upload,
 // website import, API keys, test chat, tickets, leads and usage.
@@ -450,7 +453,7 @@ const LEAD_STATUSES = ['NEW', 'CONTACTED'];
 const LEAD_BOT_TYPES = ['sales', 'support'];
 const MAX_LEADS = 200;
 const LEAD_FIELDS = {
-  id: true, botType: true, email: true, chatSummary: true, summaryStatus: true, fullTranscript: true,
+  id: true, botType: true, sessionId: true, email: true, chatSummary: true, summaryStatus: true, fullTranscript: true,
   status: true, confirmationSentAt: true, createdAt: true, updatedAt: true
 };
 
@@ -492,6 +495,185 @@ router.patch('/leads/:leadId', async (req, res) => {
   const lead = await prisma.lead.findFirst({ where: { id: req.params.leadId, tenantId: req.tenant.id }, select: { id: true } });
   if (!lead) return res.status(404).json({ error: 'Lead not found' });
   res.json(await prisma.lead.update({ where: { id: lead.id }, data: { status }, select: LEAD_FIELDS }));
+});
+
+// ── Sessions: every conversation with its AI summary (services/chatSessions.js),
+// newest activity first, for the Sessions view of Leads & Summaries.
+//
+// GET /sessions?botType=all|sales|support&cursor=<session id> — 30 per page;
+// nextCursor is null on the last page. Each row carries the leads captured in
+// it (id, email, status), so staff can mark them contacted from the list.
+const SESSIONS_PAGE = 30;
+const SESSION_FIELDS = {
+  id: true, externalUserId: true, botType: true, startedAt: true, lastMessageAt: true, messageCount: true,
+  endedAt: true, summary: true, summaryStatus: true, summarizedAt: true
+};
+const isSummarizeLimited = createIpRateLimiter({ max: 20, windowMs: 60 * 60 * 1000 });
+
+async function leadsBySession(tenantId, sessionIds) {
+  if (!sessionIds.length) return new Map();
+  const rows = await prisma.lead.findMany({
+    where: { tenantId, sessionId: { in: sessionIds } },
+    orderBy: { createdAt: 'asc' },
+    select: { id: true, sessionId: true, email: true, status: true, botType: true }
+  });
+  const map = new Map();
+  for (const { sessionId, ...lead } of rows) map.set(sessionId, [...(map.get(sessionId) || []), lead]);
+  return map;
+}
+
+router.get('/sessions', async (req, res) => {
+  const botType = leadFilter(req.query.botType, LEAD_BOT_TYPES, (v) => v.toLowerCase());
+  if (!botType.ok) return res.status(400).json({ error: `botType must be one of: all, ${LEAD_BOT_TYPES.join(', ')}` });
+  const cursor = typeof req.query.cursor === 'string' && req.query.cursor ? req.query.cursor : null;
+
+  // Conversations with at least one turn; a cursor from another tenant matches nothing.
+  const where = { tenantId: req.tenant.id, messageCount: { gt: 0 } };
+  if (botType.value) where.botType = botType.value;
+  const rows = await prisma.chatSession.findMany({
+    where,
+    orderBy: [{ lastMessageAt: { sort: 'desc', nulls: 'last' } }, { id: 'desc' }],
+    take: SESSIONS_PAGE + 1,
+    ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    select: SESSION_FIELDS
+  });
+  const page = rows.slice(0, SESSIONS_PAGE);
+  const leads = await leadsBySession(req.tenant.id, page.map((s) => s.id));
+  res.json({
+    sessions: page.map((s) => ({ ...s, leads: leads.get(s.id) || [] })),
+    nextCursor: rows.length > SESSIONS_PAGE ? page.at(-1).id : null
+  });
+});
+
+// One conversation: its summary, leads and every message, oldest first.
+// confidence is included: it's this tenant's own review data.
+router.get('/sessions/:sessionId', async (req, res) => {
+  const session = await prisma.chatSession.findFirst({
+    where: { id: req.params.sessionId, tenantId: req.tenant.id }, select: SESSION_FIELDS
+  });
+  if (!session) return res.status(404).json({ error: 'Session not found' });
+  const [messages, leads] = await Promise.all([
+    prisma.chatMessage.findMany({
+      where: { sessionId: session.id },
+      orderBy: CHRONOLOGICAL,
+      take: 500,
+      select: { id: true, role: true, content: true, botType: true, confidence: true, answered: true, createdAt: true }
+    }),
+    leadsBySession(req.tenant.id, [session.id])
+  ]);
+  res.json({ ...session, leads: leads.get(session.id) || [], messages });
+});
+
+// ── Improvements: conversations with genuine misses — each weak reply and
+// the question that led to it, the gaps to fill in the documents. A reply is
+// weak when it went through retrieval (confidence is set; greetings and
+// handoff actions have none) and either
+//   - its confidence is below IMPROVEMENT_CONFIDENCE_BELOW (25%), or
+//   - the bot gave no knowledge-base answer (answered false): the gate's
+//     fallback, a handoff, or "rephrase that" — whatever its score.
+// Not a higher cut-off: engine/confidence.js scores ordinary, correct answers
+// at 33-50%, so e.g. 60% would list nearly every good answer. Both bots
+// unless botType is given; most recent weak reply first.
+//
+// GET /improvements?botType=all|sales|support&page=0 — 20 sessions per page.
+const IMPROVEMENTS_PAGE = 20;
+const MAX_WEAK_ANSWERS = 10; // per session, most recent kept
+const improvementBelow = () => {
+  const n = Number(process.env.IMPROVEMENT_CONFIDENCE_BELOW);
+  return Number.isFinite(n) && n > 0 && n <= 1 ? n : 0.25;
+};
+const isWeak = (m, below) => m.confidence != null && (m.confidence < below || !m.answered);
+// createMany writes a turn's two rows with the same timestamp: on a tie the
+// visitor's message ('user') goes before the reply ('assistant').
+const CHRONOLOGICAL = [{ createdAt: 'asc' }, { role: 'desc' }];
+
+router.get('/improvements', async (req, res) => {
+  const botType = leadFilter(req.query.botType, LEAD_BOT_TYPES, (v) => v.toLowerCase());
+  if (!botType.ok) return res.status(400).json({ error: `botType must be one of: all, ${LEAD_BOT_TYPES.join(', ')}` });
+  const page = Math.min(500, Math.max(0, Number.parseInt(req.query.page, 10) || 0));
+  const below = improvementBelow();
+
+  const groups = await prisma.$queryRaw`
+    WITH low AS (
+      SELECT m."sessionId" AS id, MIN(m.confidence)::float AS lowest, COUNT(*)::int AS "weakAnswers",
+             MAX(m."createdAt") AS "lastWeakAt"
+      FROM "ChatMessage" m JOIN "ChatSession" s ON s.id = m."sessionId"
+      WHERE s."tenantId" = ${req.tenant.id} AND m.role = 'assistant'
+        AND m.confidence IS NOT NULL AND (m.confidence < ${below} OR NOT m.answered)
+        ${botType.value ? Prisma.sql`AND m."botType" = ${botType.value}` : Prisma.empty}
+      GROUP BY m."sessionId"
+    )
+    SELECT id, lowest, "weakAnswers", "lastWeakAt",
+           COUNT(*) OVER ()::int AS "totalSessions", SUM("weakAnswers") OVER ()::int AS "totalWeakAnswers"
+    FROM low ORDER BY "lastWeakAt" DESC, id
+    LIMIT ${IMPROVEMENTS_PAGE} OFFSET ${page * IMPROVEMENTS_PAGE}`;
+
+  const ids = groups.map((g) => g.id);
+  const [sessions, messages, leads] = ids.length ? await Promise.all([
+    prisma.chatSession.findMany({ where: { id: { in: ids }, tenantId: req.tenant.id }, select: SESSION_FIELDS }),
+    prisma.chatMessage.findMany({
+      where: { sessionId: { in: ids } }, orderBy: CHRONOLOGICAL,
+      select: { id: true, sessionId: true, role: true, content: true, botType: true, confidence: true, answered: true, createdAt: true }
+    }),
+    leadsBySession(req.tenant.id, ids)
+  ]) : [[], [], new Map()];
+
+  // Each weak reply, paired with the visitor message just before it.
+  const weakBySession = new Map();
+  const lastQuestion = new Map();
+  for (const m of messages) {
+    if (m.role === 'user') { lastQuestion.set(m.sessionId, m.content); continue; }
+    if (!isWeak(m, below)) continue;
+    if (botType.value && m.botType !== botType.value) continue;
+    const list = weakBySession.get(m.sessionId) || [];
+    list.push({
+      id: m.id, question: lastQuestion.get(m.sessionId) || null, answer: m.content, confidence: m.confidence,
+      botType: m.botType, answered: m.answered, at: m.createdAt
+    });
+    weakBySession.set(m.sessionId, list.slice(-MAX_WEAK_ANSWERS));
+  }
+
+  const byId = new Map(sessions.map((s) => [s.id, s]));
+  res.json({
+    below,
+    totalSessions: groups[0]?.totalSessions ?? 0,
+    totalWeakAnswers: groups[0]?.totalWeakAnswers ?? 0,
+    sessions: groups.filter((g) => byId.has(g.id)).map((g) => ({
+      ...byId.get(g.id), lowest: g.lowest, weakAnswers: g.weakAnswers, lastWeakAt: g.lastWeakAt,
+      leads: leads.get(g.id) || [], weak: weakBySession.get(g.id) || []
+    })),
+    nextPage: (page + 1) * IMPROVEMENTS_PAGE < (groups[0]?.totalSessions ?? 0) ? page + 1 : null
+  });
+});
+
+// Write (or rewrite) the summary now. Each one is an LLM call billed to the tenant.
+router.post('/sessions/:sessionId/summarize', async (req, res) => {
+  const session = await prisma.chatSession.findFirst({ where: { id: req.params.sessionId, tenantId: req.tenant.id }, select: { id: true } });
+  if (!session) return res.status(404).json({ error: 'Session not found' });
+  if (isSummarizeLimited(req.tenant.id)) return res.status(429).json({ error: 'Too many summary requests. Try again later.' });
+  await prisma.chatSession.update({ where: { id: session.id }, data: { summaryStatus: 'pending' } });
+  runSessionSummary(session.id);
+  res.status(202).json({ id: session.id, summaryStatus: 'pending' });
+});
+
+// ── Team alerts (services/teamAlerts.js): who gets "new lead" and "needs
+// attention" emails. teamEmail null = the defaults; recipients is who
+// actually gets them right now.
+router.get('/notifications', async (req, res) => {
+  const tenant = await prisma.tenant.findUnique({
+    where: { id: req.tenant.id }, select: { id: true, teamEmail: true, signupEmail: true }
+  });
+  res.json({ teamEmail: tenant.teamEmail, recipients: await teamRecipients(tenant), lowConfidenceBelow: lowConfidenceBelow() });
+});
+
+// Body: { teamEmail: "a@x.com, b@x.com" | "" }
+router.patch('/notifications', async (req, res) => {
+  const parsed = parseTeamEmail(req.body?.teamEmail);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const tenant = await prisma.tenant.update({
+    where: { id: req.tenant.id }, data: { teamEmail: parsed.value }, select: { id: true, teamEmail: true, signupEmail: true }
+  });
+  res.json({ teamEmail: tenant.teamEmail, recipients: await teamRecipients(tenant), lowConfidenceBelow: lowConfidenceBelow() });
 });
 
 // All-time totals plus the per-bot breakdown (services/usageStats.js):

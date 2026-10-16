@@ -14,7 +14,11 @@ const TENANT_ID = 'tenant-r';
 let rows, queries;
 const lead = (id, tenantId, botType, status, minutesAgo) =>
   ({ id, tenantId, botType, status, email: `${id}@x.com`, createdAt: new Date(Date.now() - minutesAgo * 60_000) });
-const matches = (row, where) => Object.entries(where).every(([k, v]) => row[k] === v);
+const matches = (row, where) => Object.entries(where).every(([k, v]) => {
+  if (v && typeof v === 'object' && 'in' in v) return v.in.includes(row[k]);
+  if (v && typeof v === 'object' && 'gt' in v) return row[k] > v.gt;
+  return row[k] === v;
+});
 
 let server, base;
 before(async () => {
@@ -109,5 +113,144 @@ describe('PATCH /leads/:id', () => {
     assert.equal((await patch('other', { status: 'CONTACTED' })).status, 404);
     assert.equal(rows.find((r) => r.id === 'other').status, 'NEW');
     assert.equal((await patch('s-new', { status: 'WON' })).status, 400);
+  });
+});
+
+// GET /sessions and GET /sessions/:id: an in-memory ChatSession table that
+// honours the route's where, cursor and take.
+describe('sessions', () => {
+  let sessions, messages;
+  const session = (id, tenantId, botType, minutesAgo, over = {}) => ({
+    id, tenantId, botType, messageCount: 2, lastMessageAt: new Date(Date.now() - minutesAgo * 60_000),
+    summary: `summary of ${id}`, summaryStatus: 'ready', ...over
+  });
+
+  beforeEach(() => {
+    sessions = [
+      session('a', TENANT_ID, 'sales', 1),
+      session('b', TENANT_ID, 'support', 2),
+      session('empty', TENANT_ID, 'support', 0, { messageCount: 0 }),
+      session('theirs', 'someone-else', 'sales', 0)
+    ];
+    messages = [
+      { id: 'm1', sessionId: 'b', role: 'user', content: 'hi', createdAt: new Date(1) },
+      { id: 'm2', sessionId: 'b', role: 'assistant', content: 'hello', confidence: 0.4, createdAt: new Date(2) }
+    ];
+    rows.push({ ...lead('lead-b', TENANT_ID, 'support', 'NEW', 2), sessionId: 'b' });
+    prisma.chatSession.findMany = async ({ where, take, cursor }) => {
+      queries.push(where);
+      let list = sessions.filter((s) => matches(s, where)).sort((x, y) => y.lastMessageAt - x.lastMessageAt);
+      if (cursor) list = list.slice(list.findIndex((s) => s.id === cursor.id) + 1);
+      return list.slice(0, take);
+    };
+    prisma.chatSession.findFirst = async ({ where }) => sessions.find((s) => matches(s, where)) || null;
+    prisma.chatMessage.findMany = async ({ where }) => messages.filter((m) => m.sessionId === where.sessionId);
+  });
+
+  test("lists this tenant's conversations with a turn, newest first, each with its leads", async () => {
+    const body = await (await fetch(`${base}/sessions`)).json();
+    assert.deepEqual(body.sessions.map((s) => s.id), ['a', 'b']);
+    assert.deepEqual(body.sessions[1].leads.map((l) => l.email), ['lead-b@x.com']);
+    assert.deepEqual(body.sessions[0].leads, []);
+    assert.equal(body.nextCursor, null);
+  });
+
+  test('the bot filter goes into the query; an unknown bot is rejected', async () => {
+    const body = await (await fetch(`${base}/sessions?botType=support`)).json();
+    assert.deepEqual(body.sessions.map((s) => s.id), ['b']);
+    assert.deepEqual(queries.find((q) => 'messageCount' in q), { tenantId: TENANT_ID, messageCount: { gt: 0 }, botType: 'support' });
+    assert.equal((await fetch(`${base}/sessions?botType=marketing`)).status, 400);
+  });
+
+  test("one conversation comes with its transcript; another tenant's reads as missing", async () => {
+    const body = await (await fetch(`${base}/sessions/b`)).json();
+    assert.deepEqual(body.messages.map((m) => m.content), ['hi', 'hello']);
+    assert.equal(body.leads[0].id, 'lead-b');
+    assert.equal((await fetch(`${base}/sessions/theirs`)).status, 404);
+  });
+});
+
+// GET /improvements: the SQL that picks sessions runs against Postgres in
+// test/db; here $queryRaw is stubbed and the route's pairing of each weak
+// answer with its question is checked.
+describe('improvements', () => {
+  let sql, messages;
+  const at = (n) => new Date(2026, 9, 16, 12, 0, n);
+  beforeEach(() => {
+    sql = null;
+    messages = [
+      { id: 'u1', sessionId: 'b', role: 'user', content: 'Do you ship to Mars?', botType: 'support', createdAt: at(1) },
+      // The gate's fallback: low score, no answer.
+      { id: 'a1', sessionId: 'b', role: 'assistant', content: 'Not sure.', botType: 'support', confidence: 0.21, answered: false, createdAt: at(1) },
+      { id: 'u2', sessionId: 'b', role: 'user', content: 'Opening hours?', botType: 'support', createdAt: at(2) },
+      // An ordinary, correct answer: scores in the 33-50% band are normal (engine/confidence.js).
+      { id: 'a2', sessionId: 'b', role: 'assistant', content: '9 to 5.', botType: 'support', confidence: 0.44, answered: true, createdAt: at(2) },
+      { id: 'u3', sessionId: 'b', role: 'user', content: 'Enterprise pricing?', botType: 'sales', createdAt: at(3) },
+      // Retrieval found something (40%) but the model found no answer in it: a miss whatever the score.
+      { id: 'a3', sessionId: 'b', role: 'assistant', content: 'Could you rephrase?', botType: 'sales', confidence: 0.4, answered: false, createdAt: at(3) },
+      { id: 'u4', sessionId: 'b', role: 'user', content: 'Annual billing?', botType: 'sales', createdAt: at(4) },
+      { id: 'a4', sessionId: 'b', role: 'assistant', content: 'Yes, yearly.', botType: 'sales', confidence: 0.36, answered: true, createdAt: at(4) }
+    ];
+    prisma.$queryRaw = async (strings, ...values) => {
+      // Prisma.sql fragments arrive as nested values; Prisma itself flattens them.
+      sql = { text: strings.join('?'), values: values.flatMap((v) => (v && Array.isArray(v.values) ? v.values : [v])) };
+      return [{ id: 'b', lowest: 0.21, weakAnswers: 2, lastWeakAt: at(3), totalSessions: 1, totalWeakAnswers: 2 }];
+    };
+    prisma.chatSession.findMany = async ({ where }) =>
+      [{ id: 'b', tenantId: TENANT_ID, botType: 'support', messageCount: 6, lastMessageAt: at(3) }].filter((s) => where.id.in.includes(s.id));
+    prisma.chatMessage.findMany = async ({ where }) => messages.filter((m) => where.sessionId.in.includes(m.sessionId));
+  });
+
+  test('only genuine misses come back, each with the question that led to it, across both bots', async () => {
+    const body = await (await fetch(`${base}/improvements`)).json();
+    assert.equal(body.below, 0.25);
+    assert.equal(body.totalSessions, 1);
+    // Not the correct answers at 44% and 36%.
+    assert.deepEqual(body.sessions[0].weak.map((w) => [w.question, w.confidence, w.botType]),
+      [['Do you ship to Mars?', 0.21, 'support'], ['Enterprise pricing?', 0.4, 'sales']]);
+    assert.equal(body.sessions[0].lowest, 0.21);
+    assert.equal(body.nextPage, null);
+    assert.ok(sql.values.includes(TENANT_ID), 'scoped to this tenant');
+    assert.ok(sql.values.includes(0.25));
+    assert.match(sql.text, /m\.confidence < \? OR NOT m\.answered/, 'the database applies the same rule');
+  });
+
+  test('the bot filter narrows the query and the answers; an unknown bot is rejected', async () => {
+    const body = await (await fetch(`${base}/improvements?botType=sales`)).json();
+    assert.ok(sql.values.includes('sales'));
+    assert.deepEqual(body.sessions[0].weak.map((w) => w.question), ['Enterprise pricing?']);
+    assert.equal((await fetch(`${base}/improvements?botType=marketing`)).status, 400);
+  });
+
+  test('IMPROVEMENT_CONFIDENCE_BELOW moves the threshold', async () => {
+    process.env.IMPROVEMENT_CONFIDENCE_BELOW = '0.4';
+    try {
+      const body = await (await fetch(`${base}/improvements`)).json();
+      assert.equal(body.below, 0.4);
+      assert.deepEqual(body.sessions[0].weak.map((w) => w.id), ['a1', 'a3', 'a4']);
+    } finally {
+      delete process.env.IMPROVEMENT_CONFIDENCE_BELOW;
+    }
+  });
+});
+
+describe('notifications', () => {
+  let tenant;
+  beforeEach(() => {
+    tenant = { id: TENANT_ID, teamEmail: null, signupEmail: 'owner@acme.test' };
+    prisma.tenant.findUnique = async () => ({ ...tenant });
+    prisma.tenant.update = async ({ data }) => Object.assign(tenant, data);
+  });
+  const patch = (teamEmail) => fetch(`${base}/notifications`, {
+    method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ teamEmail })
+  });
+
+  test('defaults to the signup email; a team address overrides it; empty goes back to the default', async () => {
+    assert.deepEqual((await (await fetch(`${base}/notifications`)).json()).recipients, ['owner@acme.test']);
+    const set = await (await patch('Sales@Acme.test, ops@acme.test')).json();
+    assert.equal(set.teamEmail, 'sales@acme.test, ops@acme.test');
+    assert.deepEqual(set.recipients, ['sales@acme.test', 'ops@acme.test']);
+    assert.deepEqual((await (await patch('')).json()).recipients, ['owner@acme.test']);
+    assert.equal((await patch('nope')).status, 400);
   });
 });
