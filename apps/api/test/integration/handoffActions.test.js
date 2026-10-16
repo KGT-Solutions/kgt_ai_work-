@@ -12,7 +12,7 @@ const generateAnswerMock = require('node:test').mock.method(llmClient, 'generate
 const prisma = require('../../src/lib/prisma');
 const { getEngineAnswer } = require('../../src/engine/chatEngine');
 const { createTenantSupportProfile, createTenantSalesProfile, invalidateTenantKnowledge } = require('../../src/domains/tenantProfile');
-const { extractBareEmail, isHumanRequest, isDemoRequest } = require('../../src/domains/handoffActions');
+const { extractBareEmail, extractContactEmail, extractStatedEmail, isHumanRequest, isDemoRequest } = require('../../src/domains/handoffActions');
 
 const TENANT = {
   id: 'tenant-h', slug: 'acme', name: 'Acme', industryLabel: 'Property management', persona: null,
@@ -36,6 +36,37 @@ describe('handoff matching', () => {
       'Why does ana@acme.com show as inactive in the resident list?',
       'what is your email address?'
     ]) assert.equal(extractBareEmail(msg), null, msg);
+  });
+
+  test('an email left in any wording is a contact handoff when the visitor says it is theirs or the bot just asked', () => {
+    const afterAsk = { recentTurns: [{ role: 'assistant', content: 'Could you share your email so our team can follow up?' }] };
+    const afterAnswer = { recentTurns: [{ role: 'assistant', content: 'Residents pay from the Payments tab.' }] };
+    for (const [msg, ctx, email] of [
+      ['it is my email- MeAakarsh25@gmail.com', afterAnswer, 'meaakarsh25@gmail.com'], // seen in production: no lead was saved
+      ['Hi, my email is ana@acme.com, I would like a quote for 40 flats', {}, 'ana@acme.com'], // first message
+      ['reach me at ana@acme.com for the pricing details', afterAnswer, 'ana@acme.com'],
+      ['ok so ana@acme.com would be the one to use', afterAsk, 'ana@acme.com']
+    ]) assert.equal(extractContactEmail(msg, ctx), email, msg);
+  });
+
+  test('an email that is the subject of a question, ambiguous, or bare as the first message is not', () => {
+    const afterAsk = { recentTurns: [{ role: 'assistant', content: 'Could you share your email so our team can follow up?' }] };
+    const afterAnswer = { recentTurns: [{ role: 'assistant', content: 'Residents pay from the Payments tab.' }] };
+    for (const [msg, ctx] of [
+      ["ana@acme.com isn't getting the OTP", afterAnswer],
+      ["my email ana@acme.com isn't getting the OTP", afterAnswer],
+      ['ana@acme.com', {}],
+      ['my email is ana@acme.com, can you tell me the price?', afterAnswer], // a question: knowledge base (lead saved by tenantChat)
+      ['email me or bob: ana@acme.com, bob@acme.com', afterAsk],
+      ['How do I contact support about billing for ana@acme.com', afterAnswer]
+    ]) assert.equal(extractContactEmail(msg, ctx), null, msg);
+  });
+
+  test('extractStatedEmail finds the visitor\'s own email anywhere in a question, never one they ask about', () => {
+    assert.equal(extractStatedEmail('My work email is Ana@Acme.com — what does the 40-seat plan cost per month?'), 'ana@acme.com');
+    assert.equal(extractStatedEmail("Why can't ana@acme.com log in?"), null);
+    assert.equal(extractStatedEmail('Why does my email ana@acme.com not get the OTP?'), null);
+    assert.equal(extractStatedEmail('contact me at a@x.com or b@x.com'), null);
   });
 
   test('requests for a person are caught; feature questions about chatting are not', () => {

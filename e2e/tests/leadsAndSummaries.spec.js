@@ -56,7 +56,7 @@ test('visitor chats become alerts, session summaries and improvement items', asy
     expect(demo.awaitingContact).toBe(true);
     const captured = await widgetChat(company, { botType: 'sales', query: prospect, sessionId: s.b });
     expect(captured.contactCaptured).toBe(true);
-    const alert = await waitForEmail(company.email, { subject: new RegExp(`New sales lead: ${prospect.replace(/\./g, '\\.')}`) });
+    const alert = await waitForEmail(company.email, { subject: new RegExp(`New Lead Captured from Sales Bot! ${prospect.replace(/\./g, '\\.')}`) });
     expect(alert.replyTo).toEqual([prospect]);
     await waitForEmail(prospect, { subject: /Thanks for reaching out/ }); // and the visitor's own confirmation
   });

@@ -1,6 +1,9 @@
-const { test, describe, before, after, beforeEach } = require('node:test');
+const { test, describe, before, after, beforeEach, mock } = require('node:test');
 const assert = require('node:assert/strict');
 const express = require('express');
+// Before the router (and teamAlerts.js) is required: it destructures sendMail.
+const mailer = require('../../src/services/mailer');
+const sendMailMock = mock.method(mailer, 'sendMail', async () => ({ sent: true, via: 'smtp' }));
 
 // GET /leads and PATCH /leads/:id on the workspace router (the one mounted
 // at /api/v1/client/workspace). Prisma's lead model is an in-memory table
@@ -252,5 +255,31 @@ describe('notifications', () => {
     assert.deepEqual(set.recipients, ['sales@acme.test', 'ops@acme.test']);
     assert.deepEqual((await (await patch('')).json()).recipients, ['owner@acme.test']);
     assert.equal((await patch('nope')).status, 400);
+  });
+
+  test('a lead alert goes to exactly the recipients shown here, replying to the visitor', async () => {
+    const { notifyLeadCaptured, resetAlertThrottle } = require('../../src/services/teamAlerts');
+    const alertTo = async () => {
+      sendMailMock.mock.resetCalls();
+      resetAlertThrottle();
+      const result = await notifyLeadCaptured({
+        tenant: { ...tenant, name: 'Acme', slug: 'acme' },
+        lead: { id: 'l1', botType: 'sales', email: 'ana@x.com', sessionId: null },
+        summary: 'Intent: Wants a quote'
+      });
+      assert.equal(result.sent, true);
+      const mail = sendMailMock.mock.calls[0].arguments[0];
+      assert.equal(mail.replyTo, 'ana@x.com');
+      assert.equal(mail.subject, 'New Lead Captured from Sales Bot! ana@x.com');
+      assert.match(mail.text, /AI summary:\nIntent: Wants a quote/);
+      return mail.to;
+    };
+    const shown = async () => (await (await fetch(`${base}/notifications`)).json()).recipients;
+
+    assert.deepEqual(await alertTo(), await shown()); // the signup email by default
+    assert.deepEqual(await alertTo(), ['owner@acme.test']);
+    await patch('sales@acme.test, ops@acme.test');
+    assert.deepEqual(await alertTo(), await shown());
+    assert.deepEqual(await alertTo(), ['sales@acme.test', 'ops@acme.test']);
   });
 });

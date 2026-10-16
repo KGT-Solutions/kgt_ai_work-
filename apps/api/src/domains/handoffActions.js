@@ -30,6 +30,18 @@ const LEAD_IN = "(?:(?:sure|yes|yeah|yep|ok(?:ay)?|great|perfect|thanks|thank yo
   + "(?:my|our) (?:work |business )?e-?mail(?: address)? is|e-?mail(?: address)?|it'?s|"
   + "(?:you can )?(?:reach|contact|email) (?:me|us) (?:at|on))[\\s,:!.-]*)*";
 const BARE_EMAIL = new RegExp(`^\\s*${LEAD_IN}(${EMAIL})[\\s.!]*(?:(?:thanks|thank you|cheers)[\\s.!]*)?$`, 'i');
+const ANY_EMAIL = new RegExp(EMAIL, 'gi');
+// The visitor says the address is theirs to be contacted on, whatever the
+// wording around it ("it is my email- ana@x.com", "reach me at ana@x.com
+// for a quote"). Without one of these, an email inside a sentence is more
+// likely the subject of a question ("ana@x.com isn't getting the code",
+// "my email ana@x.com isn't getting the OTP" — hence "my email" only with
+// "is", ":" or "-" after it).
+const CONTACT_INTENT = new RegExp('\\b(?:'
+  + '(?:my|our)\\s+(?:work\\s+|business\\s+|personal\\s+)?e-?mail(?:\\s+(?:address|id))?\\s*(?:is\\b|[:=\\-\u2013\u2014])'
+  + '|(?:it|this|that)\\s+is\\s+my\\s+e-?mail|here(?:\'s|\\s+is)\\s+my\\s+e-?mail'
+  + '|e-?mail\\s+(?:me|us)\\b|(?:reach|contact|ping)\\s+(?:me|us)\\b|get\\s+back\\s+to\\s+(?:me|us)\\b|i\\s+can\\s+be\\s+reached\\b'
+  + ')', 'i');
 
 const HUMAN_PATTERNS = [
   // talk / speak / chat / connect + to/with + a person
@@ -64,6 +76,34 @@ function extractBareEmail(query) {
   return email && email.length <= MAX_EMAIL_LEN ? email : null;
 }
 
+// The one email address in a message, or null for none or several (ambiguous).
+function singleEmail(query) {
+  const found = [...new Set((String(query || '').match(ANY_EMAIL) || []).map((e) => e.toLowerCase()))];
+  return found.length === 1 && found[0].length <= MAX_EMAIL_LEN ? found[0] : null;
+}
+
+/**
+ * An email the visitor left for the team to contact them on, in any wording,
+ * when that is all the message does: a bare email, or a short message with
+ * one email and no question when the bot just asked for one or the visitor
+ * says it's theirs. A question that also carries an email goes to the
+ * knowledge base; services/tenantChat.js saves the lead alongside the answer
+ * (extractStatedEmail).
+ */
+function extractContactEmail(query, ctx = {}) {
+  // A bare email as the very first message is more likely a question about that address.
+  const bare = hadBotTurn(ctx) && extractBareEmail(query);
+  if (bare) return bare;
+  if (!isShort(query) || query.includes('?')) return null;
+  const email = singleEmail(query);
+  return email && (offerPending(ctx) || CONTACT_INTENT.test(query)) ? email : null;
+}
+
+/** An email the visitor says is theirs to be contacted on, anywhere in a message of any length (null otherwise). */
+function extractStatedEmail(query) {
+  return CONTACT_INTENT.test(String(query || '')) ? singleEmail(query) : null;
+}
+
 const isHumanRequest = (query) => isShort(query) && HUMAN_PATTERNS.some((re) => re.test(query));
 const isDemoRequest = (query) => isShort(query) && DEMO_PATTERNS.some((re) => re.test(query));
 
@@ -89,11 +129,9 @@ async function handleRequest(kind, query, ctx, profile) {
 }
 
 registerAction('handoff.contact', {
-  // Only after the bot has said something: an email as the very first
-  // message is more likely a question about that address.
-  match: (query, ctx) => hadBotTurn(ctx) && !!extractBareEmail(query),
+  match: (query, ctx) => !!extractContactEmail(query, ctx),
   run: async (query, ctx, profile) => {
-    const email = extractBareEmail(query);
+    const email = extractContactEmail(query, ctx);
     const attached = await attachContact({ ctx, contactEmail: email });
     if (!attached && profile.ticketing) {
       // No open ticket yet (e.g. after a "could you tell me more?" reply):
@@ -137,4 +175,4 @@ registerAction('handoff.demo', {
 require('./smallTalk'); // registers 'smalltalk'
 const HANDOFF_ACTIONS = ['handoff.contact', 'handoff.reply', 'smalltalk', 'handoff.human', 'handoff.demo'];
 
-module.exports = { HANDOFF_ACTIONS, extractBareEmail, isHumanRequest, isDemoRequest };
+module.exports = { HANDOFF_ACTIONS, extractBareEmail, extractContactEmail, extractStatedEmail, isHumanRequest, isDemoRequest };

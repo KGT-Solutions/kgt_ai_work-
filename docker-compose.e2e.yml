@@ -62,6 +62,8 @@ services:
       DATABASE_URL: postgresql://kgt:kgt@e2e-postgres:5432/kgt_e2e_test?schema=public
       PGHOST: e2e-postgres
       POSTGRES_USER: kgt
+      # docker-entrypoint.sh builds DATABASE_URL from these three (default password "kgthub").
+      POSTGRES_PASSWORD: kgt
       POSTGRES_DB: kgt_e2e_test
       PORT: 4000
       JWT_SECRET: e2e-only-jwt-secret-not-for-production

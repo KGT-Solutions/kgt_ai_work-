@@ -10,6 +10,14 @@ process.env.LEAD_MAIL_RETRY_DELAYS_MS = '0,0'; // retries without the real 5s/30
 // Production's 24h cooldown unless a test says otherwise ('cooldown override' below).
 process.env.LEAD_CONFIRMATION_COOLDOWN_HOURS = '24';
 const mailer = require('../../src/services/mailer');
+// The real mailer, for the one test that goes all the way to the SMTP
+// transport; nodemailer's transport is a fake, so nothing leaves the process.
+const realSendMail = mailer.sendMail;
+const smtpSent = [];
+mock.method(require('nodemailer'), 'createTransport', () => ({
+  sendMail: async (msg) => { smtpSent.push(msg); return { messageId: `m${smtpSent.length}` }; },
+  close: () => {}
+}));
 const sendMailMock = mock.method(mailer, 'sendMail', async () => ({ sent: true, via: 'dev-log' }));
 const llmClient = require('../../src/engine/llmClient');
 mock.method(llmClient, 'isLlmConfigured', () => true);
@@ -24,6 +32,7 @@ const {
 } = require('../../src/services/leads');
 const { runTenantChat } = require('../../src/services/tenantChat');
 const { resetAlertThrottle } = require('../../src/services/teamAlerts');
+const { invalidateTenantKnowledge } = require('../../src/domains/tenantProfile');
 
 const TENANT = {
   id: 'tenant-l', slug: 'acme', name: 'Acme <Labs>', industryLabel: 'Property management', persona: null,
@@ -93,6 +102,8 @@ beforeEach(() => {
     return { count: data.length };
   };
   prisma.tenantFaq.findUnique = async () => null;
+  prisma.tenantDocument.findMany = async () => []; // no knowledge base unless a test adds one
+  invalidateTenantKnowledge(TENANT.id);
   prisma.supportTicket.create = async ({ data }) => { const t = { id: `t${tickets.length + 1}`, ...data }; tickets.push(t); return t; };
   prisma.supportTicket.findFirst = async ({ where }) => tickets.find((t) => matches(t, where)) || null;
   prisma.supportTicket.update = async ({ where, data }) => Object.assign(tickets.find((t) => t.id === where.id), data);
@@ -100,17 +111,17 @@ beforeEach(() => {
 });
 
 describe('confirmation email', () => {
-  test('each bot sends its own wording, naming the company; the name is escaped in the HTML', () => {
+  test('both bots confirm the request is registered with the company, in their own subject and voice; the name is escaped in the HTML', () => {
     const sales = confirmationEmail({ tenant: TENANT, botType: 'sales' });
     const support = confirmationEmail({ tenant: TENANT, botType: 'support' });
-    assert.match(sales.text, /Thank you for reaching out to Acme <Labs>/);
-    assert.match(sales.text, /inquiry has been logged/);
-    assert.match(sales.text, /team member will contact you shortly/);
-    assert.match(support.text, /Thank you for contacting Acme <Labs> support/);
-    assert.match(support.text, /request has been registered/);
-    assert.match(support.text, /follow up with you shortly/);
-    assert.doesNotMatch(support.text, /inquiry has been logged/);
+    const registered = "We've received your request! Your inquiry has been registered with Acme <Labs>, and our team will follow up with you shortly.";
+    for (const mail of [sales, support]) assert.ok(mail.text.includes(registered), mail.subject);
+    assert.equal(sales.subject, 'Thanks for reaching out to Acme <Labs>!');
+    assert.match(sales.text, /looking forward to speaking with you/);
+    assert.equal(support.subject, 'Acme <Labs> Support: your request is registered');
+    assert.match(support.text, /nothing else you need to do/);
     for (const mail of [sales, support]) {
+      assert.ok(mail.html.includes("We've received your request! Your inquiry has been registered with Acme &lt;Labs&gt;".replace("'", '&#39;')));
       assert.match(mail.html, /Acme &lt;Labs&gt;/);
       assert.doesNotMatch(mail.html, /Acme <Labs>/);
     }
@@ -142,7 +153,7 @@ describe('recap of the bot\'s answers', () => {
   test('with no answers to recap, the email is the plain confirmation', () => {
     const mail = confirmationEmail({ tenant: TENANT, botType: 'support', recap: [] });
     assert.doesNotMatch(mail.text, /what we went through/);
-    assert.match(mail.text, /request has been registered/);
+    assert.match(mail.text, /Your inquiry has been registered with Acme <Labs>/);
   });
 
   test('the legacy CHAT_ALERT_EMAIL is ignored: with no team address on file, only the visitor is emailed', async () => {
@@ -159,22 +170,44 @@ describe('recap of the bot\'s answers', () => {
     }
   });
 
-  test("the tenant's team gets a lead alert that replies straight to the visitor; only for a new lead", async () => {
+  test("the tenant's team gets a lead alert with the AI summary that replies straight to the visitor; only for a new lead", async () => {
     chat();
     const tenant = { ...TENANT, teamEmail: 'team@acme.test' };
+    const before = Date.now();
     await captureLead({ tenant, botType: 'sales', sessionId: 's1', email: 'ana@x.com' });
     await waitForBackground();
     const alert = sendMailMock.mock.calls.map((c) => c.arguments[0]).find((m) => m.label?.startsWith('lead alert'));
     assert.ok(alert, 'a lead alert was sent');
     assert.deepEqual(alert.to, ['team@acme.test']);
     assert.equal(alert.replyTo, 'ana@x.com');
-    assert.match(alert.subject, /New sales lead: ana@x\.com/);
+    assert.equal(alert.subject, 'New Lead Captured from Sales Bot! ana@x.com');
+    assert.match(alert.text, /^New Lead Captured from Sales Bot!\n/);
+    assert.match(alert.text, /^Email: ana@x\.com$/m);
+    const time = /^Time: (.+)$/m.exec(alert.text)?.[1];
+    assert.ok(time && Date.parse(time) >= Math.floor(before / 1000) * 1000, `a capture timestamp (${time})`);
+    // The summary written at capture, in both parts, after which the alert went out.
+    assert.match(alert.text, /AI summary:\nIntent: Wants pricing for 40 seats\nKey questions:\n• Is there a discount\?/);
+    assert.match(alert.html, /AI summary<\/p>[\s\S]*Intent: Wants pricing for 40 seats<br>Key questions:/);
+    assert.doesNotMatch(alert.text, /summary of the conversation will be on the Leads/);
     assert.match(alert.html, /Acme &lt;Labs&gt;/); // tenant name escaped
 
     sendMailMock.mock.resetCalls();
     await captureLead({ tenant, botType: 'sales', sessionId: 's1', email: 'ana@x.com' });
     await waitForBackground();
     assert.equal(sendMailMock.mock.calls.filter((c) => c.arguments[0].label?.startsWith('lead alert')).length, 0);
+  });
+
+  test('a failed summary never holds up or loses the alert: it goes out without one, pointing to the dashboard', async () => {
+    chat();
+    generateAnswerMock.mock.mockImplementationOnce(async () => { throw new Error('LLM down'); }, 0);
+    await captureLead({ tenant: { ...TENANT, teamEmail: 'team@acme.test' }, botType: 'support', sessionId: 's1', email: 'ana@x.com' });
+    await waitForBackground();
+    const alert = sendMailMock.mock.calls.map((c) => c.arguments[0]).find((m) => m.label?.startsWith('lead alert'));
+    assert.ok(alert, 'a lead alert was sent');
+    assert.equal(alert.subject, 'New Lead Captured from Support Bot! ana@x.com');
+    assert.doesNotMatch(alert.text, /AI summary:/);
+    assert.match(alert.text, /AI summary of the conversation will be on the Leads & Summaries page shortly/);
+    assert.equal(leads[0].summaryStatus, 'failed');
   });
 
   test('alertTeam: false (the dashboard sandbox) sends no team alert', async () => {
@@ -193,7 +226,7 @@ describe('captureLead', () => {
     assert.equal(leads.length, 1);
     assert.equal(sendMailMock.mock.callCount(), 1);
     assert.equal(sendMailMock.mock.calls[0].arguments[0].to, 'ana@x.com');
-    assert.match(sendMailMock.mock.calls[0].arguments[0].text, /inquiry has been logged/);
+    assert.match(sendMailMock.mock.calls[0].arguments[0].text, /We've received your request! Your inquiry has been registered with Acme <Labs>/);
     assert.ok(leads[0].confirmationSentAt instanceof Date);
 
     await captureLead({ tenant: TENANT, botType: 'sales', sessionId: 's1', email: 'ana@x.com' });
@@ -431,6 +464,108 @@ describe('through runTenantChat', () => {
     await runTenantChat({ tenant: { ...TENANT, teamEmail: 'team@acme.test' }, body: { query: 'Can I talk to a real person?' }, sandbox: true });
     await waitForBackground();
     assert.equal(sendMailMock.mock.callCount(), 0);
+  });
+
+  test('a visitor who leaves their email in their own words becomes a lead on either bot; the visitor and the team are both emailed', async () => {
+    const tenant = { ...TENANT, teamEmail: 'team@acme.test' };
+    for (const [botType, email] of [['sales', 'ana@x.com'], ['support', 'bo@x.com']]) {
+      sendMailMock.mock.resetCalls();
+      const sessionId = `s-${botType}`;
+      sessions.push({ id: sessionId, tenantId: TENANT.id });
+      messages.push(
+        { sessionId, role: 'user', content: 'Do you manage gated communities?', botType, createdAt: new Date(1) },
+        { sessionId, role: 'assistant', content: 'Yes, we manage over 40 gated communities in Pune.', botType, answered: true, createdAt: new Date(2) }
+      );
+      // The wording a real visitor used, which used to be acknowledged without a lead.
+      const reply = await runTenantChat({ tenant, body: { query: `it is my email- ${email.toUpperCase()}`, botType, sessionId } });
+      await waitForBackground();
+
+      assert.equal(reply.contactCaptured, true, botType);
+      const lead = leads.find((l) => l.sessionId === sessionId);
+      assert.deepEqual({ email: lead?.email, botType: lead?.botType }, { email, botType });
+      const mails = sendMailMock.mock.calls.map((c) => c.arguments[0]);
+      const confirmation = mails.find((m) => m.to === email);
+      assert.ok(confirmation, `${botType}: the visitor got a confirmation`);
+      assert.ok(lead.confirmationSentAt, `${botType}: the confirmation is recorded on the lead`);
+      const alert = mails.find((m) => m.label?.startsWith('lead alert'));
+      assert.ok(alert, `${botType}: the team got a lead alert`);
+      assert.deepEqual(alert.to, ['team@acme.test']);
+      assert.equal(alert.replyTo, email);
+      assert.match(alert.text, new RegExp(`it is my email- ${email.toUpperCase().replace(/\./g, '\\.')}`), 'the alert quotes the chat');
+    }
+  });
+
+  test('an email stated in a question is saved as a lead, and the question is still answered', async () => {
+    prisma.tenantDocument.findMany = async () => [
+      { title: 'Pricing', category: 'Pricing', content: '## Pro plan\n\nThe Pro plan costs 2499 rupees per month and covers 40 flats.' }
+    ];
+    generateAnswerMock.mock.mockImplementationOnce(async () => ({
+      text: 'The Pro plan costs 2499 rupees per month.', provider: 'mock', model: 'mock-1', usage: { promptTokens: 1, completionTokens: 1 }
+    }), 0);
+    const reply = await runTenantChat({
+      tenant: { ...TENANT, teamEmail: 'team@acme.test' },
+      body: { query: 'My work email is ana@x.com, how much does the Pro plan cost per month?', botType: 'sales' }
+    });
+    await waitForBackground();
+
+    assert.match(reply.answer, /2499 rupees per month/);
+    assert.equal(leads.length, 1);
+    assert.deepEqual({ email: leads[0].email, botType: leads[0].botType }, { email: 'ana@x.com', botType: 'sales' });
+    const mails = sendMailMock.mock.calls.map((c) => c.arguments[0]);
+    assert.ok(mails.some((m) => m.to === 'ana@x.com'), 'visitor confirmation');
+    assert.ok(mails.some((m) => m.label?.startsWith('lead alert')), 'team lead alert');
+  });
+
+  test('over SMTP: the visitor and the team each get their email from connect@kgt.solutions, the team\'s replying to the visitor', async () => {
+    const SMTP = {
+      SMTP_HOST: 'smtp.office365.com', SMTP_PORT: '587', SMTP_USER: 'connect@kgt.solutions', SMTP_PASS: 'not-a-real-password',
+      SMTP_FROM: 'KGT Solutions <connect@kgt.solutions>'
+    };
+    const saved = Object.fromEntries(Object.keys(SMTP).map((k) => [k, process.env[k]]));
+    Object.assign(process.env, SMTP);
+    sendMailMock.mock.mockImplementation(realSendMail);
+    smtpSent.length = 0;
+    try {
+      sessions.push({ id: 's1', tenantId: TENANT.id });
+      messages.push(
+        { sessionId: 's1', role: 'user', content: 'What plans do you have?', botType: 'sales', createdAt: new Date(1) },
+        { sessionId: 's1', role: 'assistant', content: 'Starter and Pro.', botType: 'sales', answered: true, createdAt: new Date(2) }
+      );
+      await runTenantChat({ tenant: { ...TENANT, teamEmail: 'team@acme.test' }, body: { query: 'my email is ana@x.com', botType: 'sales', sessionId: 's1' } });
+      await waitForBackground();
+
+      assert.equal(smtpSent.length, 2, smtpSent.map((m) => m.subject).join(' | '));
+      const visitor = smtpSent.find((m) => m.to.includes('ana@x.com'));
+      const team = smtpSent.find((m) => m.to.includes('team@acme.test'));
+      for (const mail of [visitor, team]) assert.equal(mail?.from, 'KGT Solutions <connect@kgt.solutions>');
+
+      assert.deepEqual(visitor.to, ['ana@x.com']);
+      assert.equal('replyTo' in visitor, false);
+      assert.equal(visitor.subject, 'Thanks for reaching out to Acme <Labs>!');
+      assert.match(visitor.text, /We've received your request! Your inquiry has been registered with Acme <Labs>, and our team will follow up with you shortly\./);
+      assert.match(visitor.text, /recap of what we covered[\s\S]*Starter and Pro\./); // what they discussed: the bot's own answers
+      assert.ok(visitor.html);
+
+      assert.deepEqual(team.to, ['team@acme.test']);
+      assert.equal(team.replyTo, 'ana@x.com');
+      assert.equal(team.subject, 'New Lead Captured from Sales Bot! ana@x.com');
+      assert.match(team.text, /^Email: ana@x\.com$/m);
+      assert.match(team.text, /^Time: .+GMT$/m);
+      assert.match(team.text, /AI summary:\nIntent: Wants pricing for 40 seats/);
+      assert.ok(leads[0].confirmationSentAt instanceof Date, 'a real SMTP delivery starts the cooldown');
+    } finally {
+      sendMailMock.mock.mockImplementation(async () => ({ sent: true, via: 'dev-log' }));
+      for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  });
+
+  test('an email the visitor asks about is not a lead, and is never emailed', async () => {
+    sessions.push({ id: 's1', tenantId: TENANT.id });
+    messages.push({ sessionId: 's1', role: 'assistant', content: 'Hi! How can I help?', botType: 'support', createdAt: new Date(1) });
+    await runTenantChat({ tenant: TENANT, body: { query: "my email ana@x.com isn't getting the OTP", botType: 'support', sessionId: 's1' } });
+    await waitForBackground();
+    assert.equal(leads.length, 0);
+    assert.ok(!sendMailMock.mock.calls.some((c) => c.arguments[0].to === 'ana@x.com'));
   });
 
   test('an ordinary question creates no lead', async () => {

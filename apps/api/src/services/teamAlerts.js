@@ -98,13 +98,15 @@ function dashboardLink(view, sessionId) {
   return `${base}/dashboard/leads${qs ? `?${qs}` : ''}`;
 }
 
-// Internal email: a plain, scannable layout. rows: [label, value]; transcript: [{ role, content }].
-function alertEmail({ tenant, subject, heading, intro, rows, transcript, view, sessionId }) {
+// Internal email: a plain, scannable layout. rows: [label, value]; transcript: [{ role, content }];
+// summary: the AI conversation summary (plain text, one item per line), when there is one.
+function alertEmail({ tenant, subject, heading, intro, rows, transcript, summary, view, sessionId }) {
   const link = dashboardLink(view, sessionId);
   const lines = transcript.map((m) => `${m.role === 'user' ? 'Visitor' : 'Bot'}: ${clip(m.content)}`);
   const text = [
     heading, '', intro, '',
     ...rows.map(([k, v]) => `${k}: ${v}`),
+    ...(summary ? ['', 'AI summary:', summary] : []),
     ...(lines.length ? ['', 'Latest messages:', ...lines] : []),
     ...(link ? ['', `Open in the dashboard: ${link}`] : []),
     '', `-- KGT AI Hub alert for ${tenant.name}`
@@ -118,6 +120,8 @@ function alertEmail({ tenant, subject, heading, intro, rows, transcript, view, s
 <table role="presentation" cellspacing="0" cellpadding="0">${rows.map(([k, v]) =>
     `<tr><td style="${td}color:#64748b;padding-right:14px;white-space:nowrap;">${escapeHtml(k)}</td><td style="${td}color:#0f172a;">${escapeHtml(v)}</td></tr>`).join('')}</table>
 </td></tr>
+${summary ? `<tr><td style="padding:8px 28px 4px;"><p style="margin:0 0 8px;font-size:12px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:#64748b;">AI summary</p>
+<p style="margin:0;padding:10px 14px;border-left:3px solid #22d3ee;border-radius:6px;background:#f8fafc;font-size:14px;line-height:1.6;color:#0f172a;">${escapeHtml(summary).replace(/\n/g, '<br>')}</p></td></tr>` : ''}
 ${lines.length ? `<tr><td style="padding:8px 28px 4px;"><p style="margin:0 0 8px;font-size:12px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:#64748b;">Latest messages</p>
 ${transcript.map((m) => `<p style="margin:0 0 8px;padding:8px 12px;border-radius:8px;font-size:13px;line-height:1.5;white-space:pre-line;${m.role === 'user' ? 'background:#ecfeff;color:#0f172a;' : 'background:#f8fafc;color:#334155;'}"><strong>${m.role === 'user' ? 'Visitor' : 'Bot'}:</strong> ${escapeHtml(clip(m.content))}</p>`).join('')}</td></tr>` : ''}
 ${link ? `<tr><td style="padding:10px 28px 4px;"><a href="${escapeHtml(link)}" style="display:inline-block;padding:9px 16px;border-radius:8px;background:#0f172a;color:#ffffff;font-size:14px;text-decoration:none;">Open in the dashboard</a></td></tr>` : ''}
@@ -150,9 +154,10 @@ async function send({ tenant, kind, mail, replyTo, now }) {
 /**
  * A visitor left their email. The alert's Reply-To is the visitor, so the
  * team can answer straight from their inbox. Never throws.
- * @param {{ tenant: object, lead: { id, botType, email, sessionId } }} params
+ * @param {{ tenant: object, lead: { id, botType, email, sessionId }, summary?: string|null }} params
+ *   summary: the AI conversation summary (services/leads.js waits for it, briefly)
  */
-async function notifyLeadCaptured({ tenant, lead }) {
+async function notifyLeadCaptured({ tenant, lead, summary = null }) {
   try {
     if (!alertsEnabled()) return { sent: false, reason: 'disabled' };
     const now = Date.now();
@@ -164,12 +169,14 @@ async function notifyLeadCaptured({ tenant, lead }) {
     const transcript = await recentTranscript(tenant.id, lead.sessionId);
     const mail = alertEmail({
       tenant,
-      subject: `New ${bot.toLowerCase()} lead: ${lead.email}`,
-      heading: 'New lead from your website chat',
-      intro: `A visitor shared their email with your ${bot} bot. Reply to this email to reach them directly. ` +
-        'An AI summary of the conversation will be on the Leads & Summaries page in a minute.',
-      rows: [['Email', lead.email], ['Bot', bot], ['Session', lead.sessionId || '—'], ['Time', new Date(now).toUTCString()]],
+      // The visitor's address stays in the subject, so each lead is its own thread in the inbox.
+      subject: `New Lead Captured from ${bot} Bot! ${lead.email}`,
+      heading: `New Lead Captured from ${bot} Bot!`,
+      intro: `A visitor shared their email with your ${bot} bot. Reply to this email to reach them directly.` +
+        (summary ? '' : ' The AI summary of the conversation will be on the Leads & Summaries page shortly.'),
+      rows: [['Email', lead.email], ['Bot', bot], ['Time', new Date(now).toUTCString()], ['Session', lead.sessionId || '—']],
       transcript,
+      summary,
       view: 'leads'
     });
     return await send({ tenant, kind: 'lead alert', mail, replyTo: lead.email, now });

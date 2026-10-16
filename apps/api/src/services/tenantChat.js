@@ -6,6 +6,7 @@ const { pickFollowUps } = require('./followUps');
 const { trackLeadActivity } = require('./leads');
 const { recordTurn } = require('./chatSessions');
 const { notifyIfNeedsAttention } = require('./teamAlerts');
+const { extractStatedEmail } = require('../domains/handoffActions');
 
 // One chat turn for one tenant. Shared by every way a tenant's bots are
 // reached — the embed widget (API key), the client dashboard (client JWT)
@@ -121,10 +122,12 @@ async function runTenantChat({ tenant, body, sandbox = false }) {
   await recordTurn({ session, botType });
   // Team alerts are for real visitors, not the team testing its own bots.
   const alertTeam = !sandbox;
-  await trackLeadActivity({
-    tenant, botType, sessionId: session.id, contactEmail: reply.contactCaptured ? contactEmail : null, alertTeam
-  });
-  // A handoff or an answer below 50% confidence: tell the team now (throttled; not awaited).
+  // The email the handoff action took, or one stated in a message that went
+  // to the knowledge base ("my email is ana@x.com — what's the price for 40
+  // seats?"): the question is answered and the lead saved either way.
+  const leadEmail = reply.contactCaptured ? contactEmail : extractStatedEmail(query);
+  await trackLeadActivity({ tenant, botType, sessionId: session.id, contactEmail: leadEmail, alertTeam });
+  // A handoff or an answer below 25% confidence: tell the team now (throttled; not awaited).
   if (alertTeam) notifyIfNeedsAttention({ tenant, botType, sessionId: session.id, query, result });
 
   // No suggested questions while the bot is waiting for an email: the reply
