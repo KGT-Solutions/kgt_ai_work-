@@ -261,7 +261,7 @@ describe('notifications', () => {
     const { notifyLeadCaptured, resetAlertThrottle } = require('../../src/services/teamAlerts');
     const alertTo = async () => {
       sendMailMock.mock.resetCalls();
-      resetAlertThrottle();
+      await resetAlertThrottle();
       const result = await notifyLeadCaptured({
         tenant: { ...tenant, name: 'Acme', slug: 'acme' },
         lead: { id: 'l1', botType: 'sales', email: 'ana@x.com', sessionId: null },

@@ -237,6 +237,12 @@ model ChatSession {
   summary        String?
   summaryStatus  String    @default("none") // none | pending | ready | failed
   summarizedAt   DateTime? // when the last attempt finished; older than lastMessageAt = stale
+  // Lease taken when an API instance starts writing this conversation's
+  // summary. The claim is what stops two instances paying for the same
+  // summary twice (services/chatSessions.js); a claim older than
+  // SESSION_SUMMARY_LEASE_MIN means the holder died mid-run, so the
+  // conversation becomes claimable again instead of being stuck pending.
+  summaryClaimedAt DateTime?
   messages       ChatMessage[]
 
   @@index([tenantId])

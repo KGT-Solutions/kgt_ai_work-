@@ -18,7 +18,7 @@ const { answerCache } = require('../engine/answerCache');
 const { ingestUpload, FileIngestError, MAX_UPLOAD_BYTES } = require('../services/shared/fileIngest');
 const { documentChunks } = require('../domains/tenantProfile');
 const { auditTenant, tenantReadiness } = require('../services/botAuditor');
-const { runSessionSummary } = require('../services/chatSessions');
+const { runSessionSummary, claimSession } = require('../services/chatSessions');
 const { teamRecipients, parseTeamEmail, lowConfidenceBelow } = require('../services/teamAlerts');
 
 // Everything one tenant can do with its own bots: documents, PDF upload,
@@ -42,11 +42,11 @@ const MAX_CONTENT_LEN = 20000;
 const MAX_DOCUMENTS_PER_TENANT = 500;
 
 // Website imports from client dashboards: a few per hour per tenant.
-const isClientCrawlLimited = createIpRateLimiter({ max: 5, windowMs: 60 * 60 * 1000 });
+const isClientCrawlLimited = createIpRateLimiter({ name: 'workspace-crawl', max: 5, windowMs: 60 * 60 * 1000 });
 // Manual starter-FAQ refreshes: each one is an LLM call, so a few per hour per tenant.
-const isFaqRegenLimited = createIpRateLimiter({ max: 5, windowMs: 60 * 60 * 1000 });
+const isFaqRegenLimited = createIpRateLimiter({ name: 'workspace-faq-regen', max: 5, windowMs: 60 * 60 * 1000 });
 // Readiness audits: each is an LLM call billed to the tenant.
-const isAuditLimited = createIpRateLimiter({ max: 6, windowMs: 60 * 60 * 1000 });
+const isAuditLimited = createIpRateLimiter({ name: 'workspace-audit', max: 6, windowMs: 60 * 60 * 1000 });
 
 // ── PDF upload (same parser and 10MB limit as the signup wizard)
 const MAX_PDF_BYTES = 10 * 1024 * 1024;
@@ -108,7 +108,7 @@ router.post('/documents', async (req, res) => {
     data: { tenantId: req.tenant.id, title, content, category: category.value, botScope: botScope.value },
     select: DOC_FIELDS
   });
-  invalidateTenantKnowledge(req.tenant.id); // next chat request re-reads from the DB
+  await invalidateTenantKnowledge(req.tenant.id); // next chat request re-reads from the DB
   res.status(201).json(doc);
 });
 
@@ -150,7 +150,7 @@ router.post('/documents/file', (req, res, next) => fileUpload.single('file')(req
     botScope: botScope.value
   }));
   await prisma.tenantDocument.createMany({ data: docs });
-  invalidateTenantKnowledge(req.tenant.id);
+  await invalidateTenantKnowledge(req.tenant.id);
   scheduleFaqGeneration(req.tenant.id);
   res.status(201).json({ fileName: req.file.originalname, documentsCreated: docs.length, files: parsed.files });
 });
@@ -179,7 +179,7 @@ router.post('/documents/pdf', pdfUploadMiddleware, async (req, res) => {
     category: chosen ? chosen.value : suggestCategory({ title: p.title, markdown: p.markdown, source: 'pdf' })
   }));
   await prisma.tenantDocument.createMany({ data: docs });
-  invalidateTenantKnowledge(req.tenant.id);
+  await invalidateTenantKnowledge(req.tenant.id);
   scheduleFaqGeneration(req.tenant.id); // new content -> fresh sandbox starter questions
 
   res.status(201).json({
@@ -222,7 +222,7 @@ router.patch('/documents/:documentId', async (req, res) => {
   if (!Object.keys(data).length) return res.status(400).json({ error: 'Nothing to update' });
 
   const updated = await prisma.tenantDocument.update({ where: { id: existing.id }, data, select: DOC_FIELDS });
-  invalidateTenantKnowledge(req.tenant.id); // an edited chunk must be re-read on the very next chat request
+  await invalidateTenantKnowledge(req.tenant.id); // an edited chunk must be re-read on the very next chat request
   res.json(updated);
 });
 
@@ -231,7 +231,7 @@ router.delete('/documents/:documentId', async (req, res) => {
     where: { id: req.params.documentId, tenantId: req.tenant.id }
   });
   if (!count) return res.status(404).json({ error: 'Document not found' });
-  invalidateTenantKnowledge(req.tenant.id); // a deleted chunk must stop being retrievable immediately
+  await invalidateTenantKnowledge(req.tenant.id); // a deleted chunk must stop being retrievable immediately
   res.status(204).end();
 });
 
@@ -248,7 +248,7 @@ router.post('/scrape', async (req, res) => {
     if (req.body?.authorized !== true) {
       return res.status(400).json({ error: 'You must confirm you are authorized to let us crawl this domain' });
     }
-    if (isClientCrawlLimited(req.tenant.id)) {
+    if (await isClientCrawlLimited(req.tenant.id)) {
       return res.status(429).json({ error: 'Too many website imports. Please try again in an hour.' });
     }
   }
@@ -280,7 +280,7 @@ router.post('/scrape', async (req, res) => {
       select: { id: true, title: true, sourceUrl: true, category: true }
     })));
   });
-  invalidateTenantKnowledge(req.tenant.id);
+  await invalidateTenantKnowledge(req.tenant.id);
   scheduleFaqGeneration(req.tenant.id);
 
   res.status(201).json({
@@ -326,7 +326,7 @@ router.post('/faqs/regenerate', async (req, res) => {
   if (!(await prisma.tenantDocument.count({ where: { tenantId: req.tenant.id } }))) {
     return res.status(409).json({ error: 'Add a document or import a website first — questions are written from your content.' });
   }
-  if (isFaqRegenLimited(req.tenant.id)) {
+  if (await isFaqRegenLimited(req.tenant.id)) {
     return res.status(429).json({ error: 'Suggested questions were refreshed several times recently. Please try again in an hour.' });
   }
   scheduleFaqGeneration(req.tenant.id);
@@ -341,7 +341,7 @@ router.post('/preflight-audit', async (req, res) => {
   if (!(await prisma.tenantDocument.count({ where: { tenantId: req.tenant.id } }))) {
     return res.status(409).json({ error: 'Add a document or import a website first — the audit reads your content.' });
   }
-  if (isAuditLimited(req.tenant.id)) {
+  if (await isAuditLimited(req.tenant.id)) {
     return res.status(429).json({ error: 'The readiness audit ran several times recently. Please try again in an hour.' });
   }
   res.json(await auditTenant(req.tenant.id));
@@ -383,7 +383,7 @@ router.patch('/bot-preference', async (req, res) => {
   const updated = await prisma.tenant.update({
     where: { id: req.tenant.id }, data: { botPreference: botPreference.value }, select: { botPreference: true }
   });
-  answerCache.invalidateTenant(req.tenant.id);
+  await answerCache.invalidateTenant(req.tenant.id);
   res.json(updated);
 });
 
@@ -508,7 +508,7 @@ const SESSION_FIELDS = {
   id: true, externalUserId: true, botType: true, startedAt: true, lastMessageAt: true, messageCount: true,
   endedAt: true, summary: true, summaryStatus: true, summarizedAt: true
 };
-const isSummarizeLimited = createIpRateLimiter({ max: 20, windowMs: 60 * 60 * 1000 });
+const isSummarizeLimited = createIpRateLimiter({ name: 'workspace-summarize', max: 20, windowMs: 60 * 60 * 1000 });
 
 async function leadsBySession(tenantId, sessionIds) {
   if (!sessionIds.length) return new Map();
@@ -650,8 +650,11 @@ router.get('/improvements', async (req, res) => {
 router.post('/sessions/:sessionId/summarize', async (req, res) => {
   const session = await prisma.chatSession.findFirst({ where: { id: req.params.sessionId, tenantId: req.tenant.id }, select: { id: true } });
   if (!session) return res.status(404).json({ error: 'Session not found' });
-  if (isSummarizeLimited(req.tenant.id)) return res.status(429).json({ error: 'Too many summary requests. Try again later.' });
-  await prisma.chatSession.update({ where: { id: session.id }, data: { summaryStatus: 'pending' } });
+  if (await isSummarizeLimited(req.tenant.id)) return res.status(429).json({ error: 'Too many summary requests. Try again later.' });
+  // force: someone clicked "Rewrite" and is waiting for a new summary, so this
+  // takes the claim even if a background sweep holds a live lease on it
+  // (services/chatSessions.js).
+  await claimSession(session.id, { force: true });
   runSessionSummary(session.id);
   res.status(202).json({ id: session.id, summaryStatus: 'pending' });
 });

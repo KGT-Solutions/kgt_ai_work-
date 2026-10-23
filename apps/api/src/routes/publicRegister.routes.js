@@ -37,14 +37,14 @@ const {
 // so an edit made in Step 2 is exactly what gets trained on.
 const router = express.Router();
 
-const isAnalyzeRateLimited = createIpRateLimiter({ max: 8, windowMs: 10 * 60 * 1000 });
+const isAnalyzeRateLimited = createIpRateLimiter({ name: 'register-analyze', max: 8, windowMs: 10 * 60 * 1000 });
 // Signups per IP per hour. Every attempt counts, including rejected ones, so
 // the endpoint can't be used to probe which emails already have accounts.
-const isCompleteRateLimited = createIpRateLimiter({ max: Number(process.env.SIGNUP_RATE_LIMIT_MAX) || 3, windowMs: 60 * 60 * 1000 });
-const isPdfRateLimited = createIpRateLimiter({ max: 10, windowMs: 10 * 60 * 1000 });
+const isCompleteRateLimited = createIpRateLimiter({ name: 'register-complete', max: Number(process.env.SIGNUP_RATE_LIMIT_MAX) || 3, windowMs: 60 * 60 * 1000 });
+const isPdfRateLimited = createIpRateLimiter({ name: 'register-upload', max: 10, windowMs: 10 * 60 * 1000 });
 // Each readiness check is an LLM call paid by us, on a public route. The wizard
 // re-checks after every upload on its Training screen, hence room for a dozen.
-const isAuditRateLimited = createIpRateLimiter({ max: Number(process.env.PREFLIGHT_AUDIT_RATE_LIMIT_MAX) || 12, windowMs: 10 * 60 * 1000 });
+const isAuditRateLimited = createIpRateLimiter({ name: 'register-audit', max: Number(process.env.PREFLIGHT_AUDIT_RATE_LIMIT_MAX) || 12, windowMs: 10 * 60 * 1000 });
 
 // Room for a full crawl (crawler.js MAX_PAGES = 12) plus several uploaded
 // documents: the wizard lets a company combine both sources.
@@ -67,8 +67,8 @@ const pdfUpload = multer({
   }
 });
 
-function pdfUploadMiddleware(req, res, next) {
-  if (isPdfRateLimited(req.ip)) {
+async function pdfUploadMiddleware(req, res, next) {
+  if (await isPdfRateLimited(req.ip)) {
     return res.status(429).json({ error: 'Too many uploads from this address. Please wait a few minutes and try again.' });
   }
   pdfUpload.single('file')(req, res, (err) => {
@@ -134,7 +134,7 @@ function normalizePages(rawPages) {
 // unauthenticated route, so it's rate-limited per IP; the report is kept
 // briefly by content hash so /complete can store it without auditing again.
 router.post('/preflight-audit', async (req, res) => {
-  if (isAuditRateLimited(req.ip)) {
+  if (await isAuditRateLimited(req.ip)) {
     return res.status(429).json({ error: 'Too many readiness checks from this address. Please wait a few minutes and try again.' });
   }
   const normalized = normalizePages(req.body?.pages);
@@ -149,12 +149,12 @@ router.post('/preflight-audit', async (req, res) => {
   const botPreference = parseBotPreference(req.body?.botPreference);
   if (!botPreference.ok) return res.status(400).json({ error: botPreference.error });
   const report = await auditKnowledge({ company, documents: normalized.pages, botPreference: botPreference.value });
-  rememberWizardAudit(report);
+  await rememberWizardAudit(report);
   res.json(report);
 });
 
 router.post('/analyze', async (req, res) => {
-  if (isAnalyzeRateLimited(req.ip)) {
+  if (await isAnalyzeRateLimited(req.ip)) {
     return res.status(429).json({ error: 'Too many analysis requests from this address. Please wait a few minutes and try again.' });
   }
 
@@ -220,8 +220,8 @@ router.post('/analyze-pdf', pdfUploadMiddleware, async (req, res) => {
 // files[] says what happened to each file (inside a zip, some may be skipped).
 const fileUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_UPLOAD_BYTES, files: 1, fields: 0 } });
 
-function fileUploadMiddleware(req, res, next) {
-  if (isPdfRateLimited(req.ip)) {
+async function fileUploadMiddleware(req, res, next) {
+  if (await isPdfRateLimited(req.ip)) {
     return res.status(429).json({ error: 'Too many uploads from this address. Please wait a few minutes and try again.' });
   }
   fileUpload.single('file')(req, res, (err) => {
@@ -261,7 +261,7 @@ router.post('/complete', async (req, res) => {
     console.warn(`[register] signup refused (${status}) for ${maskAddress(String(req.body?.email || '').trim().toLowerCase())}: ${body.code || body.error}`);
     return res.status(status).json(body);
   };
-  if (isCompleteRateLimited(req.ip)) {
+  if (await isCompleteRateLimited(req.ip)) {
     return refuse(429, {
       error: 'Too many signup attempts from this address. Please try again later, or reach out to us directly.'
     });
@@ -341,7 +341,7 @@ router.post('/complete', async (req, res) => {
   // The readiness report the visitor reviewed in the wizard, if it was for
   // exactly these pages; otherwise (skipped, edited after, or a restart in
   // between) a fresh audit runs in the background.
-  const reviewed = takeWizardAudit(contentHash(pages, botPreference.value));
+  const reviewed = await takeWizardAudit(contentHash(pages, botPreference.value));
   let readiness = null;
   if (reviewed) {
     readiness = { score: reviewed.readinessScore, level: reviewed.readinessLevel };

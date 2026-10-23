@@ -243,8 +243,8 @@ describe('content hash and the wizard hand-off', () => {
 
   test('a reviewed audit is handed to /complete once, by hash', async () => {
     const report = await auditKnowledge({ company: COMPANY, documents: RICH_DOCS });
-    rememberWizardAudit(report);
-    assert.equal(takeWizardAudit(contentHash(RICH_DOCS)).readinessScore, report.readinessScore);
-    assert.equal(takeWizardAudit(contentHash(RICH_DOCS)), null, 'used once');
+    await rememberWizardAudit(report);
+    assert.equal((await takeWizardAudit(contentHash(RICH_DOCS))).readinessScore, report.readinessScore);
+    assert.equal(await takeWizardAudit(contentHash(RICH_DOCS)), null, 'used once');
   });
 });

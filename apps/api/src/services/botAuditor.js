@@ -7,6 +7,7 @@ const { logUsage } = require('../engine/usageTracking');
 const { buildDigest } = require('./tenantFaqs');
 const { documentChunks } = require('../domains/tenantProfile');
 const { scopeCounts, parseBotPreference, botsFor, botCanUse } = require('./shared/botScope');
+const { store, keys } = require('../lib/sharedStore');
 
 // Pre-flight training readiness: before a company launches its bots, how well
 // do its documents equip EACH of them? One LLM call reads a digest of the
@@ -316,23 +317,30 @@ async function auditKnowledge({ company, documents, tenantId = null, botPreferen
 
 // ── Wizard audits by content hash, so /complete can keep the report the
 // visitor actually reviewed instead of running (and paying for) a second
-// audit of identical pages. In memory: a restart just means the new tenant
-// gets a fresh audit in the background instead.
-const WIZARD_CACHE_MAX = 200;
+// audit of identical pages. A restart just means the new tenant gets a fresh
+// audit in the background instead.
+//
+// In lib/sharedStore.js, not a Map here, because this one is FUNCTIONAL across
+// instances rather than merely an optimisation: the wizard calls
+// /preflight-audit and /complete as two separate requests, so with a load
+// balancer in front they routinely land on different containers. With the
+// report held per process, the second request simply never found it and every
+// signup paid for a second audit of pages it had already judged.
+//
+// Expiry is the store's, so there is no size cap to maintain: entries lapse
+// after the TTL whether or not /complete ever claimed them.
 const WIZARD_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
-const wizardAudits = new Map();
 
 function rememberWizardAudit(report) {
-  wizardAudits.delete(report.contentHash);
-  wizardAudits.set(report.contentHash, { report, expiresAt: Date.now() + WIZARD_CACHE_TTL_MS });
-  while (wizardAudits.size > WIZARD_CACHE_MAX) wizardAudits.delete(wizardAudits.keys().next().value);
+  return store().set(keys.wizardAudit(report.contentHash), report, WIZARD_CACHE_TTL_MS);
 }
 
-function takeWizardAudit(hash) {
-  const hit = wizardAudits.get(hash);
-  if (!hit) return null;
-  wizardAudits.delete(hash);
-  return hit.expiresAt > Date.now() ? hit.report : null;
+/** Single-use: the report is removed as it is handed over. */
+async function takeWizardAudit(hash) {
+  const key = keys.wizardAudit(hash);
+  const report = await store().get(key);
+  if (report) await store().del(key);
+  return report || null;
 }
 
 // ── Saved audits for existing tenants
@@ -369,13 +377,28 @@ async function auditTenant(tenantId) {
 }
 
 // One background audit per tenant at a time (same pattern as tenantFaqs.js).
+// Two locks, doing two different jobs: the local Set answers
+// isTenantAuditRunning() synchronously for the readiness endpoint, and the
+// shared claim stops a SECOND instance starting the same audit — each one is a
+// paid LLM call, so without it a tenant could be audited N times over.
+// The claim expires on its own, so an instance that dies mid-audit does not
+// block the next attempt for ever.
+const AUDIT_LOCK_MS = 10 * 60 * 1000;
 const running = new Set();
 function scheduleTenantAudit(tenantId) {
   if (running.has(tenantId)) return;
   running.add(tenantId);
-  auditTenant(tenantId)
-    .catch((err) => console.warn(`[botAuditor] tenant ${tenantId}: background audit failed: ${err.message}`))
-    .finally(() => running.delete(tenantId));
+  (async () => {
+    try {
+      if (!await store().claimOnce(keys.jobLock('audit', tenantId), AUDIT_LOCK_MS)) return;
+      await auditTenant(tenantId);
+    } catch (err) {
+      console.warn(`[botAuditor] tenant ${tenantId}: background audit failed: ${err.message}`);
+    } finally {
+      running.delete(tenantId);
+      await store().del(keys.jobLock('audit', tenantId)).catch(() => {});
+    }
+  })();
 }
 const isTenantAuditRunning = (tenantId) => running.has(tenantId);
 

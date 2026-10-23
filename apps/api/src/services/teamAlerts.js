@@ -1,5 +1,6 @@
 const prisma = require('../lib/prisma');
 const { sendMail, maskAddress } = require('./mailer');
+const { store, keys } = require('../lib/sharedStore');
 
 // Alert emails to the TENANT'S OWN team, so someone can follow up while the
 // visitor is still around:
@@ -38,24 +39,33 @@ const TRANSCRIPT_LINES = 6;
 const LINE_CHARS = 500;
 const HOUR_MS = 60 * 60 * 1000;
 
-// In memory, per process: a restart forgets the throttle, which only means
-// one extra alert. sessionKey -> last alert time; tenantId -> recent sends.
-const lastSessionAlert = new Map();
-const tenantSends = new Map();
+// Held in lib/sharedStore.js rather than in a Map here, so the throttle is one
+// throttle however many API instances are running: with a Map per process, two
+// containers meant two cooldowns and twice the hourly cap, and the tenant's
+// team got the duplicate emails this is meant to prevent. A restart still
+// forgets the throttle, which only means one extra alert.
+//
+// It also bounds the memory: the per-session cooldown now expires with the
+// cooldown itself, where the Map held one entry per conversation for the life
+// of the process and never evicted any of them.
 
-function underTenantCap(tenantId, now) {
-  const recent = (tenantSends.get(tenantId) || []).filter((t) => now - t < HOUR_MS);
-  tenantSends.set(tenantId, recent);
-  return recent.length < tenantMaxPerHour();
+/** Peek, deliberately: it must not consume an allowance that may not be used. */
+async function underTenantCap(tenantId) {
+  return (await store().countWindow(keys.alertTenant(tenantId), HOUR_MS)) < tenantMaxPerHour();
 }
-function recordSend(tenantId, now) {
-  tenantSends.set(tenantId, [...(tenantSends.get(tenantId) || []), now]);
+function recordSend(tenantId) {
+  return store().incrWindow(keys.alertTenant(tenantId), HOUR_MS);
+}
+async function sessionOnCooldown(tenantId, sessionId) {
+  return (await store().get(keys.alertSession(tenantId, sessionId))) !== null;
+}
+function markSessionAlerted(tenantId, sessionId) {
+  return store().set(keys.alertSession(tenantId, sessionId), 1, sessionCooldownMs());
 }
 
-/** For tests. */
+/** For tests: clears the whole shared store, throttles included. */
 function resetAlertThrottle() {
-  lastSessionAlert.clear();
-  tenantSends.clear();
+  return store().reset();
 }
 
 const isEmail = (s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
@@ -145,7 +155,7 @@ async function send({ tenant, kind, mail, replyTo, now }) {
     console.warn(`[alerts] ${kind} NOT sent (tenant ${tenant.slug || tenant.id}): no team email, signup email or dashboard user to send it to`);
     return { sent: false, reason: 'no-recipient' };
   }
-  recordSend(tenant.id, now);
+  await recordSend(tenant.id);
   const result = await sendMail({ to, ...mail, replyTo, label: `${kind}, tenant ${tenant.slug || tenant.id}` });
   if (result.sent) console.log(`[alerts] ${kind} sent via ${result.via} to ${to.map(maskAddress).join(', ')} (tenant ${tenant.slug || tenant.id})`);
   return result;
@@ -161,7 +171,7 @@ async function notifyLeadCaptured({ tenant, lead, summary = null }) {
   try {
     if (!alertsEnabled()) return { sent: false, reason: 'disabled' };
     const now = Date.now();
-    if (!underTenantCap(tenant.id, now)) {
+    if (!await underTenantCap(tenant.id)) {
       console.warn(`[alerts] lead alert THROTTLED (lead ${lead.id}, tenant ${tenant.slug || tenant.id}): hourly cap reached; the lead is in the dashboard`);
       return { sent: false, reason: 'throttled' };
     }
@@ -210,14 +220,12 @@ async function notifyIfNeedsAttention({ tenant, botType, sessionId, query, resul
     const reason = needsAttention(result);
     if (!reason || !alertsEnabled()) return { sent: false, reason: reason ? 'disabled' : 'not-needed' };
     const now = Date.now();
-    const key = `${tenant.id}:${sessionId}`;
-    const last = lastSessionAlert.get(key);
-    if (last && now - last < sessionCooldownMs()) return { sent: false, reason: 'session-cooldown' };
-    if (!underTenantCap(tenant.id, now)) {
+    if (await sessionOnCooldown(tenant.id, sessionId)) return { sent: false, reason: 'session-cooldown' };
+    if (!await underTenantCap(tenant.id)) {
       console.warn(`[alerts] needs-attention alert THROTTLED (session ${sessionId}, tenant ${tenant.slug || tenant.id}): hourly cap reached`);
       return { sent: false, reason: 'throttled' };
     }
-    lastSessionAlert.set(key, now);
+    await markSessionAlerted(tenant.id, sessionId);
 
     const bot = BOT_LABEL[botType] || 'Support';
     const pct = typeof result.confidence === 'number' ? `${Math.round(result.confidence * 100)}%` : 'n/a';

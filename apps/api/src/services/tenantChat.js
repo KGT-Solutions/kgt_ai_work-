@@ -20,8 +20,16 @@ const MAX_QUERY_LEN = 1000;
 
 // Per tenant, not per IP: bounds each tenant's LLM spend however many
 // visitors its widget has. The limiter keys by any string.
-const isTenantRateLimited = createIpRateLimiter({
-  max: Number(process.env.TENANT_CHAT_RATE_LIMIT_MAX || 30),
+//
+// This is abuse protection, not a capacity limit, and the default is sized
+// that way: 30 per 10 minutes is 3 messages a minute for an ENTIRE company's
+// website, shared by every visitor at once — and the dashboard's own test
+// chat draws from the same bucket, so a tenant trying their bots could lock
+// their visitors out. Retrieval costs well under a millisecond per turn
+// (scripts/bench-retrieval.js), so the ceiling here is the LLM bill, not the
+// server. Lower it per deployment if a provider quota needs protecting.
+const isTenantRateLimited = createIpRateLimiter({ name: 'tenant-chat',
+  max: Number(process.env.TENANT_CHAT_RATE_LIMIT_MAX || 300),
   windowMs: Number(process.env.TENANT_CHAT_RATE_LIMIT_WINDOW_MIN || 10) * 60 * 1000
 });
 
@@ -68,7 +76,7 @@ async function runTenantChat({ tenant, body, sandbox = false }) {
   if (!bot.ok) throw new ChatRequestError(bot.error, 400);
   const botType = bot.value;
 
-  if (isTenantRateLimited(tenant.id)) {
+  if (await isTenantRateLimited(tenant.id)) {
     throw new ChatRequestError('Too many chat requests. Please wait a few minutes and try again.', 429);
   }
 

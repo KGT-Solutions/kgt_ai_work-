@@ -5,6 +5,16 @@
 # Deploy with:  docker compose --env-file .env.docker up -d --build
 # (build args below need compose to see the env file.) The API container
 # reads its own settings from HUB_ENV_FILE, default .env.docker.
+#
+# The API runs as API_REPLICAS containers (2 by default) behind nginx, so a
+# deploy, a crash or an OOM kill never takes every tenant's chatbot offline.
+# That is only safe because the state those containers must agree on — rate
+# limit windows, knowledge invalidation, alert throttles and background-job
+# locks — lives in Redis rather than in each process
+# (apps/api/src/lib/sharedStore.js, SHARED_STORE=redis).
+#
+# To go back to a single container: API_REPLICAS=1 and SHARED_STORE=memory.
+# Nothing else changes; the memory driver is the shipped default.
 
 services:
   postgres:
@@ -26,28 +36,81 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  # The state every API replica has to agree on. Small and mostly ephemeral:
+  # rate-limit windows, alert throttles and job locks all expire on their own.
+  # The one thing worth keeping across a restart is the per-tenant knowledge
+  # generation — losing it makes every instance treat its caches as stale and
+  # re-read from Postgres, which is correct but briefly slower, so appendonly
+  # is on to avoid even that.
+  redis:
+    image: redis:7-alpine
+    container_name: kgt-ai-hub-redis
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - kgt_ai_hub_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+
+  # One-shot: applies migrations and seeds, then exits. Exactly one container
+  # may do this — see apps/api/docker-entrypoint.sh. The API replicas wait for
+  # it to finish successfully, so they never race each other on the same
+  # migration.
+  migrate:
+    build:
+      context: ./apps/api
+    container_name: kgt-ai-hub-migrate
+    env_file: ${HUB_ENV_FILE:-.env.docker}
+    environment:
+      PGHOST: postgres
+      RUN_MIGRATIONS: "true"
+    command: ["node", "-e", "console.log('[migrate] schema is up to date')"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   api:
     build:
       context: ./apps/api
-    container_name: kgt-ai-hub-api
+    # No container_name and no host port: both are single-container settings
+    # that conflict with replicas. nginx below is what the host talks to.
     env_file: ${HUB_ENV_FILE:-.env.docker}
     # PID 1 must reap zombie processes: `exec node` makes Node PID 1, which
     # doesn't — every Chromium helper process the crawler's browser tier
     # spawns would otherwise linger as a zombie after it exits.
     init: true
-    ports:
-      - "${API_PORT:-4100}:4000"
+    deploy:
+      replicas: ${API_REPLICAS:-2}
     environment:
       PGHOST: postgres
       PORT: 4000
+      # The migrate service above owns them.
+      RUN_MIGRATIONS: "false"
+      # Defaulted HERE rather than left to env_file alone, because this file
+      # ships 2 replicas: an older .env.docker without SHARED_STORE would
+      # otherwise give two containers each keeping their own state, which is
+      # the exact broken configuration this work exists to prevent — and it
+      # fails silently. Still overridable (API_REPLICAS=1 SHARED_STORE=memory).
+      SHARED_STORE: ${SHARED_STORE:-redis}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
       # DATABASE_URL is built in docker-entrypoint.sh from POSTGRES_* in
       # env_file. Do not interpolate it here: ${POSTGRES_PASSWORD:-kgthub}
       # overrides .env.docker whenever compose is run without --env-file.
       # Secrets (JWT_SECRET, HUB_ADMIN_*, LLM keys) come ONLY from env_file
-      # for the same reason.
+      # for the same reason. SHARED_STORE / REDIS_URL / TRUST_PROXY_HOPS also
+      # come from env_file, so a single-container deployment can override them.
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
@@ -55,6 +118,26 @@ services:
       timeout: 5s
       retries: 12
       start_period: 60s
+
+  # What the host and the web app actually talk to, on the port the API used
+  # to publish, so nothing outside this file needs to change.
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: kgt-ai-hub-nginx
+    ports:
+      - "${API_PORT:-4100}:80"
+    volumes:
+      - ./infra/nginx/api.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1/health >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
 
   web:
     build:
@@ -65,9 +148,10 @@ services:
     ports:
       - "${WEB_PORT:-3100}:3001"
     depends_on:
-      api:
+      nginx:
         condition: service_healthy
     restart: unless-stopped
 
 volumes:
   kgt_ai_hub_pg_data:
+  kgt_ai_hub_redis_data:

@@ -24,12 +24,21 @@ const SWEEP_MS = Number(process.env.SESSION_SUMMARY_SWEEP_SEC || 60) * 1000;
 // Only conversations active this recently are picked up: the migration's
 // backfill (and a long outage) must not turn into a burst of LLM calls.
 const LOOKBACK_HOURS = Number(process.env.SESSION_SUMMARY_LOOKBACK_HOURS || 24);
-const SWEEP_BATCH = Number(process.env.SESSION_SUMMARY_BATCH || 10);
+const SWEEP_BATCH = Number(process.env.SESSION_SUMMARY_BATCH || 30);
 // A single greeting and its reply aren't worth a summary.
 const MIN_MESSAGES = 2;
+// How long a claim on a conversation is honoured before another instance may
+// take it over (ChatSession.summaryClaimedAt). Long enough for the slowest
+// provider in the chain to answer, short enough that a container killed
+// mid-summary doesn't park a conversation for the rest of the day. Read at
+// call time, like the knobs in services/teamAlerts.js, so it isn't frozen by
+// whichever module happened to load first.
+const leaseMs = () => Number(process.env.SESSION_SUMMARY_LEASE_MIN || 10) * 60 * 1000;
 
 // sessionId -> { rerun } while a summary is being written, as in leads.js:
-// a request mid-run queues exactly one more run.
+// a request mid-run queues exactly one more run. This only coalesces work
+// inside ONE process; what keeps two API instances off the same conversation
+// is the database claim below.
 const running = new Map();
 
 /**
@@ -133,36 +142,85 @@ async function endSession({ tenantId, sessionId }) {
     // Already ended, or not this tenant's: only the former is a real session.
     return !!(await prisma.chatSession.findFirst({ where: { id: sessionId, tenantId }, select: { id: true } }));
   }
-  runSessionSummary(sessionId);
+  // An automatic trigger, so it yields to whoever already holds the lease —
+  // that instance is writing this conversation's summary right now.
+  if (await claimSession(sessionId)) runSessionSummary(sessionId);
   return true;
 }
 
 /**
- * Idle conversations whose summary is missing or older than their last
- * message, active within LOOKBACK_HOURS, oldest activity first. A failed
- * attempt sets summarizedAt too (here and in services/leads.js), so it's
- * retried only once new messages arrive. summaryStatus "pending" is not
- * excluded: a run cut short by a restart would otherwise never be retried;
- * the in-process `running` map keeps one process from doubling up.
+ * Claims up to `limit` idle conversations for summarizing and returns their
+ * ids: those whose summary is missing or older than their last message, whose
+ * tenant is active, that have been active within LOOKBACK_HOURS, oldest
+ * activity first.
+ *
+ * Selecting and claiming are ONE statement on purpose. An UPDATE over a
+ * `FOR UPDATE SKIP LOCKED` subquery makes Postgres hand each conversation to
+ * exactly one caller, so any number of API instances can sweep concurrently
+ * without two of them paying for the same summary — a plain SELECT could not
+ * promise that, and the in-process `running` map only ever covered one process.
+ *
+ * A failed attempt sets summarizedAt too (here and in services/leads.js), so
+ * it's retried only once new messages arrive. A conversation already claimed
+ * is skipped until its lease expires, which is what lets a run cut short by a
+ * restart be retried instead of staying "pending" for ever.
  */
-async function findSessionsToSummarize({ limit = SWEEP_BATCH } = {}) {
+async function claimSessionsToSummarize({ limit = SWEEP_BATCH } = {}) {
   const idleBefore = new Date(Date.now() - SUMMARY_IDLE_MS);
   const after = new Date(Date.now() - LOOKBACK_HOURS * 60 * 60 * 1000);
+  const leaseExpiredBefore = new Date(Date.now() - leaseMs());
   const rows = await prisma.$queryRaw`
-    SELECT s.id FROM "ChatSession" s
-    JOIN "Tenant" t ON t.id = s."tenantId" AND t.active
-    WHERE s."messageCount" >= ${MIN_MESSAGES}
-      AND s."lastMessageAt" > ${after} AND s."lastMessageAt" <= ${idleBefore}
-      AND (s."summarizedAt" IS NULL OR s."summarizedAt" < s."lastMessageAt")
-    ORDER BY s."lastMessageAt" ASC
-    LIMIT ${limit}`;
+    UPDATE "ChatSession" SET "summaryStatus" = 'pending', "summaryClaimedAt" = now()
+    WHERE id IN (
+      SELECT s.id FROM "ChatSession" s
+      JOIN "Tenant" t ON t.id = s."tenantId" AND t.active
+      WHERE s."messageCount" >= ${MIN_MESSAGES}
+        AND s."lastMessageAt" > ${after} AND s."lastMessageAt" <= ${idleBefore}
+        AND (s."summarizedAt" IS NULL OR s."summarizedAt" < s."lastMessageAt")
+        AND (s."summaryClaimedAt" IS NULL OR s."summaryClaimedAt" < ${leaseExpiredBefore})
+      ORDER BY s."lastMessageAt" ASC
+      LIMIT ${limit}
+      FOR UPDATE SKIP LOCKED
+    )
+    RETURNING id`;
   return rows.map((r) => r.id);
+}
+
+/**
+ * Claims ONE conversation, for the paths that already know which one they
+ * want: the widget reporting its page closed, and the dashboard's "Rewrite".
+ * @param {string} sessionId
+ * @param {{ force?: boolean }} [opts] force: take the claim even if someone
+ *   else holds a live lease — for an explicit request from the dashboard,
+ *   where a person is waiting for a new summary.
+ * @returns {Promise<boolean>} false when another instance holds the lease
+ */
+async function claimSession(sessionId, { force = false } = {}) {
+  // Forcing drops the lease predicate altogether rather than comparing against
+  // "now": a cutoff of now() would refuse a claim taken in the same
+  // millisecond, which is exactly the case a person clicking Rewrite hits.
+  if (force) {
+    const forced = await prisma.$queryRaw`
+      UPDATE "ChatSession" SET "summaryStatus" = 'pending', "summaryClaimedAt" = now()
+      WHERE id = ${sessionId}
+      RETURNING id`;
+    return forced.length > 0;
+  }
+  const leaseExpiredBefore = new Date(Date.now() - leaseMs());
+  const rows = await prisma.$queryRaw`
+    UPDATE "ChatSession" SET "summaryStatus" = 'pending', "summaryClaimedAt" = now()
+    WHERE id = ${sessionId}
+      AND ("summaryClaimedAt" IS NULL OR "summaryClaimedAt" < ${leaseExpiredBefore})
+    RETURNING id`;
+  return rows.length > 0;
 }
 
 async function sweep() {
   try {
     if (!isLlmConfigured()) return 0;
-    const ids = (await findSessionsToSummarize()).filter((id) => !running.has(id));
+    // Already claimed by this process (a lease that outlived a slow run):
+    // don't start a second pass over the same conversation locally.
+    const ids = (await claimSessionsToSummarize()).filter((id) => !running.has(id));
     for (const id of ids) runSessionSummary(id);
     return ids.length;
   } catch (err) {
@@ -184,9 +242,11 @@ module.exports = {
   summarizeSession,
   runSessionSummary,
   endSession,
-  findSessionsToSummarize,
+  claimSessionsToSummarize,
+  claimSession,
   sweep,
   startSessionSummaryWorker,
   SUMMARY_IDLE_MS,
-  MIN_MESSAGES
+  MIN_MESSAGES,
+  leaseMs
 };

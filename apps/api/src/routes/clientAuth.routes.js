@@ -11,10 +11,10 @@ const { requireClient, signClientToken, TENANT_FIELDS } = require('../middleware
 // (/forgot-password, /reset-password) and services/passwordResetService.js.
 const router = express.Router();
 
-const isLoginRateLimited = createIpRateLimiter({ max: 10, windowMs: 15 * 60 * 1000 });
+const isLoginRateLimited = createIpRateLimiter({ name: 'client-login', max: 10, windowMs: 15 * 60 * 1000 });
 
 router.post('/login', async (req, res) => {
-  if (isLoginRateLimited(req.ip)) {
+  if (await isLoginRateLimited(req.ip)) {
     return res.status(429).json({ error: 'Too many sign-in attempts. Please wait a few minutes and try again.' });
   }
   const email = String(req.body?.email || '').trim().toLowerCase();

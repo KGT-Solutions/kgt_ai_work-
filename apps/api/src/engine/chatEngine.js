@@ -57,7 +57,7 @@ async function getEngineAnswer({ profile, query, ctx = {} }) {
   // answerCache.get() further down is too late — it would already be the
   // post-change one.)
   const cacheable = !!(profile.answerCache && profile.botType && ctx.tenantId);
-  const knowledgeGeneration = cacheable ? answerCache.generation(ctx.tenantId) : null;
+  const knowledgeGeneration = cacheable ? await answerCache.generation(ctx.tenantId) : null;
 
   // 2. Retrieval, scoped to this domain's own knowledge base. A profile
   //    supplies either a static knowledgeBasePath (a directory of .md
@@ -113,7 +113,7 @@ async function getEngineAnswer({ profile, query, ctx = {} }) {
   //    Only reached after the gate, so a cached answer is re-used exactly
   //    where a fresh one would have been generated; the formatting, ticketing
   //    and onResult steps below run the same either way.
-  const cached = cacheable ? answerCache.get(ctx.tenantId, profile.botType, query) : null;
+  const cached = cacheable ? answerCache.get(ctx.tenantId, profile.botType, query, knowledgeGeneration) : null;
   try {
     let text;
     if (cached?.value) {
@@ -131,7 +131,7 @@ async function getEngineAnswer({ profile, query, ctx = {} }) {
         await logUsage({ ctx, provider: answer.provider, model: answer.model, usage: answer.usage, botType: profile.botType });
       }
       if (cacheable) {
-        answerCache.set(ctx.tenantId, profile.botType, query,
+        await answerCache.set(ctx.tenantId, profile.botType, query,
           { text, model: answer.model, usage: answer.usage }, knowledgeGeneration);
       }
     }
