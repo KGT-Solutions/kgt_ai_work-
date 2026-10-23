@@ -1,4 +1,5 @@
 const prisma = require('../lib/prisma');
+const { store, keys } = require('../lib/sharedStore');
 const { generateAnswer, isLlmConfigured, formatAttempts } = require('../engine/llmClient');
 const { logUsage } = require('../engine/usageTracking');
 const { CATEGORIES, CATEGORY_PROMPT_LABELS, DEFAULT_CATEGORY } = require('./shared/documentCategory');
@@ -171,6 +172,7 @@ async function generateTenantFaqs(tenantId) {
 // tenantId -> { rerun } while a generation runs. A second trigger during a
 // run (two PDFs uploaded back to back) queues exactly one more run, so the
 // final questions always reflect the final documents, without piling up calls.
+const FAQ_LOCK_MS = 10 * 60 * 1000;
 const running = new Map();
 
 /**
@@ -188,6 +190,10 @@ function scheduleFaqGeneration(tenantId) {
 
   (async () => {
     try {
+      // Shared claim as well as the local Map: generation is a paid LLM call,
+      // and the Map only ever covered this one process. The claim lapses on its
+      // own, so an instance that dies mid-run doesn't block the next attempt.
+      if (!await store().claimOnce(keys.jobLock('faqs', tenantId), FAQ_LOCK_MS)) return;
       await prisma.tenantFaq.upsert({
         where: { tenantId },
         create: { tenantId, status: 'pending' },
@@ -201,6 +207,7 @@ function scheduleFaqGeneration(tenantId) {
       console.warn(`[tenantFaqs] tenant ${tenantId}: could not schedule generation: ${err.message}`);
     } finally {
       running.delete(tenantId);
+      await store().del(keys.jobLock('faqs', tenantId)).catch(() => {});
     }
   })();
 }

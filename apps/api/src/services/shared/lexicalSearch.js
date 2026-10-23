@@ -99,23 +99,84 @@ function isAdjacentSwap(a, b) {
   return diff.length === 2 && diff[1] === diff[0] + 1 && a[diff[0]] === b[diff[1]] && a[diff[1]] === b[diff[0]];
 }
 
-// Vocabulary per item array — the tenant knowledge cache hands back the
-// same array object until invalidated, so this is built once per cache
-// generation, not once per query.
+// ---------------------------------------------------------------------
+// Per-chunk token index. Scoring used to tokenize and Porter-stem every
+// chunk's whole title and body on EVERY query, so one retrieval cost
+// O(size of the tenant's knowledge base): ~23ms for a typical tenant and
+// ~350ms for one at the document cap, all of it blocking the single Node
+// thread that is also serving every other tenant. These four structures are
+// the only thing scoring reads, and they depend on the chunk alone and never
+// on the query, so they are built once per chunk and reused.
+//
+// Keyed on the CHUNK OBJECT, deliberately not on the array holding it: every
+// chat turn hands rankItems a freshly .filter()ed array (the per-bot scope
+// split in domains/tenantProfile.scopedTo), so an array-keyed cache misses on
+// every single request — which is what the vocabulary below used to do.
+//
+// Invalidation is structural, so there is nothing to wire up:
+// domains/tenantProfile.documentChunks() builds NEW chunk objects each time a
+// tenant's knowledge is loaded, and invalidateTenantKnowledge() drops the
+// cached array, so indexes for the old chunks become unreachable and are
+// collected. The one thing that would break it is editing chunk.content in
+// place — nothing does, and the test suite pins that contract.
+const itemIndexCache = new WeakMap();
+
+/**
+ * @param {{ title?: string, content?: string, tags?: string[] }} item
+ * @returns {{ titleRawFreq: Map<string, number>, titleStems: Set<string>,
+ *   bodyRawFreq: Map<string, number>, bodyStemFreq: Map<string, number>, tags: string[] }}
+ *   Title raw terms are counted, not just collected into a membership Set:
+ *   getVocabulary's correction tie-break needs how often a word occurs.
+ */
+function buildItemIndex(item) {
+  return {
+    titleRawFreq: termFrequencies(tokenizeRaw(item.title)),
+    titleStems: new Set(tokenize(item.title)),
+    bodyRawFreq: termFrequencies(tokenizeRaw(item.content)),
+    bodyStemFreq: termFrequencies(tokenize(item.content)),
+    tags: Array.isArray(item.tags) ? item.tags : []
+  };
+}
+
+/** The cached index for one chunk, built on first use. */
+function itemIndex(item) {
+  if (item === null || typeof item !== 'object') return buildItemIndex(item || {});
+  let index = itemIndexCache.get(item);
+  if (!index) {
+    index = buildItemIndex(item);
+    itemIndexCache.set(item, index);
+  }
+  return index;
+}
+
+// Vocabulary for typo correction: every word the corpus uses, and how often.
+// Merged from the per-chunk indexes above rather than re-tokenizing the
+// corpus, which is what makes an array-identity miss cheap instead of the
+// dominant cost of a request. Still memoized per array for callers that do
+// hand back the same one.
 const vocabularyCache = new WeakMap();
+
+function buildVocabulary(items) {
+  const rawFreq = new Map();
+  const stems = new Set();
+  for (const item of items) {
+    const index = itemIndex(item);
+    // Title and body counts combined, exactly as tokenizing
+    // `${title} ${content}` as a single string produced: tokenizeRaw splits on
+    // every non-alphanumeric, so concatenating cannot merge two words.
+    for (const freq of [index.titleRawFreq, index.bodyRawFreq]) {
+      for (const [raw, n] of freq) rawFreq.set(raw, (rawFreq.get(raw) || 0) + n);
+    }
+    for (const stem of index.titleStems) stems.add(stem);
+    for (const stem of index.bodyStemFreq.keys()) stems.add(stem);
+  }
+  return { rawFreq, stems };
+}
 
 function getVocabulary(items) {
   let vocab = vocabularyCache.get(items);
   if (vocab) return vocab;
-  const rawFreq = new Map();
-  const stems = new Set();
-  for (const item of items) {
-    for (const raw of tokenizeRaw(`${item.title} ${item.content}`)) {
-      rawFreq.set(raw, (rawFreq.get(raw) || 0) + 1);
-      stems.add(stemmer(raw));
-    }
-  }
-  vocab = { rawFreq, stems };
+  vocab = buildVocabulary(items);
   vocabularyCache.set(items, vocab);
   return vocab;
 }
@@ -146,13 +207,30 @@ function closestVocabularyWord(word, vocab) {
  */
 function correctQueryTerms(queryTerms, items) {
   if (!items.length) return queryTerms;
-  const vocab = getVocabulary(items);
+  // The merged vocabulary is only needed to find a REPLACEMENT for a word the
+  // corpus doesn't have. Deciding whether a word is present doesn't need it:
+  // that's a membership question, answered against the per-chunk indexes with
+  // an early exit on the first chunk that has the word. Since almost every
+  // query is spelled correctly, this keeps the corpus-wide merge off the hot
+  // path and pays for it only when something actually needs correcting.
+  let vocab = null;
   return queryTerms.map((term) => {
-    const known = vocab.rawFreq.has(term.raw) || vocab.stems.has(term.stem);
-    if (known || term.raw.length < MIN_CORRECTABLE_LENGTH || /\d/.test(term.raw)) return term;
+    if (term.raw.length < MIN_CORRECTABLE_LENGTH || /\d/.test(term.raw)) return term;
+    if (isKnownTerm(items, term)) return term;
+    vocab = vocab || getVocabulary(items);
     const fix = closestVocabularyWord(term.raw, vocab);
     return fix ? { raw: fix, stem: stemmer(fix), corrected: term.raw } : term;
   });
+}
+
+/** Whether any chunk uses this word, literally or by stem. */
+function isKnownTerm(items, { raw, stem }) {
+  for (const item of items) {
+    const { titleRawFreq, titleStems, bodyRawFreq, bodyStemFreq } = itemIndex(item);
+    if (titleRawFreq.has(raw) || bodyRawFreq.has(raw)) return true;
+    if (titleStems.has(stem) || bodyStemFreq.has(stem)) return true;
+  }
+  return false;
 }
 
 function termFrequencies(tokens) {
@@ -162,17 +240,19 @@ function termFrequencies(tokens) {
 }
 
 /**
- * @param {Array<{ raw: string, stem: string }>} queryTerms
- * @param {{ title: string, content: string, tags?: string[] }} item
+ * The scoring arithmetic, over one chunk's prebuilt index (buildItemIndex).
+ * Kept identical to what scoreItem has always computed: engine/confidence.js
+ * derives its saturation constant k from the per-term ceiling reached here
+ * ((titleWeight+exactBonus) + (bodyCapPerTerm+exactBonus) = 10 by default),
+ * so any change to these numbers moves every tenant's confidence gate.
+ * @param {Array<{ raw: string, stem: string, corrected?: string }>} queryTerms
+ * @param {ReturnType<typeof buildItemIndex>} index
  * @param {{ titleWeight?: number, bodyCapPerTerm?: number, boostTags?: Set<string>, tagBonus?: number, exactBonus?: number }} [opts]
  * @returns {{ score: number, exactMatches: number }}
  */
-function scoreItem(queryTerms, item, opts = {}) {
+function scoreFromIndex(queryTerms, index, opts = {}) {
   const { titleWeight = 3, bodyCapPerTerm = 3, boostTags, tagBonus = 4, exactBonus = 2 } = opts;
-  const titleRaw = new Set(tokenizeRaw(item.title));
-  const titleStems = new Set(tokenize(item.title));
-  const bodyRawFreq = termFrequencies(tokenizeRaw(item.content));
-  const bodyStemFreq = termFrequencies(tokenize(item.content));
+  const { titleRawFreq, titleStems, bodyRawFreq, bodyStemFreq } = index;
 
   let score = 0;
   let exactMatches = 0;
@@ -192,7 +272,7 @@ function scoreItem(queryTerms, item, opts = {}) {
       score += Math.min(bodyStemFreq.get(stem) || 0, bodyCapPerTerm);
       continue;
     }
-    const titleExact = titleRaw.has(raw);
+    const titleExact = titleRawFreq.has(raw);
     if (titleExact) {
       score += titleWeight + exactBonus;
       exactMatches += 1;
@@ -208,12 +288,25 @@ function scoreItem(queryTerms, item, opts = {}) {
     }
   }
 
-  if (boostTags && boostTags.size && Array.isArray(item.tags)) {
-    const hits = item.tags.filter((t) => boostTags.has(t)).length;
+  if (boostTags && boostTags.size && index.tags.length) {
+    const hits = index.tags.filter((t) => boostTags.has(t)).length;
     score += hits * tagBonus;
   }
 
   return { score, exactMatches };
+}
+
+/**
+ * One chunk's score, building and caching its index on first use. Unchanged
+ * signature and unchanged result — the only difference is that the tokenizing
+ * now happens once per chunk instead of once per chunk per query.
+ * @param {Array<{ raw: string, stem: string }>} queryTerms
+ * @param {{ title: string, content: string, tags?: string[] }} item
+ * @param {{ titleWeight?: number, bodyCapPerTerm?: number, boostTags?: Set<string>, tagBonus?: number, exactBonus?: number }} [opts]
+ * @returns {{ score: number, exactMatches: number }}
+ */
+function scoreItem(queryTerms, item, opts = {}) {
+  return scoreFromIndex(queryTerms, itemIndex(item), opts);
 }
 
 /**
@@ -238,10 +331,13 @@ function rankItems(query, items, opts = {}) {
   const analyzed = analyzeQuery(query);
   if (!analyzed.length) return [];
   const queryTerms = typoTolerance ? correctQueryTerms(analyzed, items) : analyzed;
+  // Hoisted: one options object for the whole ranking pass rather than a fresh
+  // spread per chunk, which matters once a tenant has a few hundred sections.
+  const scoreOpts = { ...opts, boostTags };
 
   const ranked = items
     .map((item) => {
-      const { score: rawScore, exactMatches } = scoreItem(queryTerms, item, { ...opts, boostTags });
+      const { score: rawScore, exactMatches } = scoreFromIndex(queryTerms, itemIndex(item), scoreOpts);
       const weight = itemWeight ? itemWeight(item) : 1;
       return { item, rawScore, score: rawScore * weight, exactMatches };
     })

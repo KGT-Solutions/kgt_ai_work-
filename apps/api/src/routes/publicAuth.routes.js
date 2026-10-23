@@ -15,10 +15,10 @@ const router = express.Router();
 // Sending is an outbound email from our own address: per IP, and per
 // recipient on top of the 60s resend cooldown, so the form can't be used to
 // flood someone's inbox.
-const isSendIpLimited = createIpRateLimiter({ max: 5, windowMs: 15 * 60 * 1000 });
-const isSendEmailLimited = createIpRateLimiter({ max: 5, windowMs: 60 * 60 * 1000 });
+const isSendIpLimited = createIpRateLimiter({ name: 'otp-send-ip', max: 5, windowMs: 15 * 60 * 1000 });
+const isSendEmailLimited = createIpRateLimiter({ name: 'otp-send-email', max: 5, windowMs: 60 * 60 * 1000 });
 // Guessing is also capped per code (5 attempts); this bounds it per IP across codes.
-const isVerifyIpLimited = createIpRateLimiter({ max: 20, windowMs: 15 * 60 * 1000 });
+const isVerifyIpLimited = createIpRateLimiter({ name: 'otp-verify-ip', max: 20, windowMs: 15 * 60 * 1000 });
 
 const TOO_MANY = { error: 'Too many requests. Please wait a few minutes and try again.' };
 
@@ -30,7 +30,7 @@ function sendError(res, err) {
 
 router.post('/send-otp', async (req, res) => {
   const email = String(req.body?.email || '').trim().toLowerCase();
-  if (isSendIpLimited(req.ip) || (email && isSendEmailLimited(email))) return res.status(429).json(TOO_MANY);
+  if (await isSendIpLimited(req.ip) || (email && await isSendEmailLimited(email))) return res.status(429).json(TOO_MANY);
   try {
     res.json(await sendSignupOtp(email));
   } catch (err) {
@@ -39,7 +39,7 @@ router.post('/send-otp', async (req, res) => {
 });
 
 router.post('/verify-otp', async (req, res) => {
-  if (isVerifyIpLimited(req.ip)) return res.status(429).json(TOO_MANY);
+  if (await isVerifyIpLimited(req.ip)) return res.status(429).json(TOO_MANY);
   try {
     res.json(await verifySignupOtp(req.body?.email, req.body?.otp));
   } catch (err) {
@@ -50,13 +50,13 @@ router.post('/verify-otp', async (req, res) => {
 // ── Forgot password (services/passwordResetService.js)
 //   POST /forgot-password  { email }                       -> emails a 6-digit code; 404 if no account
 //   POST /reset-password   { email, otp, newPassword }     -> sets the new password
-const isForgotIpLimited = createIpRateLimiter({ max: 5, windowMs: 15 * 60 * 1000 });
-const isForgotEmailLimited = createIpRateLimiter({ max: 3, windowMs: 60 * 60 * 1000 });
-const isResetIpLimited = createIpRateLimiter({ max: 20, windowMs: 15 * 60 * 1000 });
+const isForgotIpLimited = createIpRateLimiter({ name: 'forgot-ip', max: 5, windowMs: 15 * 60 * 1000 });
+const isForgotEmailLimited = createIpRateLimiter({ name: 'forgot-email', max: 3, windowMs: 60 * 60 * 1000 });
+const isResetIpLimited = createIpRateLimiter({ name: 'reset-ip', max: 20, windowMs: 15 * 60 * 1000 });
 
 router.post('/forgot-password', async (req, res) => {
   const email = String(req.body?.email || '').trim().toLowerCase();
-  if (isForgotIpLimited(req.ip) || (email && isForgotEmailLimited(email))) return res.status(429).json(TOO_MANY);
+  if (await isForgotIpLimited(req.ip) || (email && await isForgotEmailLimited(email))) return res.status(429).json(TOO_MANY);
   try {
     res.json(await requestPasswordReset(email));
   } catch (err) {
@@ -66,7 +66,7 @@ router.post('/forgot-password', async (req, res) => {
 });
 
 router.post('/reset-password', async (req, res) => {
-  if (isResetIpLimited(req.ip)) return res.status(429).json(TOO_MANY);
+  if (await isResetIpLimited(req.ip)) return res.status(429).json(TOO_MANY);
   const email = String(req.body?.email || '').trim().toLowerCase();
   try {
     res.json(await resetPassword(email, req.body?.otp, req.body?.newPassword));

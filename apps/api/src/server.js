@@ -4,6 +4,7 @@ const { describeLlmConfig, verifyLlmModels } = require('./engine/llmClient');
 const { verifyMailer, mailFrom } = require('./services/mailer');
 const { confirmationCooldownMs } = require('./services/leads');
 const { startSessionSummaryWorker } = require('./services/chatSessions');
+const { describeSharedStore } = require('./lib/sharedStore');
 
 // A config problem gets a readable list of what to fix, not a stack trace.
 try {
@@ -12,6 +13,22 @@ try {
   if (!(err instanceof ProdSafetyError)) throw err;
   console.error(`[startup] FATAL: ${err.message}`);
   process.exit(1);
+}
+
+// Which shared-store driver is in use, and what that means. The failure this
+// guards against is silent: run several API containers with the in-process
+// driver and every rate limit is N times looser, a document edited on one
+// container never invalidates the others' caches, and two of them pay for the
+// same background audit. None of it errors — it just quietly misbehaves.
+const sharedStore = describeSharedStore();
+if (sharedStore.driver === 'memory') {
+  console.log(
+    '[sharedStore] in-process driver: rate limits, knowledge invalidation, alert throttles and job locks ' +
+    'are local to THIS process. Correct for a single API container; if you run more than one, set ' +
+    'SHARED_STORE=redis and REDIS_URL or they will not agree with each other.'
+  );
+} else {
+  console.log(`[sharedStore] shared via ${sharedStore.driver} — safe to run several API containers`);
 }
 
 // Not fatal (the rest of the API works without an LLM), but loud: with no

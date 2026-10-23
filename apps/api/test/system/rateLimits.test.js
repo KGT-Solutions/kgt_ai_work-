@@ -12,6 +12,15 @@ describe('system: rate limits', { skip: skipReason }, () => {
   before(async () => {
     process.env.PREFLIGHT_AUDIT_RATE_LIMIT_MAX = ''; // the shipped default (12)
     process.env.SIGNUP_RATE_LIMIT_MAX = '';
+    // Pinned, not inherited: the widget-chat limit below asserts an exact
+    // cut-off, so reading whatever the shipped default happens to be (or
+    // whatever a developer's own apps/api/.env sets — which is why this suite
+    // passed locally and failed in the sealed Docker stack) couples the test to
+    // configuration. What it is proving is that the bucket is per COMPANY and
+    // not per visitor IP, which any limit demonstrates. Set before loadStack(),
+    // since the limiters are built when their modules are first required.
+    process.env.TENANT_CHAT_RATE_LIMIT_MAX = '30';
+    process.env.TENANT_CHAT_RATE_LIMIT_WINDOW_MIN = '10';
     const stack = loadStack();
     prisma = stack.prisma;
     server = await startServer(stack.app);

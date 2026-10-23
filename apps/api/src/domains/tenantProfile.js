@@ -33,24 +33,37 @@ const SALES_SENTINEL = 'NO_ANSWER_IN_TENANT_SALES_KB';
 const chunkCacheByTenant = new Map();
 
 // Also drops the tenant's cached answers: an answer written from the old
-// documents must not outlive them.
-function invalidateTenantKnowledge(tenantId) {
+// documents must not outlive them. Awaited by its callers, because bumping
+// the shared generation is what tells the OTHER API instances to drop theirs
+// — returning before that lands would leave a window where a reader still
+// gets pre-edit content.
+async function invalidateTenantKnowledge(tenantId) {
   chunkCacheByTenant.delete(tenantId);
-  answerCache.invalidateTenant(tenantId);
+  return answerCache.invalidateTenant(tenantId);
 }
 
 async function loadTenantKnowledge(tenantId) {
-  if (chunkCacheByTenant.has(tenantId)) return chunkCacheByTenant.get(tenantId);
+  // The generation is this tenant's knowledge version, held in
+  // lib/sharedStore.js so every instance sees the same number
+  // (engine/answerCache.js owns it). Checked on the way IN, not just when
+  // caching: the cached chunks are only still valid if nothing has been
+  // edited since, anywhere. Without this, a document edited on instance A
+  // left instance B retrieving from the content it had cached, for as long as
+  // that process lived — wrong answers, not merely stale ones.
+  const generation = await answerCache.generation(tenantId);
+  const cached = chunkCacheByTenant.get(tenantId);
+  if (cached && cached.generation === generation) return cached.chunks;
 
-  // A document can change while this read is in flight. invalidateTenantKnowledge
-  // bumps the answer cache's per-tenant generation, so a changed generation
-  // means these rows may predate the change: use them for this one request,
-  // but don't cache them, or the old content would outlive the invalidation.
-  const generation = answerCache.generation(tenantId);
   const documents = await prisma.tenantDocument.findMany({ where: { tenantId } });
   const chunks = documents.flatMap(documentChunks);
 
-  if (answerCache.generation(tenantId) === generation) chunkCacheByTenant.set(tenantId, chunks);
+  // A document can change while that read is in flight. A generation that has
+  // moved since means these rows may predate the change: use them for this
+  // one request, but don't cache them, or the old content would outlive the
+  // invalidation.
+  if (await answerCache.generation(tenantId) === generation) {
+    chunkCacheByTenant.set(tenantId, { generation, chunks });
+  }
   return chunks;
 }
 
@@ -77,7 +90,33 @@ function documentChunks(doc) {
 
 // Each bot keeps only the knowledge scoped to it (plus "both") — unless the
 // company deploys just this one bot, which then uses all of it.
-const scopedTo = (botType, tenant) => (chunks) => chunks.filter((chunk) => botCanUse(botType, chunk.scope, tenant.botPreference || 'both'));
+//
+// The result is memoized per (chunk array, bot, preference) rather than
+// re-filtered on every turn. The filtered array is fully determined by those
+// three, and loadTenantKnowledge hands back the same chunk array until the
+// tenant's knowledge is invalidated — so this makes the array that reaches
+// retrieval STABLE, which is what lets services/shared/lexicalSearch.js cache
+// per-corpus work (the typo-correction vocabulary) across turns instead of
+// rebuilding it for every message. A fresh array per turn silently defeated
+// that cache. Keyed by the array itself, so entries are collected along with
+// the chunks they describe; nothing to invalidate by hand.
+const scopedChunksByArray = new WeakMap();
+
+const scopedTo = (botType, tenant) => (chunks) => {
+  const preference = tenant.botPreference || 'both';
+  let byBot = scopedChunksByArray.get(chunks);
+  if (!byBot) {
+    byBot = new Map();
+    scopedChunksByArray.set(chunks, byBot);
+  }
+  const key = `${botType}:${preference}`;
+  let scoped = byBot.get(key);
+  if (!scoped) {
+    scoped = chunks.filter((chunk) => botCanUse(botType, chunk.scope, preference));
+    byBot.set(key, scoped);
+  }
+  return scoped;
+};
 
 // ---------------------------------------------------------------------
 // Category-aware retrieval weighting. Multipliers on the lexical score,

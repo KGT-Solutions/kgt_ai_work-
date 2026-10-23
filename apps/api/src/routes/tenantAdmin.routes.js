@@ -127,7 +127,7 @@ router.patch('/:tenantId', async (req, res) => {
   const updated = await prisma.tenant.update({ where: { id: tenant.id }, data, select: TENANT_FIELDS });
   // persona is part of both bots' prompts, and botPreference changes the
   // knowledge each bot answers from: answers cached under the old ones are stale.
-  answerCache.invalidateTenant(tenant.id);
+  await answerCache.invalidateTenant(tenant.id);
   res.json(updated);
 });
 

@@ -165,3 +165,127 @@ describe('tenantProfile — support and sales share ONE cached knowledge pool pe
     assert.match(JSON.stringify(after), /NEW pricing content/);
   });
 });
+
+describe('tenantProfile — filterChunks hands retrieval a STABLE array per bot', () => {
+  // filterChunks used to .filter() on every turn, so retrieval received a
+  // brand-new array for every single message. That is invisible functionally
+  // but defeats every cache in services/shared/lexicalSearch.js that is keyed
+  // on array identity (the typo-correction vocabulary), which was being
+  // rebuilt from the whole corpus on each request — measurably the dominant
+  // cost of a chat turn on a content-heavy tenant.
+  const DOCS = [
+    { title: 'Pricing', content: '## Plans\n\nThe Pro plan is $40 per seat per month.' },
+    { title: 'Help', content: '## Reset your password\n\nOpen settings and follow the steps to reset it.' },
+    { title: 'About', content: '## Who we are\n\nWe are a company that sells things.' }
+  ];
+
+  test('the same bot gets the identical array object back until the knowledge is invalidated', async () => {
+    invalidateTenantKnowledge(TENANT.id);
+    prisma.tenantDocument.findMany = async () => DOCS;
+
+    const support = createTenantSupportProfile(TENANT);
+    const chunks = await support.resolveKnowledge();
+    const first = support.filterChunks(chunks);
+    const second = support.filterChunks(chunks);
+
+    assert.equal(first, second, 'filterChunks must memoize, not re-filter per turn');
+    assert.ok(first.length > 0);
+  });
+
+  test('each bot gets its own scoped array, and neither is the unfiltered pool', async () => {
+    invalidateTenantKnowledge(TENANT.id);
+    prisma.tenantDocument.findMany = async () => DOCS;
+
+    const support = createTenantSupportProfile(TENANT);
+    const sales = createTenantSalesProfile(TENANT);
+    const chunks = await support.resolveKnowledge();
+
+    const forSupport = support.filterChunks(chunks);
+    const forSales = sales.filterChunks(chunks);
+
+    assert.notEqual(forSupport, forSales, 'the two bots must not share one scoped array');
+    assert.ok(forSupport.every((c) => c.scope === 'support' || c.scope === 'both'));
+    assert.ok(forSales.every((c) => c.scope === 'sales' || c.scope === 'both'));
+  });
+
+  test('a single-bot company still gets every section, and that is cached separately from the both-bots split', async () => {
+    invalidateTenantKnowledge(TENANT.id);
+    prisma.tenantDocument.findMany = async () => DOCS;
+
+    const chunks = await createTenantSupportProfile(TENANT).resolveKnowledge();
+    const bothBots = createTenantSupportProfile({ ...TENANT, botPreference: 'both' }).filterChunks(chunks);
+    const supportOnly = createTenantSupportProfile({ ...TENANT, botPreference: 'support' }).filterChunks(chunks);
+
+    assert.equal(supportOnly.length, chunks.length, 'the only deployed bot uses all of the knowledge');
+    assert.notEqual(supportOnly, bothBots, 'the preference is part of the cache key, not ignored');
+    assert.ok(supportOnly.length > bothBots.length);
+  });
+
+  test('invalidating the knowledge drops the scoped arrays too, so an edit reaches retrieval', async () => {
+    invalidateTenantKnowledge(TENANT.id);
+    // Support-scoped on purpose: a pricing section classifies as "sales"
+    // (services/shared/botScope.js), so the Support Bot would filter it out
+    // and this test would assert against an empty array.
+    let content = '## Reset your password\n\nOpen settings and follow the steps to reset it.';
+    prisma.tenantDocument.findMany = async () => [{ title: 'Help', content }];
+
+    const support = createTenantSupportProfile(TENANT);
+    const before = support.filterChunks(await support.resolveKnowledge());
+    assert.ok(before.length > 0, 'the fixture must be visible to the Support Bot');
+
+    content = '## Reset your password\n\nOpen settings and follow the UPDATED steps to reset it.';
+    invalidateTenantKnowledge(TENANT.id);
+    const after = support.filterChunks(await support.resolveKnowledge());
+
+    assert.notEqual(before, after, 'a new chunk array must produce a new scoped array');
+    assert.match(JSON.stringify(after), /UPDATED steps/);
+  });
+});
+
+describe('tenantProfile — a knowledge edit on ANOTHER instance invalidates this one', () => {
+  // The chunk cache is per process, so with two API containers an edit handled
+  // by one of them used to leave the other retrieving from the documents it
+  // had already cached — for as long as that process lived. Nothing would ever
+  // clear it, because invalidateTenantKnowledge only ran where the edit landed.
+  //
+  // The fix is a per-tenant knowledge generation in lib/sharedStore.js, which
+  // loadTenantKnowledge now checks on every read. Here "the other instance" is
+  // simulated by bumping that shared counter directly, which is exactly what
+  // the other container's invalidateTenantKnowledge() would do.
+  const { answerCache } = require('../../src/engine/answerCache');
+
+  test('the cached chunks are dropped when the shared generation moves', async () => {
+    await invalidateTenantKnowledge(TENANT.id);
+    let content = '## Reset your password\n\nOpen settings and follow the steps to reset it.';
+    let reads = 0;
+    prisma.tenantDocument.findMany = async () => {
+      reads += 1;
+      return [{ title: 'Help', content }];
+    };
+
+    const support = createTenantSupportProfile(TENANT);
+    const first = await support.resolveKnowledge();
+    await support.resolveKnowledge();
+    assert.equal(reads, 1, 'a warm cache must not re-read the database');
+    assert.match(JSON.stringify(first), /follow the steps/);
+
+    // The other container handles PATCH /documents: the row changes and it
+    // bumps the shared generation. Nothing local is touched.
+    content = '## Reset your password\n\nOpen settings and follow the UPDATED steps to reset it.';
+    await answerCache.invalidateTenant(TENANT.id);
+
+    const after = await support.resolveKnowledge();
+    assert.equal(reads, 2, 'the moved generation must force a re-read');
+    assert.match(JSON.stringify(after), /UPDATED steps/, 'this instance must see the edit');
+  });
+
+  test('an unchanged generation keeps serving the same array, so per-corpus caches still hit', async () => {
+    await invalidateTenantKnowledge(TENANT.id);
+    prisma.tenantDocument.findMany = async () => [{ title: 'Help', content: '## Reset your password\n\nFollow the steps.' }];
+
+    const support = createTenantSupportProfile(TENANT);
+    const a = await support.resolveKnowledge();
+    const b = await support.resolveKnowledge();
+    assert.equal(a, b, 'the same array object, or lexicalSearch rebuilds its vocabulary every turn');
+  });
+});

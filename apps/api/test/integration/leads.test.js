@@ -56,7 +56,7 @@ async function waitForBackground() {
   }
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   leads = []; messages = []; sessions = []; tickets = [];
   sendMailMock.mock.resetCalls();
   generateAnswerMock.mock.resetCalls();
@@ -91,7 +91,7 @@ beforeEach(() => {
     return { count: hit.length };
   };
   prisma.tenantUser.findMany = async () => []; // no dashboard users: team alerts need a teamEmail
-  resetAlertThrottle();
+  await resetAlertThrottle();
   prisma.chatMessage.findMany = async ({ where, take }) => {
     const rows = messages.filter((m) => m.sessionId === where.sessionId && (!where.role || m.role === where.role) &&
       (where.answered === undefined || !!m.answered === where.answered));

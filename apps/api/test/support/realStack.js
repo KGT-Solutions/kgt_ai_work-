@@ -46,7 +46,15 @@ function loadStack() {
     SMTP_HOST: '', RESEND_API_KEY: '', SMTP_FROM: '', MAIL_FROM: '', EMAIL_FROM: '',
     TRUST_PROXY_HOPS: '1' // tests set X-Forwarded-For to get their own rate-limit bucket
   });
-  delete process.env.DEPLOY_ENV;
+  // Set, not deleted. Requiring the app below runs dotenv.config(), which
+  // fills in any key that is ABSENT from process.env — so deleting this put a
+  // developer's own apps/api/.env back in charge, and a local DEPLOY_ENV=production
+  // made the whole suite run in production mode (the mailer then reports every
+  // send as failed, with no transport configured, and the signup-code rate-limit
+  // test sees 502s instead of 200s). An explicit non-production value cannot be
+  // overridden. The Docker test stack never hit this: .dockerignore keeps .env
+  // out of the image.
+  process.env.DEPLOY_ENV = 'test';
   const app = require('../../src/app');
   const prisma = require('../../src/lib/prisma');
   loaded = { app, prisma };

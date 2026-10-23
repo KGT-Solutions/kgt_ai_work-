@@ -9,6 +9,10 @@ const prisma = require('../lib/prisma');
 // visible in the dashboard, not for actual invoicing. Update as pricing
 // changes; unknown models default to 0 rather than guessing.
 const RATES_PER_1K = {
+  // DEFAULT_MODELS.groq in engine/llmClient.js. Without this row every Groq
+  // answer logged $0.00 and the dashboard's whole cost column read zero for
+  // any deployment running Groq as its primary provider.
+  'openai/gpt-oss-120b': { prompt: 0.00015, completion: 0.0006 },
   'llama-3.3-70b-versatile': { prompt: 0.00059, completion: 0.00079 },
   'gpt-4o-mini': { prompt: 0.00015, completion: 0.0006 },
   'claude-haiku-4-5-20251001': { prompt: 0.001, completion: 0.005 }

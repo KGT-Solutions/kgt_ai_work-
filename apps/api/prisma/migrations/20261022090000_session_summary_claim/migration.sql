@@ -1,0 +1,22 @@
+-- Lets several API instances run the session-summary sweep at once
+-- (services/chatSessions.js).
+--
+-- Before this, findSessionsToSummarize was a plain SELECT and the only thing
+-- stopping a conversation being summarized twice was an in-process Map. That
+-- holds for one container and fails for two: both would select the same rows
+-- and both would pay for the same LLM call, then write over each other.
+--
+-- Claiming is now the SELECT itself — an UPDATE ... RETURNING over a
+-- FOR UPDATE SKIP LOCKED subquery, so Postgres hands each conversation to
+-- exactly one sweeper. This column is the lease that makes that safe to retry:
+-- a claim older than SESSION_SUMMARY_LEASE_MIN (10 minutes by default) means
+-- the instance holding it died mid-run, so the conversation is claimable
+-- again. Without the lease, a crash would leave a conversation pending for
+-- ever; without the claim, "pending" could not be excluded from the sweep at
+-- all (which is why the old query deliberately did not exclude it).
+-- No index on this column on purpose: the sweep's selectivity comes from
+-- lastMessageAt, which ChatSession_lastMessageAt_idx already covers and which
+-- the query also orders by, so Postgres walks that index in order and filters
+-- the claim out of the few rows in the window. A second index would only add
+-- write cost to every claim.
+ALTER TABLE "ChatSession" ADD COLUMN "summaryClaimedAt" TIMESTAMP(3);

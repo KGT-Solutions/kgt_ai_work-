@@ -15,7 +15,7 @@ const generateAnswerMock = mock.method(llmClient, 'generateAnswer', async () => 
 }));
 
 const prisma = require('../../src/lib/prisma');
-const { summarizeSession, endSession, findSessionsToSummarize } = require('../../src/services/chatSessions');
+const { summarizeSession, endSession, claimSession } = require('../../src/services/chatSessions');
 const {
   needsAttention, parseTeamEmail, teamRecipients, notifyIfNeedsAttention, resetAlertThrottle
 } = require('../../src/services/teamAlerts');
@@ -27,11 +27,11 @@ async function waitFor(cond) {
   for (let i = 0; i < 300 && !cond(); i++) await new Promise((resolve) => setTimeout(resolve, 10));
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   sessions = []; messages = []; leads = []; users = [];
   sendMailMock.mock.resetCalls();
   generateAnswerMock.mock.resetCalls();
-  resetAlertThrottle();
+  await resetAlertThrottle();
 
   prisma.chatSession.findUnique = async ({ where }) => {
     const s = sessions.find((x) => x.id === where.id);
@@ -50,6 +50,27 @@ beforeEach(() => {
   prisma.lead.findUnique = async () => null;
   prisma.tenantUser.findMany = async () => users;
   prisma.usageLog.create = async () => null;
+
+  // Stand-in for the single-session claim (chatSessions.claimSession), enough
+  // for the callers below to behave as they do in production: it honours a
+  // live lease and takes it when expired or forced. It deliberately does NOT
+  // try to reproduce the sweep's UPDATE ... FOR UPDATE SKIP LOCKED — the thing
+  // that matters there is atomicity under concurrency, which only a real
+  // database can demonstrate. That proof lives in test/db/summaryClaim.test.js.
+  prisma.$queryRaw = async (strings, ...values) => {
+    const sql = strings.join('?');
+    if (!/UPDATE "ChatSession" SET "summaryStatus" = 'pending'/.test(sql)) {
+      throw new Error(`unexpected raw query in this suite:\n${sql}`);
+    }
+    const [sessionId, leaseExpiredBefore] = values;
+    const session = sessions.find((s) => s.id === sessionId);
+    if (!session) return [];
+    // A forced claim carries no lease predicate, so there is nothing to check.
+    const checksLease = /"summaryClaimedAt" < \?/.test(sql);
+    if (checksLease && session.summaryClaimedAt && session.summaryClaimedAt >= leaseExpiredBefore) return [];
+    Object.assign(session, { summaryStatus: 'pending', summaryClaimedAt: new Date() });
+    return [{ id: session.id }];
+  };
 });
 
 const addSession = (over = {}) => {
@@ -117,13 +138,45 @@ describe('endSession', () => {
   });
 });
 
-describe('findSessionsToSummarize', () => {
-  test('asks the database for idle, stale conversations of active tenants', async () => {
-    let sql = '';
-    prisma.$queryRaw = async (strings) => { sql = strings.join('?'); return [{ id: 's9' }]; };
-    assert.deepEqual(await findSessionsToSummarize({ limit: 5 }), ['s9']);
-    assert.match(sql, /t\.active/);
-    assert.match(sql, /"summarizedAt" IS NULL OR s\."summarizedAt" < s\."lastMessageAt"/);
+describe('claiming a conversation before summarizing it', () => {
+  // What the claim is for: two API instances sweeping at the same time must
+  // not both pay for the same conversation's summary. Here that is checked
+  // from the callers' side; the atomicity of the claim itself is proven
+  // against real Postgres in test/db/summaryClaim.test.js.
+  test('an unclaimed conversation is claimed and marked pending', async () => {
+    const s = addSession();
+    assert.equal(await claimSession(s.id), true);
+    assert.equal(s.summaryStatus, 'pending');
+    assert.ok(s.summaryClaimedAt instanceof Date);
+  });
+
+  test('a conversation another instance already holds is refused', async () => {
+    const s = addSession({ summaryClaimedAt: new Date() });
+    assert.equal(await claimSession(s.id), false);
+  });
+
+  test('force takes the claim anyway — the dashboard "Rewrite" button, with a person waiting', async () => {
+    const s = addSession({ summaryClaimedAt: new Date() });
+    assert.equal(await claimSession(s.id, { force: true }), true);
+    assert.equal(s.summaryStatus, 'pending');
+  });
+
+  test('a claim whose lease has expired is taken over, so a container killed mid-summary does not park the conversation', async () => {
+    const s = addSession({ summaryClaimedAt: new Date(Date.now() - 60 * 60 * 1000) }); // an hour ago
+    assert.equal(await claimSession(s.id), true);
+  });
+
+  test('a session that does not exist cannot be claimed', async () => {
+    assert.equal(await claimSession('no-such-session'), false);
+  });
+
+  test('endSession yields to whoever holds the lease instead of summarizing twice', async () => {
+    const s = addSession({ summaryClaimedAt: new Date() }); // another instance is on it
+    addTurn(s.id, 'Q', 'A');
+    assert.equal(await endSession({ tenantId: TENANT.id, sessionId: s.id }), true);
+    assert.ok(s.endedAt instanceof Date, 'the conversation is still marked ended');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(generateAnswerMock.mock.callCount(), 0, 'no second LLM call for a conversation already being summarized');
   });
 });
 
