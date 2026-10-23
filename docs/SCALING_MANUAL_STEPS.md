@@ -44,7 +44,19 @@ Both values below are empirically verified against the real stack:
 | Your topology | Value | Verified result |
 |---|---|---|
 | visitor → nginx → api | **1** | two visitors got two separate buckets (`rl:client-login:172.22.0.4`, `…0.5`) |
-| visitor → your TLS terminator → nginx → api | **2** | an `XFF: 203.0.113.99, 10.1.2.3` chain bucketed as `203.0.113.99` — the real visitor |
+| visitor → your TLS terminator → nginx → api | **2** | two real visitors got two separate buckets on `ai.kgt.solutions` |
+
+**`ai.kgt.solutions` is the second case, and is set to `2`.** Its chain is
+`visitor → host Nginx (TLS, ai-hub.conf) → 127.0.0.1:4100 → compose nginx → api`,
+and both proxies append to `X-Forwarded-For`. Verified live: requests from two
+different machines produced two distinct buckets. At `1` they both collapse
+onto an internal Docker address and **every visitor on the platform shares one
+rate limit** — no error, just a limit that fires far too early.
+
+Counting rule: it is the number of proxies that append to `X-Forwarded-For`,
+and a value that is too high is as bad as too low (a visitor can then spoof the
+header for a fresh bucket). Don't infer it from a `curl` run **on the server** —
+hairpinning through the public IP adds a hop and gives a misleading answer.
 
 Your `.env.docker` does not set it, so the code default of **1** applies. Your
 `CORS_ORIGINS` points at a real domain and `DEPLOY_ENV=production`, which
@@ -60,6 +72,41 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST https://YOUR-API/api/v1/client/
 # Right value: each address gets its own 10 attempts before any 429.
 # Wrong value: the second address is already limited.
 ```
+
+## 2b. Required if you have a `docker-compose.override.yml`
+
+**This bites on the first deploy.** An override that publishes the **`api`**
+service on a fixed host port is incompatible with replicas: one replica takes
+the port and the rest die with
+
+```
+Error response from daemon: ... Bind for 127.0.0.1:4100 failed: port is already allocated
+```
+
+nginx is the stack's entry point now, so the host-port publish belongs on
+**`nginx`** (container port **80**, not the API's 4000). On `ai.kgt.solutions`
+the override was:
+
+```diff
+ services:
+   postgres:
+     ports: !override
+       - "127.0.0.1:${POSTGRES_PORT:-5440}:5432"
+-  api:
+-    ports: !override
+-      - "127.0.0.1:${API_PORT:-4100}:4000"
++  nginx:
++    ports: !override
++      - "127.0.0.1:${API_PORT:-4100}:80"
+   web:
+     ports: !override
+       - "127.0.0.1:${WEB_PORT:-3110}:3001"
+```
+
+Your host Nginx keeps proxying to `${API_PORT}` exactly as before — this only
+changes which container answers there. Keep the `127.0.0.1:` prefix: without
+it the replicas' entry point would bind `0.0.0.0` and expose the API publicly,
+bypassing your TLS terminator.
 
 ## 3. Required — apply the new migration
 
