@@ -20,13 +20,47 @@ const dns = require('dns').promises;
 const { URL } = require('url');
 const cheerio = require('cheerio');
 
-const MAX_PAGES = 12;
-const MAX_DEPTH = 2;
-const PER_REQUEST_TIMEOUT_MS = 8000;
-const TOTAL_BUDGET_MS = 30000;
-const CONCURRENCY = 3;
+const envInt = (name, def) => {
+  const v = parseInt(process.env[name], 10);
+  return Number.isFinite(v) && v > 0 ? v : def;
+};
+
+// Crawl ceilings — comprehensive by default and fully tunable per deployment
+// via env, so a large product catalog or course library is ingested end to
+// end (pagination and sub-pages included) rather than truncated at a dozen
+// pages. The wall-clock budget is the real safety net behind the page/depth
+// caps, and CONCURRENCY stays modest so the crawl stays polite to the target
+// server. These bound only ONE crawl: the dashboard /scrape route additionally
+// enforces MAX_DOCUMENTS_PER_TENANT (500) and a per-tenant rate limit, and the
+// signup wizard persists at most MAX_PAGES_ON_COMPLETE pages — those are what
+// ultimately cap what lands in the database. Raise CRAWLER_MAX_PAGES /
+// CRAWLER_BUDGET_MS for genuinely huge sites (and give any reverse proxy a
+// matching read timeout, since the scan is synchronous).
+const MAX_PAGES = envInt('CRAWLER_MAX_PAGES', 150);
+const MAX_DEPTH = envInt('CRAWLER_MAX_DEPTH', 6);
+const CONCURRENCY = envInt('CRAWLER_CONCURRENCY', 4);
+const TOTAL_BUDGET_MS = envInt('CRAWLER_BUDGET_MS', 120000);
+const PER_REQUEST_TIMEOUT_MS = envInt('CRAWLER_REQUEST_TIMEOUT_MS', 8000);
+// Below this word count a page is treated as a stub/redirect/JS shell (and, in
+// Tier 2, a candidate for a headless render). Deliberately low so short but
+// real product/course pages are still saved; set CRAWLER_MIN_WORDS=1 to keep
+// virtually everything.
+const MIN_WORDS_PER_PAGE = envInt('CRAWLER_MIN_WORDS', 15);
 const MAX_REDIRECTS = 3;
-const MIN_WORDS_PER_PAGE = 30; // below this, treat as a stub/redirect page, not real content
+
+// Tier 1 page-quality floors. A page must clear MIN_CONTENT_WORDS of real text
+// to be SAVED as a document (following its links is a separate decision), and a
+// page that is mostly links with little prose — a thin index/directory — is
+// dropped by the link-density check. Focus-directory pages (isFocusPath) get
+// the lenient MIN_WORDS_PER_PAGE floor so a short product/course page is never
+// discarded. Default MIN_CONTENT_WORDS equals MIN_WORDS_PER_PAGE (no behaviour
+// change out of the box); set CRAWLER_MIN_CONTENT_WORDS higher (e.g. 80) to
+// aggressively drop thin pages.
+const MIN_CONTENT_WORDS = envInt('CRAWLER_MIN_CONTENT_WORDS', MIN_WORDS_PER_PAGE);
+const MAX_LINK_RATIO = (() => {
+  const v = Number(process.env.CRAWLER_MAX_LINK_RATIO);
+  return Number.isFinite(v) && v > 0 ? v : 1.5; // links-per-content-word; a thin index page runs far higher
+})();
 // The conventional form for an honest crawler ("Mozilla/5.0 (compatible;
 // <bot>)", like Googlebot's): many CDNs reject any user agent that doesn't
 // start with Mozilla/5.0, while this one still names the bot. It never
@@ -43,6 +77,27 @@ const REQUEST_HEADERS = {
 // any other discovered link — the pages the prospect's admin actually wants
 // trained on, per the feature request (About/FAQ/Support/Pricing).
 const PRIORITY_KEYWORDS = ['about', 'faq', 'pricing', 'plans', 'support', 'help', 'contact', 'service', 'feature'];
+
+// ── Tier 1: pre-fetch URL path gatekeeper. Drop utility/noise paths before we
+// ever fetch them (carts, logins, account, search, pagination), and give
+// genuine content directories first claim on the page budget. Pagination query
+// strings are already collapsed by dedupeKey (search is stripped), so this
+// mainly stops /page/N path-style pagination and the utility sections.
+const NOISE_PATH = /\/(cart|checkout|basket|account|my-account|login|signin|sign-in|logout|signup|sign-up|register|search|wishlist|compare|orders?|returns?|track-order|page\/\d+)(\/|$)/i;
+const NOISE_QUERY = /[?&](add-to-cart|replytocom|share|sessionid)=/i;
+// Content directories worth crawling first (Shopify/WooCommerce/course sites):
+// /products/, /collections/, /pages/, /blogs/, plus a few common equivalents.
+// Plural "blogs/" (the Shopify CMS section) is focus; a singular "/blog/post"
+// article path is left to the normal keyword priority, so it doesn't outrank
+// About/Pricing on a tight budget.
+const FOCUS_PATH = /\/(products?|collections?|pages|blogs|courses?|catalog(ue)?)\//i;
+
+function isNoisyPath(urlObj) {
+  return NOISE_PATH.test(urlObj.pathname) || NOISE_QUERY.test(urlObj.search || '');
+}
+function isFocusPath(urlObj) {
+  return FOCUS_PATH.test(urlObj.pathname);
+}
 
 const STRIP_SELECTORS = [
   'script', 'style', 'noscript', 'nav', 'footer', 'header', 'aside',
@@ -61,21 +116,31 @@ const STRIP_SELECTORS = [
   // and menu/dropdown widgets that live outside a <nav> but are just as much
   // UI, not product content.
   '.cart', '.mini-cart', '.cart-drawer', '.modal', '.popup', '.newsletter',
-  '.search-bar', '.breadcrumb', '.breadcrumbs', '.sidebar', '.menu', '.dropdown'
+  '.search-bar', '.breadcrumb', '.breadcrumbs', '.sidebar', '.menu', '.dropdown',
+  // Tier 2 junk: floating newsletter/subscribe popups, "related products" /
+  // upsell / recommendation carousels, and social-sharing widgets — chrome
+  // that survives the semantic strips above and otherwise pollutes the text.
+  '.newsletter-popup', '.popup-newsletter', '.subscribe', '.subscription', '.signup-popup',
+  '.related', '.related-products', '.related-items', '.you-may-also-like', '.upsell', '.cross-sell',
+  '.recommendations', '.recommended', '.product-carousel', '.carousel', '.slider', '.swiper',
+  '.share', '.sharing', '.social', '.social-share', '.social-links', '.share-buttons', '.addthis', '.sharethis',
+  '.gdpr', '.consent', '.cookie-notice', '[class*="newsletter"]', '[aria-label="Cookie banner"]'
 ].join(',');
 
-// UI labels/boilerplate that sometimes survive element-level stripping
-// (e.g. a "Your cart is empty" message rendered as a <p> inside a div that
-// isn't itself matched by STRIP_SELECTORS). Two tiers, deliberately kept
-// separate: EXACT entries only match a line that, once trimmed, is nothing
-// but the label itself — a real sentence that happens to contain the word
-// "menu" or "search" (e.g. "See our full menu of services") must not be
-// dropped, so these never match as a substring. SUBSTRING entries are
-// multi-word phrases distinctive enough that a substring match anywhere in
-// the line is safe — but only on a short, UI-snippet-sized line: a real FAQ
-// answer like "Click Add to Cart, then check out..." or "Refunds are covered
-// by our terms of service..." is exactly the content the bots need, and it
-// would otherwise be dropped for mentioning the phrase.
+// UI labels/boilerplate that sometimes survive element-level stripping (e.g. a
+// "Your cart is empty" message rendered as a <p> inside a div that isn't itself
+// matched by STRIP_SELECTORS). PRECISION over aggression — the goal is to drop
+// pure layout chrome while never deleting a real product description, price,
+// spec or service term. Two tiers:
+//   EXACT: matches only a line that, once trimmed, is nothing BUT the label
+//     itself — so a bare nav/button word like "Menu", "Cart" or "Search" is
+//     dropped, while a real sentence that merely contains it ("See our full
+//     menu of services") is kept, because EXACT never matches as a substring.
+//   SUBSTRING: a few multi-word phrases that are unambiguously footer/consent
+//     chrome, matched only on a short (<=15-word) line. Commerce phrases such
+//     as "add to cart", "in stock" and "free shipping" were REMOVED from this
+//     list on purpose: "Free shipping on orders over $50" and "In stock now"
+//     are genuine product facts the bots should answer from, not clutter.
 const BOILERPLATE_EXACT = new Set([
   'menu', 'search', 'cart', 'my account', 'account', 'wishlist', 'compare',
   'sign in', 'log in', 'login', 'sign up', 'register', 'home', 'close',
@@ -85,8 +150,7 @@ const BOILERPLATE_EXACT = new Set([
 const BOILERPLATE_SUBSTRINGS = [
   'your cart is empty', 'all rights reserved', 'cookie policy', 'privacy policy',
   'terms of service', 'terms and conditions', 'we use cookies', 'accept cookies',
-  'subscribe to our newsletter', 'follow us on', 'added to cart', 'add to cart',
-  'out of stock', 'in stock', 'free shipping on orders'
+  'subscribe to our newsletter', 'follow us on'
 ];
 
 const BOILERPLATE_SUBSTRING_MAX_WORDS = 15;
@@ -99,21 +163,16 @@ function isBoilerplateLine(text) {
   return BOILERPLATE_SUBSTRINGS.some((phrase) => clean.includes(phrase));
 }
 
-// Tried in this order; the first one that yields at least MIN_WORDS_PER_PAGE
-// of content scopes extraction, else <body> — a real content wrapper is
-// almost always a more precise signal than "everything STRIP_SELECTORS
-// didn't remove from <body>," especially on a template-heavy e-commerce page
-// with several still-unstripped promo rails sitting alongside the actual
-// content. The word floor matters: a JS-hydrated storefront often ships an
-// empty <main id="app"> shell with the server-rendered content elsewhere.
-// Bare `section` is last because it's the weakest signal — without a
-// <main>/<article>, the first <section> on a page is as likely a promo
-// banner as the product copy.
-const MAIN_CONTENT_SELECTORS = [
-  'main', 'article',
-  '.product-description', '.faq-content', '.content-body', '#content',
-  'section'
-];
+// Comprehensive extraction: capture the WHOLE <body> (after STRIP_SELECTORS
+// removes nav/header/footer/scripts/consent chrome) by default, so custom
+// layouts, product grids and sites with no semantic landmarks never lose
+// content. A semantic <main>/<article> is used as a tighter scope ONLY when
+// one exists AND it actually carries content — a precise signal that avoids a
+// site's global promo rails without the old hardcoded class guesses
+// (.product-description/#content/etc.), which simply failed on custom markup.
+// The content floor is what lets a JS-hydrated storefront's empty
+// <main id="app"> shell fall through to the server-rendered body.
+const PREFERRED_CONTAINERS = ['main', 'article'];
 
 class CrawlerError extends Error {
   constructor(message, statusCode = 400) {
@@ -244,9 +303,16 @@ async function fetchSafe(urlString, { timeoutMs = PER_REQUEST_TIMEOUT_MS } = {})
 }
 
 // ---------------------------------------------------------------------
-// HTML -> structured markdown. Deliberately simple: only h1-h3/p/li carry
-// content (no generic div/span text-node scraping — that pulls in far more
-// layout noise than prose on most real marketing sites).
+// HTML -> structured markdown. Exhaustive: a recursive walk captures text from
+// every content element — headings, paragraphs, lists, definition lists,
+// blockquotes, tables, AND generic containers (div/section/article) and the
+// inline text inside them — so product cards, feature grids, spec sheets and
+// custom layouts are never skipped. Two rules keep it from double-counting on
+// deeply nested markup: a text block (p/li/dt/dd/td/th/…) contributes its own
+// inline text once (its nested block children are visited separately), and a
+// generic container contributes text directly only when it has no block
+// descendant to descend into (a leaf <div class="price">$40</div>), otherwise
+// just its loose direct text. Tables are converted to real Markdown tables.
 // ---------------------------------------------------------------------
 
 function cleanText(str) {
@@ -292,8 +358,8 @@ function extractPage(html, pageUrl) {
   // STRIP_SELECTORS because they're not semantically chrome, just not the
   // content this page is actually about.
   let markdown = '';
-  for (const selector of MAIN_CONTENT_SELECTORS) {
-    const $found = $(selector);
+  for (const selector of PREFERRED_CONTAINERS) {
+    const $found = $(selector).first();
     if (!$found.length) continue;
     const scoped = sectionsToMarkdown($, $found);
     if (countWords(scoped) >= MIN_WORDS_PER_PAGE) {
@@ -301,58 +367,141 @@ function extractPage(html, pageUrl) {
       break;
     }
   }
+  // Default: the entire stripped <body>. No word-count gate here — a short
+  // product/spec page is still real content and must not be dropped.
   if (!markdown) markdown = sectionsToMarkdown($, $('body'));
 
-  return { title: pageTitle, markdown, links, wordCount: countWords(markdown) };
+  const wordCount = countWords(markdown);
+  // Link density = discovered links per content word. A thin index/listing page
+  // (lots of links, little prose) scores high; a real content page scores low.
+  const linkDensity = links.length / Math.max(1, wordCount);
+  return { title: pageTitle, markdown, links, wordCount, linkDensity };
 }
 
 function countWords(str) {
   return str.split(/\s+/).filter(Boolean).length;
 }
 
-// Every h1-h3 becomes a "## " heading, not #/### — parseIntoChunks splits
+// Every h1-h6 becomes a "## " heading, not #/###/… — parseIntoChunks splits
 // only on "## ", so preserving the source's heading depth would fold every
-// h3 (typically "Ingredients", "Directions", one FAQ question) into its
-// parent h2's chunk instead of making it independently retrievable.
+// deeper heading (typically "Ingredients", "Directions", one FAQ question)
+// into its parent's chunk instead of making it independently retrievable.
+const HEADING_TAGS = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']);
+// Elements whose own inline text is one unit of content. Their text is emitted
+// once; nested BLOCK children are visited separately so nothing doubles.
+const TEXT_BLOCK_TAGS = new Set(['p', 'li', 'dt', 'dd', 'td', 'th', 'blockquote', 'figcaption', 'caption']);
+// Everything that counts as a "block" for nesting decisions (used to split a
+// container's own text from its descendants').
+const BLOCK_TAGS = new Set([
+  'p', 'li', 'ul', 'ol', 'dl', 'dt', 'dd', 'table', 'thead', 'tbody', 'tfoot', 'tr', 'td', 'th',
+  'div', 'section', 'article', 'main', 'header', 'footer', 'nav', 'aside', 'figure', 'figcaption',
+  'blockquote', 'caption', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'
+]);
+const BLOCK_SELECTOR = [...BLOCK_TAGS].join(',');
+
 function sectionsToMarkdown($, $root) {
   const sections = [];
   let current = null;
+
+  const ensureSection = () => { if (!current) current = { heading: 'Overview', blocks: [] }; };
   const pushText = (text, prefix = '') => {
     const clean = cleanText(text);
     if (!clean || isBoilerplateLine(clean)) return;
-    if (!current) current = { heading: 'Overview', paragraphs: [] };
-    current.paragraphs.push(prefix + clean);
+    ensureSection();
+    current.blocks.push(prefix + clean);
+  };
+  // A pre-formatted multi-line block (a Markdown table) — kept verbatim, not
+  // run through cleanText (which would collapse its newlines into one line).
+  const pushRaw = (block) => {
+    if (!block) return;
+    ensureSection();
+    current.blocks.push(block);
+  };
+  const startSection = (text) => {
+    const heading = cleanText(text);
+    if (!heading || isBoilerplateLine(heading)) return; // e.g. a stray "Search"/"Menu" widget heading
+    if (current && current.blocks.length) sections.push(current);
+    current = { heading, blocks: [] };
   };
 
-  $root
-    .find('h1, h2, h3, p, li')
-    .each((_, el) => {
-      const $el = $(el);
-      const tag = el.name;
-      if (tag === 'h1' || tag === 'h2' || tag === 'h3') {
-        const heading = cleanText($el.text());
-        if (!heading || isBoilerplateLine(heading)) return; // e.g. a stray "Search" or "Menu" widget heading
-        if (current && current.paragraphs.length) sections.push(current);
-        current = { heading, paragraphs: [] };
-      } else if (tag === 'p') {
-        pushText($el.text());
-      } else if (tag === 'li') {
-        // Drop nested lists, headings, and paragraphs — each is walked on
-        // its own. Otherwise an FAQ accordion's <li><h3>Q</h3><p>A</p></li>
-        // is emitted twice: once as the <li>'s run-together text, and again
-        // as its own heading + paragraph.
-        const ownText = $el.clone().find('ul, ol, h1, h2, h3, p').remove().end().text();
-        pushText(ownText, '- ');
-      }
-    });
-  if (current && current.paragraphs.length) sections.push(current);
+  // An element's own inline text, with nested block descendants removed so
+  // they aren't counted here AND again when they're walked.
+  const ownInlineText = ($el) => $el.clone().find(BLOCK_SELECTOR).remove().end().text();
+  const hasBlockDescendant = ($el) => $el.find(BLOCK_SELECTOR).length > 0;
+  const isBlock = (node) => node.type === 'tag' && BLOCK_TAGS.has(node.name);
 
-  return sections.map((s) => `## ${s.heading}\n\n${s.paragraphs.join('\n\n')}`).join('\n\n');
+  // <table> -> a GFM Markdown table (first row as header). Critical for
+  // pricing tiers, specs and data sheets, which carry their meaning in the
+  // row/column structure, not in prose.
+  const renderTable = ($t) => {
+    const caption = cleanText($t.children('caption').first().text());
+    if (caption) pushText(caption);
+    const rows = [];
+    $t.find('tr').each((_, tr) => {
+      const $tr = $(tr);
+      if ($tr.closest('table').get(0) !== $t.get(0)) return; // skip a nested table's rows
+      const cells = $tr.children('td, th')
+        .map((_, c) => cleanText($(c).text()).replace(/\|/g, '\\|')).get();
+      if (cells.some((c) => c !== '')) rows.push(cells);
+    });
+    if (!rows.length) return;
+    const cols = Math.max(...rows.map((r) => r.length));
+    const pad = (r) => { const c = r.slice(); while (c.length < cols) c.push(''); return c; };
+    const header = pad(rows[0]);
+    const lines = [
+      `| ${header.join(' | ')} |`,
+      `| ${header.map(() => '---').join(' | ')} |`,
+      ...rows.slice(1).map((r) => `| ${pad(r).join(' | ')} |`)
+    ];
+    pushRaw(lines.join('\n'));
+  };
+
+  const walk = (node) => {
+    if (!node || node.type !== 'tag') return;
+    const tag = node.name;
+    const $el = $(node);
+    if (HEADING_TAGS.has(tag)) { startSection($el.text()); return; }
+    if (tag === 'table') { renderTable($el); return; }
+    if (TEXT_BLOCK_TAGS.has(tag)) {
+      const prefix = tag === 'li' || tag === 'dd' ? '- ' : '';
+      pushText(ownInlineText($el), prefix);
+      // Descend only into nested BLOCK children (e.g. <li><p>…</p>, a sub-list,
+      // an FAQ <li><h3>Q</h3><p>A</p></li>); inline children were in ownText.
+      (node.children || []).forEach((c) => { if (isBlock(c)) walk(c); });
+      return;
+    }
+    // Generic container (div/section/span/…). If it holds no block descendant,
+    // it's a leaf whose full inline text is captured once (keeps a price span
+    // with its label). Otherwise emit only its loose direct text and recurse.
+    if (!hasBlockDescendant($el)) { pushText($el.text()); return; }
+    (node.children || []).forEach((c) => {
+      if (c.type === 'text') pushText($(c).text());
+      else walk(c);
+    });
+  };
+
+  $root.each((_, el) => (el.children || []).forEach(walk));
+  if (current && current.blocks.length) sections.push(current);
+
+  return sections.map((s) => `## ${s.heading}\n\n${s.blocks.join('\n\n')}`).join('\n\n');
 }
 
-function linkPriority(href, text) {
+function linkPriority(urlObj, href, text) {
+  if (isFocusPath(urlObj)) return 2; // content directories (/products/, /collections/, …) first
   const hay = `${href} ${text}`.toLowerCase();
   return PRIORITY_KEYWORDS.some((kw) => hay.includes(kw)) ? 1 : 0;
+}
+
+// Tier 1 save gate: is an extracted page worth keeping as a document? A
+// focus-directory page is judged leniently (short product/course pages count);
+// everything else must clear the content-word floor and not be a link-heavy
+// thin index page. Following a page's links is decided separately, so a thin
+// listing page is still mined for the product links it points to.
+function passesQuality(page, urlObj) {
+  if (isFocusPath(urlObj)) return page.wordCount >= MIN_WORDS_PER_PAGE;
+  if (page.wordCount < MIN_CONTENT_WORDS) return false;
+  if (page.linkDensity > MAX_LINK_RATIO) return false;
+  return true;
 }
 
 // Dedup key for the visited/queued sets: strip the hash and query string
@@ -386,8 +535,8 @@ function dedupeKey(urlObj) {
 // Statuses that usually mean "not for plain HTTP clients" rather than "not
 // here": bot walls, WAF challenges, rate limits.
 const BROWSER_RETRY_STATUSES = new Set([401, 403, 406, 429, 503]);
-const MAX_RENDERS_PER_CRAWL = 8;
-const BROWSER_TOTAL_BUDGET_MS = 60000; // renders take seconds each, not milliseconds
+const MAX_RENDERS_PER_CRAWL = envInt('CRAWLER_MAX_RENDERS', 8);
+const BROWSER_TOTAL_BUDGET_MS = envInt('CRAWLER_BROWSER_BUDGET_MS', 120000); // renders take seconds each, not milliseconds
 
 // "acme.com" and "www.acme.com" are the same site. Comparing exact
 // hostnames made an apex->www redirect (very common) discard every link the
@@ -568,12 +717,15 @@ async function crawlSite(baseUrlString, opts = {}) {
         continue;
       }
 
-      if (page.wordCount >= MIN_WORDS_PER_PAGE) {
+      if (passesQuality(page, finalUrl)) {
         savedUrls.add(dedupeKey(finalUrl));
         pages.push({ title: page.title, markdown: page.markdown, url: finalUrl.toString(), rendered });
         if (rendered) renderedCount += 1;
       } else {
-        if (item.depth === 0) startOutcome = 'thin';
+        // A start page below the thin-shell floor is reported as 'thin' (its
+        // own content is unusable); otherwise it's just a low-quality page
+        // skipped from saving — its links are still mined below.
+        if (item.depth === 0 && page.wordCount < MIN_WORDS_PER_PAGE) startOutcome = 'thin';
         skipped += 1;
       }
 
@@ -588,10 +740,11 @@ async function crawlSite(baseUrlString, opts = {}) {
         }
         if (!sameSite(resolved)) continue; // same-site only (www. and apex count as one) — the hard requirement
         if (resolved.protocol !== 'http:' && resolved.protocol !== 'https:') continue;
+        if (isNoisyPath(resolved)) continue; // Tier 1: never fetch carts/logins/search/pagination
         const linkKey = dedupeKey(resolved);
         if (queued.has(linkKey)) continue;
         queued.add(linkKey);
-        queue.push({ url: resolved, depth: item.depth + 1, priority: linkPriority(link.href, link.text) });
+        queue.push({ url: resolved, depth: item.depth + 1, priority: linkPriority(resolved, link.href, link.text) });
       }
     }
   }
@@ -607,5 +760,6 @@ async function crawlSite(baseUrlString, opts = {}) {
 }
 
 module.exports = {
-  crawlSite, CrawlerError, extractPage, isPrivateIPv4, isPrivateIPv6, isBoilerplateLine, assertPublicHost, describeStartFailure, MIN_WORDS_PER_PAGE
+  crawlSite, CrawlerError, extractPage, isPrivateIPv4, isPrivateIPv6, isBoilerplateLine, assertPublicHost, describeStartFailure,
+  isNoisyPath, isFocusPath, passesQuality, MIN_WORDS_PER_PAGE
 };

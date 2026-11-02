@@ -3,6 +3,7 @@ const { invalidateTenantKnowledge } = require('../domains/tenantProfile');
 const { CATEGORIES } = require('./shared/documentCategory');
 const { parseCatalogCsv, catalogToMarkdown } = require('./shared/csvCatalog');
 const { matchProducts } = require('./shared/productMatch');
+const { slugifySku } = require('./shared/productExtractor');
 
 // How many products to scan per chat turn, and how many cards to attach.
 const MATCH_SCAN_LIMIT = 1000;
@@ -109,6 +110,42 @@ async function ingestCatalogCsv(tenantId, csvText) {
   return { ...result, skipped };
 }
 
+// Upserts auto-extracted products (services/shared/productExtractor.js) into the
+// catalog, so re-ingesting the same source updates rows in place instead of
+// piling up duplicates. Unlike replaceCatalog (the CSV "clean replace"), this is
+// ADDITIVE and non-destructive — it never removes products the extractor didn't
+// mention, so a one-page scrape or a single brochure can't wipe the catalog.
+//
+// Each item is matched to an existing row by (tenantId, sku); the SKU is
+// backfilled from the name when absent. Everything runs in one transaction and
+// rebuilds the catalog document + invalidates knowledge once at the end (not
+// per item). An item that fails validation (e.g. no name) is skipped, never
+// fatal — ingestion must not fail because one extracted item was unusable.
+// @returns {Promise<{ imported: number, created: number, updated: number, skipped: number }>}
+async function importExtractedProducts(tenantId, products) {
+  const list = Array.isArray(products) ? products : [];
+  if (!list.length) return { imported: 0, created: 0, updated: 0, skipped: 0 };
+  let created = 0; let updated = 0; let skipped = 0;
+  await prisma.$transaction(async (tx) => {
+    const docId = await getOrCreateCatalogDocId(tx, tenantId);
+    for (const p of list) {
+      let row;
+      try {
+        row = validateProduct({ ...p, sku: str(p?.sku, 'sku') || slugifySku(p?.name) });
+      } catch {
+        skipped += 1; // an unusable item (no name, over-long field) — skip it
+        continue;
+      }
+      const existing = await tx.productCatalog.findFirst({ where: { tenantId, sku: row.sku }, select: { id: true } });
+      if (existing) { await tx.productCatalog.update({ where: { id: existing.id }, data: { ...row, documentId: docId } }); updated += 1; }
+      else { await tx.productCatalog.create({ data: { tenantId, documentId: docId, ...row } }); created += 1; }
+    }
+    await rebuildDocContent(tx, tenantId, docId);
+  });
+  await invalidateTenantKnowledge(tenantId);
+  return { imported: created + updated, created, updated, skipped };
+}
+
 function getCatalogSummary(tenantId) {
   return prisma.productCatalog.count({ where: { tenantId } }).then((productCount) => ({ hasCatalog: productCount > 0, productCount }));
 }
@@ -180,7 +217,7 @@ async function deleteProduct(tenantId, id) {
 }
 
 module.exports = {
-  ingestCatalogCsv, replaceCatalog, getCatalogSummary,
+  ingestCatalogCsv, replaceCatalog, importExtractedProducts, getCatalogSummary,
   listProducts, addProduct, updateProduct, deleteProduct, matchCatalogProducts,
   ProductError, CATALOG_TITLE
 };

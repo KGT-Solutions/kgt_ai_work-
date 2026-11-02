@@ -90,6 +90,11 @@ function phraseInText(text, phrase) {
   return new RegExp(`(^|[^\\w-])${escapeRegExp(phrase)}([^\\w-]|$)`, 'i').test(text);
 }
 
+// Does this product carry a usable image, so its card renders a real
+// thumbnail rather than an empty placeholder? Used only to ORDER the listing
+// top-up (below) — never to drop a genuinely matched product.
+function hasImage(p) { return !!(p && typeof p.imageUrl === 'string' && p.imageUrl.trim()); }
+
 function toCard(p) {
   return {
     sku: p.sku,
@@ -153,8 +158,16 @@ function matchProducts(products, text, { limit = DEFAULT_LIMIT, listIntent = fal
     out.push(toCard(p));
   };
   for (const { p } of scored) { if (out.length >= limit) break; push(p); }
-  // A listing request ("show me your products") tops up with the first items.
-  if (listIntent) { for (const p of products) { if (out.length >= limit) break; push(p); } }
+  // A listing request ("show me your products") tops up with catalog items.
+  // Prefer items that have a real image so a broad "list / show me everything"
+  // query fills the card grid with rich thumbnails instead of empty ones; the
+  // sort is stable (ES2019+), so catalog order is preserved within each group
+  // and image-less products still fill any remaining slots. Named/scored
+  // matches above keep their relevance order untouched.
+  if (listIntent) {
+    const byImageFirst = [...products].sort((a, b) => (hasImage(b) ? 1 : 0) - (hasImage(a) ? 1 : 0));
+    for (const p of byImageFirst) { if (out.length >= limit) break; push(p); }
+  }
   return out.slice(0, limit);
 }
 

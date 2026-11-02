@@ -2,7 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const prisma = require('../lib/prisma');
 const multer = require('multer');
-const { crawlSite, CrawlerError } = require('../services/shared/crawler');
+const { crawlSite, CrawlerError, isFocusPath } = require('../services/shared/crawler');
 const { pdfToDocuments, PdfIngestError } = require('../services/shared/pdfIngest');
 const { parseCategory, suggestCategory } = require('../services/shared/documentCategory');
 const { createIpRateLimiter } = require('../utils/ipRateLimit');
@@ -47,9 +47,24 @@ const isPdfRateLimited = createIpRateLimiter({ name: 'register-upload', max: 10,
 // re-checks after every upload on its Training screen, hence room for a dozen.
 const isAuditRateLimited = createIpRateLimiter({ name: 'register-audit', max: Number(process.env.PREFLIGHT_AUDIT_RATE_LIMIT_MAX) || 12, windowMs: 10 * 60 * 1000 });
 
-// Room for a full crawl (crawler.js MAX_PAGES = 12) plus several uploaded
-// documents: the wizard lets a company combine both sources.
-const MAX_PAGES_ON_COMPLETE = 40;
+// How many crawled/uploaded pages the signup wizard will persist at /complete.
+// The crawler itself can return far more now (crawler.js CRAWLER_MAX_PAGES), so
+// a thorough e-commerce crawl (e.g. GNC's ~150 pages) passes straight through.
+// Configurable via WIZARD_MAX_PAGES, and clamped to the backend tenant doc cap
+// (MAX_DOCUMENTS_PER_TENANT = 500): a brand-new tenant starts at zero docs, so
+// keeping the wizard cap at/below 500 guarantees /complete can never breach it.
+// When a crawl exceeds this, normalizePages keeps the highest-value pages
+// rather than erroring (see pagePriority).
+const WIZARD_DOC_CEILING = 500;
+const MAX_PAGES_ON_COMPLETE = (() => {
+  const v = Number(process.env.WIZARD_MAX_PAGES);
+  return Math.min(Number.isInteger(v) && v > 0 ? v : 200, WIZARD_DOC_CEILING);
+})();
+// Upper bound on how many submitted entries we even inspect, so an abusive
+// request on this unauthenticated route can't make us validate an unbounded
+// array. Comfortably above any real crawl, and above the cap so prioritization
+// still has a surplus to choose from.
+const MAX_PAGES_TO_SCAN = 1000;
 const MAX_PDF_BYTES = 10 * 1024 * 1024;
 
 // Memory storage, not disk: the PDF is parsed and discarded within the
@@ -102,15 +117,33 @@ function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || ''));
 }
 
+// Priority of a reviewed page when the wizard sends more than the cap. Genuine
+// content directories (/products/, /collections/, /pages/, /blogs/) rank
+// highest, then pages whose URL/title reads like real content, then everything
+// else — so a large crawl keeps its valuable pages and sheds redundant index
+// pages instead of blocking the signup. Pure + deterministic, so
+// /preflight-audit and /complete select the identical subset (their content
+// hashes must match).
+const CONTENT_KEYWORDS = /(about|faq|pricing|plans?|support|help|contact|service|features?|products?|collections?|courses?|catalog|specs?|shipping|returns?|warranty|policy)/i;
+function pagePriority(page) {
+  if (page.sourceUrl) {
+    try { if (isFocusPath(new URL(page.sourceUrl))) return 2; } catch { /* not a URL — fall through */ }
+  }
+  return CONTENT_KEYWORDS.test(`${page.sourceUrl || ''} ${page.title}`) ? 1 : 0;
+}
+
 /**
- * The submitted pages, capped and validated exactly as they'd be saved —
- * shared by /preflight-audit and /complete, so an audit's content hash
- * matches the pages /complete then creates.
- * @returns {{ ok: true, pages: object[] } | { ok: false, error: string }}
+ * The submitted pages, validated and intelligently capped exactly as they'd be
+ * saved — shared by /preflight-audit and /complete, so an audit's content hash
+ * matches the pages /complete then creates. When more than MAX_PAGES_ON_COMPLETE
+ * valid pages are submitted, the highest-value ones are kept (pagePriority)
+ * rather than returning an error; `discovered` reports the pre-cap count so the
+ * caller can tell the user "trained on N of M".
+ * @returns {{ ok: true, pages: object[], discovered: number } | { ok: false, error: string }}
  */
 function normalizePages(rawPages) {
-  const pages = [];
-  for (const p of (Array.isArray(rawPages) ? rawPages : []).slice(0, MAX_PAGES_ON_COMPLETE)) {
+  const valid = [];
+  for (const p of (Array.isArray(rawPages) ? rawPages : []).slice(0, MAX_PAGES_TO_SCAN)) {
     // Omitted category -> CORE_OVERVIEW and omitted botScope -> AUTO (older
     // clients); an unknown value is rejected rather than silently re-filed.
     const category = parseCategory(p?.category);
@@ -125,9 +158,23 @@ function normalizePages(rawPages) {
       botScope: botScope.value,
       sourceUrl
     };
-    if (page.title && page.content) pages.push(page);
+    if (page.title && page.content) valid.push(page);
   }
-  return { ok: true, pages };
+
+  const discovered = valid.length;
+  // Under the cap: keep every page, in submitted order. Over the cap:
+  // prioritize high-value pages, keep the top MAX_PAGES_ON_COMPLETE, then
+  // restore their original order so the saved set still reads naturally.
+  let pages = valid;
+  if (discovered > MAX_PAGES_ON_COMPLETE) {
+    pages = valid
+      .map((p, i) => ({ p, i, score: pagePriority(p) }))
+      .sort((a, b) => b.score - a.score || a.i - b.i)
+      .slice(0, MAX_PAGES_ON_COMPLETE)
+      .sort((a, b) => a.i - b.i)
+      .map((x) => x.p);
+  }
+  return { ok: true, pages, discovered };
 }
 
 // Pre-flight readiness audit of the pages in the wizard, before anything is
@@ -362,11 +409,21 @@ router.post('/complete', async (req, res) => {
     name: created.tenant.name,
     apiKey: created.apiKey, // shown once, on the dashboard's welcome banner
     documentsCreated: pages.length,
+    // How many valid pages the visitor submitted vs. how many we trained on.
+    // Equal unless the crawl exceeded MAX_PAGES_ON_COMPLETE, in which case the
+    // highest-value pages were kept — the wizard surfaces "trained on N of M".
+    pagesDiscovered: normalized.discovered,
+    pagesTrained: pages.length,
     readiness, // { score, level } when the reviewed audit was kept; null while a fresh one runs
     botPreference: botPreference.value,
     // Signed straight in: the wizard lands the new client on /dashboard.
     token: signClientToken(created.user)
   });
 });
+
+// Exposed for unit tests only — attaching to the router object does not change
+// the Express mount (app.use still receives the router).
+router.normalizePages = normalizePages;
+router.MAX_PAGES_ON_COMPLETE = MAX_PAGES_ON_COMPLETE;
 
 module.exports = router;
