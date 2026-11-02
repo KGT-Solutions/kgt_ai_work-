@@ -6,9 +6,12 @@ const { endSession } = require('../services/chatSessions');
 
 // Public chat endpoint used by the embed widget and customers' own apps:
 //   POST /api/v1/tenant-chat/:slug/chat   header X-Tenant-Api-Key: tk_...
-//   body { query, botType: "support" | "sales" (alias: bot; default support), sessionId? }
+//   body { query, botType: "support" | "sales" (alias: bot; default support), sessionId?, language? }
 // botType picks the persona and the category weighting (domains/tenantProfile.js);
 // an unknown value is a 400, and the response echoes the botType that answered.
+// language ("en" | "hi") sets the reply language; without it the engine falls
+// back to detecting the message's own language (engine/language.js). The
+// response echoes the `language` it came out in.
 // The slug picks the tenant; the key must be a live (non-revoked) key of
 // THAT tenant, matched by SHA-256 hash — a key of another tenant is
 // rejected exactly like an unknown one. Everything after this point

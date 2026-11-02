@@ -14,13 +14,17 @@ import { botsFor } from '../../lib/botPreferences';
 
 const BOTS = [
   { id: 'support', name: 'Support Bot', icon: IconShield, tone: 'blue', blurb: 'Grounded, factual answers. Hands off when unsure.',
-    faqKey: 'supportFaqs', starters: ['How do I get started?', 'What is your refund policy?'] },
+    faqKey: 'supportFaqs', starters: ['How do I get started?', 'What is your refund policy?'],
+    startersHi: ['मैं कैसे शुरू करूँ?', 'आपकी रिफ़ंड नीति क्या है?'] },
   { id: 'sales', name: 'Sales Bot', icon: IconBolt, tone: 'green', blurb: 'Persuasive, benefit-led, ends with a next step.',
-    faqKey: 'salesFaqs', starters: ['Why should we choose you?', 'How does your pricing work?'] }
+    faqKey: 'salesFaqs', starters: ['Why should we choose you?', 'How does your pricing work?'],
+    startersHi: ['हम आपको क्यों चुनें?', 'आपकी कीमत कैसे तय होती है?'] }
 ];
 
 const FAQ_POLL_MS = 4000;
 const FAQ_POLL_MAX = 30; // ~2 minutes, then settle for the generic starters
+
+const LANGUAGES = [{ value: 'en', label: 'English' }, { value: 'hi', label: 'हिंदी' }];
 
 // Loads the tenant's starter FAQs, polling while the API reports "pending".
 function useStarterFaqs(ws) {
@@ -81,6 +85,10 @@ export default function BotSandbox({ ws, tenant }) {
   const [sessions, setSessions] = useState({});
   const [pending, setPending] = useState({ support: false, sales: false });
   const [input, setInput] = useState('');
+  // The top-level reply language, sent as `language` on every chat request.
+  // It is authoritative: the bot answers in this language whatever the
+  // question is typed in (apps/api/src/engine/language.js).
+  const [lang, setLang] = useState('en');
   const inputRef = useRef(null);
   const { faqs, generating, regenerate } = useStarterFaqs(ws);
 
@@ -88,7 +96,7 @@ export default function BotSandbox({ ws, tenant }) {
     setThreads((t) => ({ ...t, [bot]: [...t[bot], { role: 'user', text: query }] }));
     setPending((p) => ({ ...p, [bot]: true }));
     try {
-      const data = await ws.chat({ query, botType: bot, sessionId: sessions[bot] });
+      const data = await ws.chat({ query, botType: bot, sessionId: sessions[bot], language: lang });
       setSessions((s) => ({ ...s, [bot]: data.sessionId }));
       setThreads((t) => ({ ...t, [bot]: [...t[bot], { role: 'bot', text: data.answer, meta: data }] }));
     } catch (err) {
@@ -114,8 +122,11 @@ export default function BotSandbox({ ws, tenant }) {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <Segmented label="View" value={view} onChange={setView}
-          options={[{ value: 'chat', label: single ? 'Test chat' : 'Compare answers' }, { value: 'knowledge', label: single ? 'Knowledge' : 'Knowledge split' }]} />
+        <div className="flex flex-wrap items-center gap-3">
+          <Segmented label="View" value={view} onChange={setView}
+            options={[{ value: 'chat', label: single ? 'Test chat' : 'Compare answers' }, { value: 'knowledge', label: single ? 'Knowledge' : 'Knowledge split' }]} />
+          {view === 'chat' && <Segmented label="Language" value={lang} onChange={setLang} options={LANGUAGES} />}
+        </div>
         <p className="text-xs text-fg-3">
           {view === 'chat'
             ? (single ? `Only your ${deployed[0] === 'sales' ? 'Sales' : 'Support'} Bot is deployed — switch on the Overview page.`
@@ -126,10 +137,15 @@ export default function BotSandbox({ ws, tenant }) {
       {view === 'knowledge' && <KnowledgeSplit data={split} deployed={deployed} />}
       <div className={cx('grid gap-4', !single && 'lg:grid-cols-2', view !== 'chat' && 'hidden')}>
         {visibleBots.map((bot) => {
-          const tailored = faqs?.[bot.faqKey] || [];
+          // Starter chips in the selected language: the Hindi FAQ variants when
+          // the toggle is on Hindi (falling back to English if none), and the
+          // Hindi generic starters otherwise.
+          const hiFaqs = faqs?.[`${bot.faqKey}Hi`] || [];
+          const tailored = (lang === 'hi' && hiFaqs.length ? hiFaqs : faqs?.[bot.faqKey]) || [];
+          const generic = lang === 'hi' ? bot.startersHi : bot.starters;
           return (
             <BotPane key={bot.id} bot={bot} tenant={tenant} thread={threads[bot.id]} pending={pending[bot.id]}
-              starters={tailored.length ? tailored : bot.starters} tailored={tailored.length > 0} generating={generating}
+              starters={tailored.length ? tailored : generic} tailored={tailored.length > 0} generating={generating}
               dimmed={target !== 'both' && target !== bot.id} onStarter={(s) => { setTarget(bot.id); ask(bot.id, s); }}
               onFollowUp={(q) => ask(bot.id, q)} />
           );
@@ -221,6 +237,10 @@ function BotPane({ bot, tenant, thread, pending, starters, tailored, generating,
                 m.error ? 'whitespace-pre-wrap border-rose-400/25 bg-rose-500/10 text-rose-100' : 'border-white/[0.08] bg-panel-2/80 text-fg')}>
                 {m.error ? m.text : <ChatText text={m.text} />}
               </div>
+              {/* Rich product cards the API matched to this reply. */}
+              {!m.error && m.meta?.products?.length > 0 && (
+                <ProductCards products={m.meta.products} onInquire={onFollowUp} />
+              )}
               {/* Chips only under the latest reply, and not while the next one is on its way. */}
               {i === thread.length - 1 && !pending && (
                 <FollowUpChips questions={m.meta?.followUps} tone={bot.tone} onPick={onFollowUp} />
@@ -281,6 +301,43 @@ function KnowledgeSplit({ data, deployed }) {
           </Card>
         );
       })}
+    </div>
+  );
+}
+
+// Rich product cards the API matched to a reply (services/shared/productMatch.js),
+// mirroring the embedded widget. "Inquire" asks the bot about that item.
+function ProductThumb({ src, alt }) {
+  const [ok, setOk] = useState(true);
+  if (!src || !ok) return <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md bg-white/[0.05] text-[10px] text-fg-3">—</span>;
+  // eslint-disable-next-line @next/next/no-img-element
+  return <img src={src} alt={alt} onError={() => setOk(false)} className="h-11 w-11 shrink-0 rounded-md object-cover" />;
+}
+
+function ProductCards({ products, onInquire }) {
+  if (!products?.length) return null;
+  return (
+    <div className="mt-2 flex flex-col gap-2" aria-label="Products">
+      {products.map((p) => (
+        <div key={p.sku || p.name} className="flex items-center gap-3 rounded-xl border border-white/[0.08] bg-panel-2/60 p-2.5">
+          <ProductThumb src={p.imageUrl} alt={p.name} />
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-[13px] font-semibold text-fg">{p.name}</p>
+            {p.price && <p className="text-[12px] text-fg-2">{p.price}</p>}
+          </div>
+          {p.productUrl && /^https?:\/\//i.test(p.productUrl) ? (
+            <a href={p.productUrl} target="_blank" rel="noopener noreferrer"
+              className="shrink-0 rounded-lg bg-brand-400/90 px-3 py-1.5 text-[12px] font-semibold text-obsidian transition hover:bg-brand-400">
+              View product
+            </a>
+          ) : (
+            <button type="button" onClick={() => onInquire(`Tell me more about ${p.name}`)}
+              className="shrink-0 rounded-lg bg-brand-400/90 px-3 py-1.5 text-[12px] font-semibold text-obsidian transition hover:bg-brand-400">
+              Inquire
+            </button>
+          )}
+        </div>
+      ))}
     </div>
   );
 }
