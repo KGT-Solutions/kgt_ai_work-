@@ -116,7 +116,10 @@
       emptySales: 'Questions about plans, pricing or features? Ask away — answers come from this company’s own content.',
       langPrompt: 'Choose your language', suggested: 'Suggested questions',
       products: 'Products', inquire: 'Inquire', inquirePrefix: 'Tell me more about ', view: 'View product',
-      errorGeneric: 'The bot could not respond.'
+      errorGeneric: 'The bot could not respond.',
+      attach: 'Attach image', imageReady: 'Image attached', removeImage: 'Remove image',
+      imageTooBig: 'That image is too large (max 5MB).',
+      imageType: 'Please choose a PNG, JPEG, WebP or GIF image.'
     },
     hi: {
       titleSupport: 'सहायता', titleSales: 'सेल्स से बात करें',
@@ -126,7 +129,10 @@
       emptySales: 'प्लान, कीमत या फ़ीचर्स के बारे में सवाल हैं? बेझिझक पूछें — जवाब इसी कंपनी की अपनी जानकारी से आते हैं।',
       langPrompt: 'अपनी भाषा चुनें', suggested: 'सुझाए गए सवाल',
       products: 'उत्पाद', inquire: 'जानकारी लें', inquirePrefix: 'इसके बारे में और बताइए: ', view: 'उत्पाद देखें',
-      errorGeneric: 'बॉट जवाब नहीं दे सका।'
+      errorGeneric: 'बॉट जवाब नहीं दे सका।',
+      attach: 'तस्वीर जोड़ें', imageReady: 'तस्वीर जोड़ी गई', removeImage: 'तस्वीर हटाएँ',
+      imageTooBig: 'यह तस्वीर बहुत बड़ी है (अधिकतम 5MB)।',
+      imageType: 'कृपया PNG, JPEG, WebP या GIF तस्वीर चुनें।'
     }
   };
   function t(key) { return (STRINGS[lang] && STRINGS[lang][key]) || STRINGS.en[key] || ''; }
@@ -185,6 +191,16 @@
     'color:#fff;border-radius:8px;padding:6px 10px;font-size:11.5px;font-weight:600;cursor:pointer;' +
     'font-family:inherit;flex-shrink:0;text-decoration:none;}' +
     '#' + ns + '-body .pcard-btn:hover{opacity:.9;}' +
+    // Image upload: an attach button in the form, a preview bar, and a thumbnail
+    // on the visitor's own message bubble.
+    '#' + ns + '-attach{border:1px solid #cbd5e1;background:#fff;color:#64748b;border-radius:8px;cursor:pointer;' +
+    'font-size:16px;line-height:1;padding:0 10px;flex-shrink:0;}' +
+    '#' + ns + '-attach:hover{border-color:#0f172a;color:#0f172a;}' +
+    '#' + ns + '-preview{display:none;align-items:center;gap:8px;padding:8px 10px;border-top:1px solid #e2e8f0;}' +
+    '#' + ns + '-preview img{width:40px;height:40px;object-fit:cover;border-radius:6px;flex-shrink:0;}' +
+    '#' + ns + '-preview .pv-name{flex:1;min-width:0;font-size:12px;color:#334155;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}' +
+    '#' + ns + '-preview .pv-remove{border:none;background:none;color:#94a3b8;font-size:17px;line-height:1;cursor:pointer;padding:2px 4px;}' +
+    '#' + ns + '-body .msg.user img{display:block;max-width:160px;max-height:160px;border-radius:8px;margin-top:6px;}' +
     // Header right side: the small EN/हिं language toggle beside the close button.
     '#' + ns + '-head-right{display:flex;align-items:center;gap:6px;}' +
     '#' + ns + '-lang{display:flex;gap:2px;background:#f1f5f9;border-radius:999px;padding:2px;}' +
@@ -229,12 +245,18 @@
     '</div>' +
     '</div>' +
     '<div id="' + ns + '-body"></div>' +
+    '<div id="' + ns + '-preview"></div>' +
     '<form id="' + ns + '-form">' +
+    '<button type="button" id="' + ns + '-attach">📎</button>' +
+    '<input id="' + ns + '-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif" style="display:none" />' +
     '<input id="' + ns + '-input" type="text" autocomplete="off" />' +
     '<button id="' + ns + '-send" type="submit"></button>' +
     '</form>';
 
   var byBotMessages = { support: [], sales: [] };
+  // A single image staged for the next message (a base64 data URL), shared
+  // across both bot tabs. Sent alongside the text and cleared once sent.
+  var pendingImage = null;
 
   function renderTabs() {
     var buttons = panel.querySelectorAll('#' + ns + '-tabs button');
@@ -276,8 +298,15 @@
       var m = msgs[i];
       var el = document.createElement('div');
       el.className = 'msg ' + (m.role === 'user' ? 'user' : m.error ? 'err' : 'bot');
-      if (m.role === 'assistant' && !m.error) renderRichText(el, m.text);
-      else el.textContent = m.text;
+      if (m.role === 'assistant' && !m.error) {
+        renderRichText(el, m.text);
+      } else if (m.role === 'user') {
+        if (m.text) el.textContent = m.text;
+        // The visitor's attached image, shown as a thumbnail on their bubble.
+        if (m.image) { var uim = document.createElement('img'); uim.src = m.image; uim.alt = ''; el.appendChild(uim); }
+      } else {
+        el.textContent = m.text;
+      }
       body.appendChild(el);
       // Rich product cards the API matched to this reply.
       if (m.role === 'assistant' && !m.error && m.products && m.products.length) {
@@ -471,6 +500,49 @@
     });
   }
 
+  // Renders the staged-image preview bar (thumbnail + remove), or an inline
+  // error, or nothing. Built with DOM nodes only (no innerHTML) so an image's
+  // data URL can't inject markup.
+  function renderPreview(errText) {
+    var pv = panel.querySelector('#' + ns + '-preview');
+    pv.textContent = '';
+    if (errText) {
+      pv.style.display = 'flex';
+      var err = document.createElement('span');
+      err.className = 'pv-name'; err.style.color = '#b91c1c'; err.textContent = errText;
+      pv.appendChild(err);
+      // Clear the error shortly, unless an image got staged meanwhile.
+      setTimeout(function () { if (!pendingImage) renderPreview(); }, 4000);
+      return;
+    }
+    if (!pendingImage) { pv.style.display = 'none'; return; }
+    pv.style.display = 'flex';
+    var img = document.createElement('img'); img.src = pendingImage; img.alt = ''; pv.appendChild(img);
+    var name = document.createElement('span'); name.className = 'pv-name'; name.textContent = t('imageReady'); pv.appendChild(name);
+    var rm = document.createElement('button');
+    rm.type = 'button'; rm.className = 'pv-remove'; rm.textContent = '×';
+    rm.setAttribute('aria-label', t('removeImage'));
+    rm.addEventListener('click', function () { pendingImage = null; renderPreview(); });
+    pv.appendChild(rm);
+  }
+
+  var attachBtn = panel.querySelector('#' + ns + '-attach');
+  var fileInput = panel.querySelector('#' + ns + '-file');
+  attachBtn.setAttribute('aria-label', t('attach'));
+  attachBtn.setAttribute('title', t('attach'));
+  attachBtn.addEventListener('click', function () { fileInput.click(); });
+  fileInput.addEventListener('change', function () {
+    var file = fileInput.files && fileInput.files[0];
+    fileInput.value = ''; // allow re-selecting the same file
+    if (!file) return;
+    if (['image/png', 'image/jpeg', 'image/webp', 'image/gif'].indexOf(file.type) === -1) { renderPreview(t('imageType')); return; }
+    if (file.size > 5 * 1024 * 1024) { renderPreview(t('imageTooBig')); return; }
+    var reader = new FileReader();
+    reader.onload = function () { pendingImage = String(reader.result || ''); renderPreview(); };
+    reader.onerror = function () { renderPreview(t('imageType')); };
+    reader.readAsDataURL(file);
+  });
+
   panel.querySelector('#' + ns + '-form').addEventListener('submit', function (e) {
     e.preventDefault();
     var input = panel.querySelector('#' + ns + '-input');
@@ -481,21 +553,29 @@
   // follow-up chips. Returns false if there was nothing to send.
   function sendQuery(text) {
     var query = String(text || '').trim();
-    if (!query || sending) return false;
+    // An image on its own is a valid message (the guardrail + bot handle it);
+    // either text or an image is required.
+    var image = pendingImage;
+    if ((!query && !image) || sending) return false;
     sending = true;
     panel.querySelector('#' + ns + '-send').disabled = true;
     // The bot this message went to. The visitor may switch tabs before the
     // reply arrives; the reply and its sessionId still belong to this bot.
     var sentBot = botType;
-    byBotMessages[sentBot].push({ role: 'user', text: query });
+    byBotMessages[sentBot].push({ role: 'user', text: query, image: image });
+    pendingImage = null; renderPreview();
     renderMessages();
 
+    // language: the selected UI language — authoritative, so the bot replies in
+    // it whatever language the question is typed in. The image (if any) is a
+    // base64 data URL; the backend runs its guardrail before the chat LLM.
+    var payload = { botType: sentBot, sessionId: sessionIds[sentBot], language: lang };
+    if (query) payload.query = query;
+    if (image) payload.image = image;
     fetch(apiBase + '/api/v1/tenant-chat/' + encodeURIComponent(tenantSlug) + '/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-tenant-api-key': apiKey },
-      // language: the selected UI language — authoritative, so the bot
-      // replies in it whatever language the question is typed in.
-      body: JSON.stringify({ query: query, botType: sentBot, sessionId: sessionIds[sentBot], language: lang })
+      body: JSON.stringify(payload)
     })
       .then(function (res) {
         return res.json().then(function (data) { return { ok: res.ok, data: data }; });
