@@ -38,7 +38,12 @@ test('a new company signs up, trains both bots and lands on its dashboard', asyn
   await test.step('company details', async () => {
     await page.locator('#r-company').fill('Northwind Thermostats');
     await page.locator('#r-name').fill('Priya Sharma');
-    await page.locator('#r-industry').selectOption('E-commerce & Retail');
+    // Selected by VALUE, not by visible label: the wizard's industry dropdown
+    // became a business-category dropdown (#r-industry -> #r-category), whose
+    // options carry a stable key plus a label that is product copy
+    // ("E-commerce / Retail" today). Matching the label is what broke this step
+    // — a renamed option would silently time out here again.
+    await page.locator('#r-category').selectOption('ecommerce');
     await page.getByRole('button', { name: /^Continue/ }).click();
   });
 
