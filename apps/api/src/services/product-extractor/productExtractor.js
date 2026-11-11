@@ -39,6 +39,32 @@ const PRICE_RE = /(?:₹|rs\.?|inr|us\$|usd|\$|€|£)\s?\d[\d,]*(?:\.\d{1,2})?(
 const IMG_URL_RE = /https?:\/\/[^\s)<>"']+\.(?:png|jpe?g|webp|gif|svg|avif)(?:\?[^\s)<>"']*)?/i;
 // Words that mark a link as a purchase/product link rather than a generic one.
 const BUY_HINT_RE = /\b(buy|purchase|checkout|cart|shop|order|product|view|add\s*to)\b/i;
+// A href whose PATH looks like a product or purchase destination. Matched on
+// path segments, not as a bare substring, because a host can contain a hint
+// word without the link being a purchase link at all — "shop.acme.com/terms"
+// is the returns policy. Plural-tolerant on purpose: BUY_HINT_RE's \bproduct\b
+// does not match "/products/", which is the single most common product URL
+// shape there is (Shopify, WooCommerce), so matching link text alone missed it.
+// Deliberately ITEM paths only. /collections/, /shop/, /store/ and /catalog/
+// are category or section destinations: a policy page that links "browse
+// everything" into a collection is not thereby a product, which is exactly the
+// false positive a wider list produced.
+const PURCHASE_HREF_RE =
+  /\/(products?|buy|purchase|checkout|cart|orders?|items?|p|dp|sku)(?:\/|\?|#|$)/i;
+// An explicit item code: "SKU: WP-1K", "Item code 4471", "Model GX-2". This is
+// unambiguous commerce metadata — a refund clause, a fee schedule or a blog
+// post does not carry one — so it stands in for an image or a buy link on a
+// brochure or spec sheet that contains no URLs at all.
+const SKU_LABEL_RE =
+  /\b(?:sku|item\s*(?:code|no\.?|number)|model(?:\s*(?:no\.?|number))?|art\.?\s*no\.?)\b[\s:#-]*[A-Za-z0-9][\w-]*/i;
+// Headings naming an administrative, policy or editorial section rather than
+// something for sale. A backstop independent of whatever links or images happen
+// to sit nearby: these are the headings that most often precede a sentence
+// quoting an amount ("Orders above $50…", "A restocking fee of $15…"), which is
+// what made them products in the first place. Matched as a substring so
+// "Shipping Policy" and "Refund Threshold" are both caught.
+const NON_PRODUCT_NAME_RE =
+  /(polic(y|ies)|terms|conditions|refunds?|returns?|exchanges?|shipping|delivery|cancellation|restocking|surcharge|\bfees?\b|\bcharges?\b|\btaxes?\b|\bgst\b|\bvat\b|threshold|privacy|cookies?|disclaimer|copyright)/i;
 // Generic section titles that are never a product name on their own.
 const SECTION_NAME_RE =
   /^(products?|our\s+(range|products|collection)|catalog(ue)?|shop|store|pricing|prices?|price\s*list|menu|faqs?|overview|home|about(\s+us)?|contact|features?|benefits?|testimonials?)$/i;
@@ -85,11 +111,16 @@ function firstImage(s) {
 // page links to terms; a blog post links to another post).
 function firstPurchaseLink(s) {
   const str = String(s || '');
+  const looksLikePurchase = (text, href) => {
+    if (IMG_URL_RE.test(href)) return false;
+    if (BUY_HINT_RE.test(text)) return true; // "Buy now", "Add to cart", "View product"
+    try { return PURCHASE_HREF_RE.test(new URL(href).pathname); } catch { return PURCHASE_HREF_RE.test(href); }
+  };
   for (const [, text, href] of str.matchAll(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g)) {
-    if ((BUY_HINT_RE.test(text) || BUY_HINT_RE.test(href)) && !IMG_URL_RE.test(href)) return href;
+    if (looksLikePurchase(text, href)) return href;
   }
   for (const m of str.matchAll(/https?:\/\/[^\s)<>"']+/gi)) {
-    if (BUY_HINT_RE.test(m[0]) && !IMG_URL_RE.test(m[0])) return m[0];
+    if (looksLikePurchase('', m[0])) return m[0];
   }
   return '';
 }
@@ -232,10 +263,12 @@ function extractHeadingBlocks(text) {
       // the many tenants that sell no products at all, that is invented
       // commerce, so this pass requires a signal prose does not produce
       // incidentally: a product image, or a link that actually reads like a
-      // purchase link. Bare "heading + an amount" is left to the table and
-      // bullet passes, which carry their own structural evidence.
-      const signal = firstImage(scope) || firstPurchaseLink(scope);
-      if (!leadIsBullet && signal && name && !SECTION_NAME_RE.test(name)) {
+      // purchase link, or an explicit item code. Bare "heading + an amount" is
+      // left to the table and bullet passes, which carry their own structural
+      // evidence, and to the opt-in LLM tier for genuinely messy prose.
+      const signal = firstImage(scope) || firstPurchaseLink(scope) || SKU_LABEL_RE.test(scope);
+      const nameable = name && !SECTION_NAME_RE.test(name) && !NON_PRODUCT_NAME_RE.test(name);
+      if (!leadIsBullet && signal && nameable) {
         const np = splitNamePrice(cur.heading);
         out.push({
           name: np.name || name,

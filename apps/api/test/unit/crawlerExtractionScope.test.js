@@ -99,6 +99,69 @@ describe('crawler: extraction scope over repeated semantic containers', () => {
     assert.doesNotMatch(page.markdown, /Sitewide Sale/, 'content outside a real <main> is out of scope');
   });
 
+  test('a nested <article> is not emitted twice', () => {
+    // Scoping every match rather than the first means a container inside
+    // another match could be walked as part of its parent AND again on its
+    // own. The filter in extractPage excludes nested matches; this pins it,
+    // because the symptom would be duplicated text inflating wordCount and
+    // the retrieval index rather than an error.
+    const page = extractPage(
+      [
+        '<html><body><article>',
+        `<h2>Outer</h2><p>${DESC(1)}</p>`,
+        `<article><h3>Inner</h3><p>NESTED-ONCE ${DESC(2)}</p></article>`,
+        '</article></body></html>'
+      ].join('\n'),
+      new URL('https://shop.example/products/x')
+    );
+    assert.equal((page.markdown.match(/NESTED-ONCE/g) || []).length, 1);
+    assert.match(page.markdown, /## Outer/);
+    assert.match(page.markdown, /## Inner/);
+  });
+
+  test('a real <main> still wins over an <article> used as a sidebar widget', () => {
+    // PREFERRED_CONTAINERS is ordered: 'main' is tried first and breaks out, so
+    // promo/aside content marked up as <article> stays out of scope.
+    const page = extractPage(
+      [
+        '<html><body>',
+        `<main><h1>Real Content</h1><p>${DESC(1)}</p></main>`,
+        '<article><h2>Promo Widget</h2><p>Unrelated promotional copy that is not what this page is about.</p></article>',
+        '</body></html>'
+      ].join('\n'),
+      new URL('https://shop.example/products/x')
+    );
+    assert.match(page.markdown, /## Real Content/);
+    assert.doesNotMatch(page.markdown, /Promo Widget/);
+  });
+
+  test('two <main> elements both contribute (invalid HTML, but it occurs)', () => {
+    const page = extractPage(
+      [
+        '<html><body>',
+        `<main><h1>First Main</h1><p>${DESC(1)}</p></main>`,
+        `<main><h1>Second Main</h1><p>${DESC(2)}</p></main>`,
+        '</body></html>'
+      ].join('\n'),
+      new URL('https://shop.example/products/x')
+    );
+    assert.match(page.markdown, /## First Main/);
+    assert.match(page.markdown, /## Second Main/);
+  });
+
+  test('an <article> too thin to clear the floor falls through to the body', () => {
+    const page = extractPage(
+      [
+        '<html><body>',
+        '<article><h2>Teaser</h2></article>',
+        `<div><h1>Full Spec</h1><p>${DESC(1)}</p></div>`,
+        '</body></html>'
+      ].join('\n'),
+      new URL('https://shop.example/products/x')
+    );
+    assert.match(page.markdown, /## Full Spec/);
+  });
+
   test('an empty JS-shell <main> still falls through to the server-rendered body', () => {
     // Regression guard for the documented reason the content floor exists.
     const page = extractPage(
