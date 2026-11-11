@@ -65,11 +65,15 @@ export default function KnowledgeUploadStep({
       <div className="flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between">
         <Button onClick={onBack} disabled={website.scanning}><IconArrowLeft className="h-4 w-4" />Back</Button>
         <div className="flex flex-col items-stretch gap-1 sm:items-end">
-          <Button variant="primary" onClick={onNext} disabled={website.scanning || trainableCount === 0 || trainableCount > maxEntries}>
+          <Button variant="primary" onClick={onNext} disabled={website.scanning || trainableCount === 0}>
             Analyze & continue <IconArrowRight className="h-4 w-4" />
           </Button>
           {trainableCount === 0 && <span className="text-xs text-fg-3">Add at least one document or website page.</span>}
-          {trainableCount > maxEntries && <span className="text-xs text-amber-200">Remove {trainableCount - maxEntries} entries to continue.</span>}
+          {trainableCount > maxEntries && (
+            <span className="text-xs text-amber-200">
+              We&apos;ll train on the {maxEntries} highest-value pages ({trainableCount - maxEntries} lower-priority {trainableCount - maxEntries === 1 ? 'page' : 'pages'} won&apos;t be added).
+            </span>
+          )}
         </div>
       </div>
     </div>

@@ -7,7 +7,8 @@ const dns = require('dns').promises;
 // unlike some other mocks in this suite, these can be (re)installed in any
 // order relative to requiring crawler.js.
 const {
-  crawlSite, extractPage, isPrivateIPv4, isPrivateIPv6, isBoilerplateLine, CrawlerError
+  crawlSite, extractPage, isPrivateIPv4, isPrivateIPv6, isBoilerplateLine, CrawlerError,
+  isNoisyPath, isFocusPath, passesQuality
 } = require('../../src/services/shared/crawler');
 
 const PUBLIC_IP = { address: '8.8.8.8', family: 4 };
@@ -128,7 +129,11 @@ describe('crawler: extractPage — chrome stripping and heading-to-markdown conv
     assert.match(page.markdown, /## Whey Protein/);
   });
 
-  test('prefers a specific content wrapper over a generic promo <section> when there is no <main>', () => {
+  test('comprehensive mode: with no <main>, the whole stripped <body> is captured (custom layouts keep their content)', () => {
+    // Deep-scrape behaviour: there is no semantic <main>/<article> and no
+    // hardcoded wrapper class to lean on, so the entire body is extracted —
+    // both the product description (in a custom div) AND the promo section.
+    // Nothing is dropped for not sitting in a recognised container.
     const page = extractPage(
       html([
         '<body>',
@@ -139,7 +144,8 @@ describe('crawler: extractPage — chrome stripping and heading-to-markdown conv
       new URL('https://gnc-test.example/whey')
     );
     assert.match(page.markdown, /## Whey Protein/);
-    assert.doesNotMatch(page.markdown, /Summer Sale/);
+    assert.match(page.markdown, /## Summer Sale/);
+    assert.match(page.markdown, /Save 20% sitewide/);
   });
 
   test('falls through a near-empty <main> shell to content elsewhere instead of returning nothing', () => {
@@ -168,6 +174,40 @@ describe('crawler: extractPage — chrome stripping and heading-to-markdown conv
     assert.match(page.markdown, /Take one scoop with water\./);
   });
 
+  test('captures text nested deep inside product-card div/span containers (no semantic tags)', () => {
+    const page = extractPage(
+      html([
+        '<main><div class="grid">',
+        '<div class="card"><h3>Blue Hoodie</h3><div class="price"><span>$</span>40</div>',
+        '<span class="desc">Cozy organic cotton, built to last for everyday wear.</span></div>',
+        '</div></main>'
+      ]),
+      new URL('https://shop.example/hoodie')
+    );
+    assert.match(page.markdown, /## Blue Hoodie/);
+    assert.match(page.markdown, /\$40/); // the price span + text node, kept together
+    assert.match(page.markdown, /Cozy organic cotton/);
+  });
+
+  test('converts an HTML <table> into a clean GFM Markdown table (pricing tiers / specs)', () => {
+    const page = extractPage(
+      html([
+        '<main><h2>Pricing</h2>',
+        '<table>',
+        '<tr><th>Plan</th><th>Price</th></tr>',
+        '<tr><td>Basic</td><td>$10</td></tr>',
+        '<tr><td>Pro</td><td>$20</td></tr>',
+        '</table></main>'
+      ]),
+      new URL('https://shop.example/pricing')
+    );
+    assert.match(page.markdown, /## Pricing/);
+    assert.match(page.markdown, /\| Plan \| Price \|/);
+    assert.match(page.markdown, /\| --- \| --- \|/);
+    assert.match(page.markdown, /\| Basic \| \$10 \|/);
+    assert.match(page.markdown, /\| Pro \| \$20 \|/);
+  });
+
   test('falls back to the h1, then the URL path, when there is no <title>', () => {
     const withH1 = extractPage('<body><h1>Fallback Title</h1><p>text</p></body>', new URL('https://x.example/p'));
     assert.equal(withH1.title, 'Fallback Title');
@@ -189,6 +229,14 @@ describe('crawler: isBoilerplateLine', () => {
       'How do I order? Click Add to Cart on any product page, then check out with a card or PayPal in seconds.',
       'Returns are covered under our terms of service, which allow refunds within 30 days of purchase for any reason.'
     ]) {
+      assert.equal(isBoilerplateLine(line), false, `expected "${line}" to be kept`);
+    }
+  });
+
+  test('keeps short commerce lines that are real product facts, not chrome', () => {
+    // These were previously dropped by over-aggressive substring filters; a
+    // price/stock/shipping line is content the bots should be able to answer.
+    for (const line of ['Free shipping on orders over $50', 'In stock now', 'Out of stock', 'Add to cart to save it']) {
       assert.equal(isBoilerplateLine(line), false, `expected "${line}" to be kept`);
     }
   });
@@ -323,5 +371,47 @@ describe('crawler: crawlSite orchestration (mocked DNS + fetch, real BFS/priorit
     assert.ok(result.pages.some((p) => p.title === 'Acme')); // the safe page still made it through
     assert.ok(!result.pages.some((p) => p.url.includes('internal.acme-test.example')));
     assert.ok(result.skipped >= 1);
+  });
+});
+
+describe('crawler: Tier 1 URL gatekeeper + page quality', () => {
+  test('isNoisyPath flags carts/logins/search/account and path pagination', () => {
+    for (const p of ['/cart', '/checkout', '/account', '/my-account', '/login', '/sign-in', '/signup', '/search', '/wishlist', '/page/2'])
+      assert.equal(isNoisyPath(new URL(`https://x.example${p}`)), true, `expected ${p} noisy`);
+    for (const p of ['/products/widget', '/about', '/blogs/news', '/'])
+      assert.equal(isNoisyPath(new URL(`https://x.example${p}`)), false, `expected ${p} allowed`);
+  });
+
+  test('isFocusPath flags content directories but not utility/pagination paths', () => {
+    for (const p of ['/products/widget', '/collections/all', '/pages/about', '/blogs/news', '/courses/intro'])
+      assert.equal(isFocusPath(new URL(`https://x.example${p}`)), true, `expected ${p} focus`);
+    for (const p of ['/page/2', '/cart', '/about'])
+      assert.equal(isFocusPath(new URL(`https://x.example${p}`)), false, `expected ${p} non-focus`);
+  });
+
+  test('passesQuality drops a link-heavy thin index page, keeps a short focus-dir page', () => {
+    const noisy = new URL('https://x.example/sitemap');
+    assert.equal(passesQuality({ wordCount: 20, linkDensity: 2 }, noisy), false); // density > 1.5
+    assert.equal(passesQuality({ wordCount: 20, linkDensity: 0.2 }, noisy), true);
+    // a short product page in a focus directory is kept even with many links
+    assert.equal(passesQuality({ wordCount: 16, linkDensity: 5 }, new URL('https://x.example/products/widget')), true);
+  });
+
+  test('a blacklisted utility link (/cart) is never fetched, real content still crawled', async () => {
+    const calls = [];
+    mock.method(dns, 'lookup', async () => [PUBLIC_IP]);
+    mock.method(globalThis, 'fetch', async (url) => {
+      const path = new URL(url).pathname;
+      calls.push(path);
+      if (path === '/') {
+        return htmlResponse(`<html><head><title>Home</title></head><body><h1>Home</h1><p>${LONG_P}</p><a href="/cart">Cart</a><a href="/about">About</a></body></html>`);
+      }
+      if (path === '/about') return htmlResponse(`<html><head><title>About</title></head><body><h1>About</h1><p>${LONG_P}</p></body></html>`);
+      return htmlResponse('not found', { status: 404 });
+    });
+    const result = await crawlSite('https://shop-test.example/', { maxPages: 10 });
+    assert.ok(!calls.includes('/cart'), '/cart must never be fetched');
+    assert.ok(result.pages.some((p) => p.title === 'About'));
+    mock.restoreAll();
   });
 });
