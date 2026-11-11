@@ -78,6 +78,22 @@ function firstImage(s) {
   return raw ? raw[0] : '';
 }
 
+// A link that genuinely reads like a purchase/product link — its text or href
+// matches BUY_HINT_RE. Stricter than firstBuyLink below, which falls back to
+// *any* non-image link: used to DECIDE whether a heading block is a product at
+// all, where "the page contains a link" is far too weak a signal (a policy
+// page links to terms; a blog post links to another post).
+function firstPurchaseLink(s) {
+  const str = String(s || '');
+  for (const [, text, href] of str.matchAll(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g)) {
+    if ((BUY_HINT_RE.test(text) || BUY_HINT_RE.test(href)) && !IMG_URL_RE.test(href)) return href;
+  }
+  for (const m of str.matchAll(/https?:\/\/[^\s)<>"']+/gi)) {
+    if (BUY_HINT_RE.test(m[0]) && !IMG_URL_RE.test(m[0])) return m[0];
+  }
+  return '';
+}
+
 // First purchase/product link in a span: prefer a link whose text or href
 // hints at buying; else the first non-image link; else a bare non-image URL.
 function firstBuyLink(s) {
@@ -208,7 +224,17 @@ function extractHeadingBlocks(text) {
       const name = stripMd(cur.heading);
       const scope = `${cur.heading}\n${lead}`;
       const leadIsBullet = /^\s*(?:[-*•]|\d+[.)])\s+/.test(lead);
-      const signal = PRICE_RE.test(scope) || firstImage(scope) || firstBuyLink(scope);
+      // A price ALONE is not a product signal. Amounts appear constantly in
+      // text that sells nothing — a consultation fee, a refund threshold, a
+      // restocking fee, a free-shipping minimum, a blog post about a price
+      // change — and everything emitted here becomes a ProductCatalog row that
+      // renders as a purchasable card, with a price, beneath a chat reply. For
+      // the many tenants that sell no products at all, that is invented
+      // commerce, so this pass requires a signal prose does not produce
+      // incidentally: a product image, or a link that actually reads like a
+      // purchase link. Bare "heading + an amount" is left to the table and
+      // bullet passes, which carry their own structural evidence.
+      const signal = firstImage(scope) || firstPurchaseLink(scope);
       if (!leadIsBullet && signal && name && !SECTION_NAME_RE.test(name)) {
         const np = splitNamePrice(cur.heading);
         out.push({

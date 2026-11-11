@@ -359,8 +359,15 @@ function extractPage(html, pageUrl) {
   // content this page is actually about.
   let markdown = '';
   for (const selector of PREFERRED_CONTAINERS) {
-    const $found = $(selector).first();
-    if (!$found.length) continue;
+    const $all = $(selector);
+    if (!$all.length) continue;
+    // EVERY occurrence, not just the first. A collections page or blog index
+    // is routinely one <article> per card — the default card markup in several
+    // major storefront themes — and scoping to the first match would keep one
+    // product and silently drop the rest of the grid, which is the opposite of
+    // what this pass is for. Nested matches are excluded so a container inside
+    // another match isn't walked, and its text emitted, twice.
+    const $found = $all.filter((_, el) => $(el).parents(selector).length === 0);
     const scoped = sectionsToMarkdown($, $found);
     if (countWords(scoped) >= MIN_WORDS_PER_PAGE) {
       markdown = scoped;

@@ -25,7 +25,14 @@ const real = {};
 function makeDelegates() {
   const count = (name) => { calls[name] = (calls[name] || 0) + 1; };
   const pc = {
-    findMany: async ({ where }) => { count('productCatalog.findMany'); return state.products.filter((r) => r.tenantId === where.tenantId); },
+    findMany: async ({ where }) => {
+      count('productCatalog.findMany');
+      // Honours `sku: { in: [...] }` (the batched existence probe) and the
+      // unfiltered read rebuildDocContent does.
+      return state.products.filter((r) =>
+        r.tenantId === where.tenantId &&
+        (where.sku?.in ? where.sku.in.includes(r.sku) : true));
+    },
     findFirst: async ({ where }) => {
       count('productCatalog.findFirst');
       return state.products.find((r) =>

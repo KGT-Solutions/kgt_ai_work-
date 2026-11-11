@@ -11,7 +11,16 @@ let state; let realTx; let realPc; let realTd;
 
 function makeDelegates() {
   const pc = {
-    findMany: async ({ where }) => state.products.filter((r) => r.tenantId === where.tenantId),
+    // importExtractedProducts probes for existing rows with
+    // `sku: { in: [...] }` and inserts the new ones with a single createMany;
+    // rebuildDocContent reads the tenant's rows unfiltered.
+    findMany: async ({ where }) => state.products.filter((r) =>
+      r.tenantId === where.tenantId &&
+      (where.sku?.in ? where.sku.in.includes(r.sku) : true)),
+    createMany: async ({ data }) => {
+      for (const d of data) state.products.push({ id: `p${++state.seq}`, ...d });
+      return { count: data.length };
+    },
     count: async ({ where }) => state.products.filter((r) => r.tenantId === where.tenantId).length,
     findFirst: async ({ where }) => state.products.find((r) =>
       (where.id ? r.id === where.id : true) &&

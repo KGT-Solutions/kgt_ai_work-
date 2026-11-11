@@ -30,8 +30,17 @@ const real = {};
 
 function makeDelegates() {
   const pc = {
-    findMany: async ({ where }) => state.products.filter((r) => r.tenantId === where.tenantId),
+    // Supports the `sku: { in: [...] }` filter the batched import reads with,
+    // as well as the unfiltered read rebuildDocContent does.
+    findMany: async ({ where }) => state.products.filter((r) =>
+      r.tenantId === where.tenantId &&
+      (where.sku?.in ? where.sku.in.includes(r.sku) : true)),
     count: async ({ where }) => state.products.filter((r) => r.tenantId === where.tenantId).length,
+    createMany: async ({ data }) => {
+      if (failCreate) throw new Error('P2028 Transaction already closed');
+      for (const d of data) state.products.push({ id: `p${++state.seq}`, ...d });
+      return { count: data.length };
+    },
     findFirst: async ({ where }) => state.products.find((r) =>
       (where.id ? r.id === where.id : true) &&
       (where.tenantId ? r.tenantId === where.tenantId : true) &&
