@@ -3,7 +3,7 @@ const { invalidateTenantKnowledge } = require('../domains/tenantProfile');
 const { CATEGORIES } = require('./shared/documentCategory');
 const { parseCatalogCsv, catalogToMarkdown } = require('./shared/csvCatalog');
 const { matchProducts } = require('./shared/productMatch');
-const { slugifySku } = require('./shared/productExtractor');
+const { slugifySku } = require('./product-extractor/productExtractor');
 
 // How many products to scan per chat turn, and how many cards to attach.
 const MATCH_SCAN_LIMIT = 1000;
@@ -110,7 +110,7 @@ async function ingestCatalogCsv(tenantId, csvText) {
   return { ...result, skipped };
 }
 
-// Upserts auto-extracted products (services/shared/productExtractor.js) into the
+// Upserts auto-extracted products (services/product-extractor/productExtractor.js) into the
 // catalog, so re-ingesting the same source updates rows in place instead of
 // piling up duplicates. Unlike replaceCatalog (the CSV "clean replace"), this is
 // ADDITIVE and non-destructive — it never removes products the extractor didn't

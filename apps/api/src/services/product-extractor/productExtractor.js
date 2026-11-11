@@ -24,7 +24,7 @@
 // (trim, cap, http(s)-only URLs); catalogIngest.validateProduct is still the
 // authority before any DB write, and SKUs are backfilled there from the name.
 
-const { distillMarkdown } = require('./llmDistillation');
+const { distillMarkdown } = require('../llm-distillation/llmDistillation');
 
 const MAX_PRODUCTS = 200;   // abuse/noise ceiling for one ingest
 const MAX_NAME = 255;       // keep in step with catalogIngest MAX

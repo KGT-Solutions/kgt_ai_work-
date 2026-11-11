@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 
 const {
   distillMarkdown, distillPages, splitJsonBlocks, cleanProducts
-} = require('../../src/services/shared/llmDistillation');
+} = require('../../src/services/llm-distillation/llmDistillation');
 
 // A fake LLM `generate` is injected everywhere so these run with no provider
 // configured and no network. RAW is comfortably above the min-words-to-distill

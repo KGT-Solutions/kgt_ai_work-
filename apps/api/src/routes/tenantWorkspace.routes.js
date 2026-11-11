@@ -5,8 +5,8 @@ const prisma = require('../lib/prisma');
 const { issueApiKey } = require('../utils/tenantApiKeys');
 const { invalidateTenantKnowledge } = require('../domains/tenantProfile');
 const { crawlSite, CrawlerError } = require('../services/shared/crawler');
-const { distillPages, isDistillationEnabled, isProductImportEnabled } = require('../services/shared/llmDistillation');
-const { extractProducts, mergeProducts, isAutoProductExtractionEnabled } = require('../services/shared/productExtractor');
+const { distillPages, isDistillationEnabled, isProductImportEnabled } = require('../services/llm-distillation/llmDistillation');
+const { extractProducts, mergeProducts, isAutoProductExtractionEnabled } = require('../services/product-extractor/productExtractor');
 const { pdfToDocuments, PdfIngestError } = require('../services/shared/pdfIngest');
 const { parseCategory, suggestCategory } = require('../services/shared/documentCategory');
 const { crawlConsentRecord, hostOf } = require('../services/shared/crawlConsent');
@@ -53,7 +53,7 @@ const isFaqRegenLimited = createIpRateLimiter({ name: 'workspace-faq-regen', max
 // Readiness audits: each is an LLM call billed to the tenant.
 const isAuditLimited = createIpRateLimiter({ name: 'workspace-audit', max: 6, windowMs: 60 * 60 * 1000 });
 
-// Automated Intelligent Product Extractor hook (services/shared/productExtractor.js).
+// Automated Intelligent Product Extractor hook (services/product-extractor/productExtractor.js).
 // Runs AFTER the documents are already saved, over the same text, and upserts
 // any products it finds into the catalog — so a website scrape, a PDF/brochure
 // upload or a pasted note auto-populates the rich product cards with no separate

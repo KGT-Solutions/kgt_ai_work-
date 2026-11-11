@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 
 const {
   extractProductsHeuristic, extractProducts, mergeProducts, slugifySku, isAutoProductExtractionEnabled
-} = require('../../src/services/shared/productExtractor');
+} = require('../../../src/services/product-extractor/productExtractor');
 
 describe('productExtractor: heuristic — Markdown tables', () => {
   test('maps columns by header and captures every row, ignoring $ / ₹ currencies', () => {
