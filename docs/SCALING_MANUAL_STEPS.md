@@ -108,6 +108,70 @@ changes which container answers there. Keep the `127.0.0.1:` prefix: without
 it the replicas' entry point would bind `0.0.0.0` and expose the API publicly,
 bypassing your TLS terminator.
 
+## 2c. Required — raise your host Nginx read timeout before the first large import
+
+**This one is silent from both ends.** The crawler's ceilings are now
+env-tunable and default far above the dozen pages they used to be
+(`CRAWLER_MAX_PAGES=150`, `CRAWLER_BUDGET_MS=120000`), and `/scrape` is a
+**synchronous** request — the browser holds the connection open for the entire
+crawl. The compose nginx in front of the replicas already allows for that
+(`infra/nginx/api.conf` sets `proxy_read_timeout 180s`). **Your host Nginx does
+not**, because nginx's own default is **60 seconds** and `ai-hub.conf` lives on
+the server, not in this repository.
+
+So at the default budget a thorough crawl runs up to ~120s, the host proxy cuts
+it at 60, and the visitor gets a 504 while the API is still working. Nothing
+looks wrong on either side:
+
+- the API logs no error, because it never failed — it was mid-crawl;
+- **every page already fetched is discarded.** The documents are written only
+  after the crawl returns (`routes/tenantWorkspace.routes.js`: `crawlSite` →
+  `distillPages` → the `$transaction` that creates them), so a cut connection
+  loses the whole import, not the tail of it.
+
+Add this to the `location` block of `ai-hub.conf` that proxies `${API_PORT}`:
+
+```nginx
+proxy_read_timeout 180s;   # match infra/nginx/api.conf — the crawl is synchronous
+proxy_send_timeout 180s;
+```
+
+then `nginx -t && systemctl reload nginx`.
+
+**The same exposure covers signup.** The wizard's
+`POST /api/v1/public/register/analyze` crawls through the same code path, so a
+504 there drops a prospect mid-onboarding — worse than a failed re-import,
+because nobody on your side sees it happen.
+
+**If you would rather not touch the host config,** cap the crawl under the proxy
+instead: `CRAWLER_BUDGET_MS=45000` keeps a full crawl inside a 60s timeout, at
+the cost of fewer pages on a large site. Those are the only two options — the
+request cannot return before the crawl does.
+
+Verify through your real public entrypoint, not from the server (hairpinning
+through the public IP adds a hop, as in §2):
+
+```bash
+# a site big enough to run past 60s; watch the elapsed time, not just the status
+curl -s -o /dev/null -w 'status=%{http_code} elapsed=%{time_total}s\n' \
+  -X POST https://YOUR-API/api/v1/client/workspace/scrape \
+  -H "Authorization: Bearer $CLIENT_JWT" -H 'Content-Type: application/json' \
+  -d '{"url":"https://a-large-site.example","authorized":true}'
+# Wrong: status=504 at ~60s.
+# Right: status=201 at whatever the crawl actually took.
+```
+
+### Check this again if you ever enable distillation
+
+`SCRAPE_DISTILLATION=true` adds one LLM call **per crawled page**, and it runs
+*after* the crawl in the same request rather than inside its budget — so the two
+costs add up. With the defaults (`SCRAPE_DISTILLATION_MAX_PAGES=25`,
+`SCRAPE_DISTILLATION_CONCURRENCY=2`, `LLM_TIMEOUT_MS=20000` against a chain of
+three providers) 25 pages run as 13 sequential rounds, which can exceed **180s
+on its own** — meaning it will 504 at the compose layer too, not just the host.
+Raise both proxies together, or lower `SCRAPE_DISTILLATION_MAX_PAGES`, before
+turning it on. It is off by default, so this costs you nothing until you want it.
+
 ## 3. Required — apply the new migration
 
 One additive migration adds `ChatSession.summaryClaimedAt` (one nullable

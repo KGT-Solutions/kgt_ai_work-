@@ -42,7 +42,11 @@ const BUSINESS_CATEGORIES = [
   { value: 'services', label: 'Services', asksFor: 'service descriptions and terms, FAQs, and company policies' },
   { value: 'other', label: 'Other', asksFor: 'an overview, FAQs, and your key policies' }
 ];
-const MAX_TRAINING_PAGES = 40; // mirrors MAX_PAGES_ON_COMPLETE in the API
+// Soft cap mirroring the API's MAX_PAGES_ON_COMPLETE (WIZARD_MAX_PAGES, default
+// 200). Going over it no longer blocks the signup — the backend keeps the
+// highest-value pages and reports how many it trained on — so this only drives
+// the informational "N / cap" note on the Knowledge step.
+const MAX_TRAINING_PAGES = 200;
 const STEPS = ['Account', 'Company', 'Choose bots', 'Knowledge', 'Training', 'Review & launch'];
 const STEP = { ACCOUNT: 0, COMPANY: 1, BOTS: 2, KNOWLEDGE: 3, TRAINING: 4, REVIEW: 5 };
 const READY_AT = 80; // mirrors the API's Production Ready threshold (services/botAuditor.js)
@@ -141,7 +145,8 @@ export default function Register() {
   const launch = async () => {
     if (launching || !canLaunch) return;
     if (!trainable.length) return setLaunchError('Add at least one website page or document with a title and content.');
-    if (trainable.length > MAX_TRAINING_PAGES) return setLaunchError(`You can train on up to ${MAX_TRAINING_PAGES} entries — remove ${trainable.length - MAX_TRAINING_PAGES}.`);
+    // Over the cap is no longer a hard stop: the API keeps the highest-value
+    // pages and tells us how many it trained on (handled after launch).
     setLaunchError('');
     setLaunching(true);
     try {
@@ -160,7 +165,12 @@ export default function Register() {
         emailVerificationToken: verification?.token
       });
       setToken('client', data.token);
-      putSignupHandoff({ apiKey: data.apiKey, slug: data.slug, documentsCreated: data.documentsCreated });
+      putSignupHandoff({
+        apiKey: data.apiKey, slug: data.slug, documentsCreated: data.documentsCreated,
+        // When a large crawl was trimmed to the cap, the dashboard welcome can
+        // say "trained on N of M pages".
+        pagesDiscovered: data.pagesDiscovered, pagesTrained: data.pagesTrained
+      });
       router.push('/dashboard');
     } catch (err) {
       setLaunching(false);

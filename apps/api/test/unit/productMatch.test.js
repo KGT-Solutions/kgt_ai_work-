@@ -69,6 +69,22 @@ describe('productMatch: matchProducts', () => {
     assert.equal(cards[0].sku, 'RC-2');
     assert.equal(cards.length, 2);
   });
+
+  test('listIntent fill prefers products with a real image, keeping cards visual', () => {
+    // Image-less items come first in catalog order, but the top-up should
+    // surface the one WITH an image so the card grid renders real thumbnails.
+    const catalog = [
+      { id: '1', name: 'No Pic One', sku: 'N-1', imageUrl: null },
+      { id: '2', name: 'No Pic Two', sku: 'N-2', imageUrl: '' },
+      { id: '3', name: 'Has Pic', sku: 'H-3', imageUrl: 'https://img/h.png' }
+    ];
+    assert.equal(matchProducts(catalog, 'list products', { listIntent: true, limit: 1 })[0].sku, 'H-3');
+    // When the limit allows image-less items too, they still fill the rest.
+    assert.deepEqual(
+      matchProducts(catalog, 'list products', { listIntent: true, limit: 3 }).map((c) => c.sku),
+      ['H-3', 'N-1', 'N-2'] // image-first, then catalog order within each group
+    );
+  });
 });
 
 describe('productMatch: isProductListingIntent', () => {

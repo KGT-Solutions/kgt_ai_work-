@@ -5,13 +5,15 @@ const prisma = require('../lib/prisma');
 const { issueApiKey } = require('../utils/tenantApiKeys');
 const { invalidateTenantKnowledge } = require('../domains/tenantProfile');
 const { crawlSite, CrawlerError } = require('../services/shared/crawler');
+const { distillPages, isDistillationEnabled, isProductImportEnabled } = require('../services/llm-distillation/llmDistillation');
+const { extractProducts, mergeProducts, isAutoProductExtractionEnabled } = require('../services/product-extractor/productExtractor');
 const { pdfToDocuments, PdfIngestError } = require('../services/shared/pdfIngest');
 const { parseCategory, suggestCategory } = require('../services/shared/documentCategory');
 const { crawlConsentRecord, hostOf } = require('../services/shared/crawlConsent');
 const { createIpRateLimiter } = require('../utils/ipRateLimit');
 const { handleChat } = require('../services/tenantChat');
 const { getMaskedConfig, upsertConfig, testConfig, SmtpConfigError } = require('../services/tenantSmtp');
-const { ingestCatalogCsv, getCatalogSummary, listProducts, addProduct, updateProduct, deleteProduct, ProductError } = require('../services/catalogIngest');
+const { ingestCatalogCsv, getCatalogSummary, listProducts, addProduct, updateProduct, deleteProduct, importExtractedProducts, ProductError } = require('../services/catalogIngest');
 const { CsvCatalogError, catalogTemplateCsv, MAX_CSV_BYTES } = require('../services/shared/csvCatalog');
 const { scheduleFaqGeneration, isFaqGenerationRunning } = require('../services/tenantFaqs');
 const { usageBreakdowns } = require('../services/usageStats');
@@ -50,6 +52,27 @@ const isClientCrawlLimited = createIpRateLimiter({ name: 'workspace-crawl', max:
 const isFaqRegenLimited = createIpRateLimiter({ name: 'workspace-faq-regen', max: 5, windowMs: 60 * 60 * 1000 });
 // Readiness audits: each is an LLM call billed to the tenant.
 const isAuditLimited = createIpRateLimiter({ name: 'workspace-audit', max: 6, windowMs: 60 * 60 * 1000 });
+
+// Automated Intelligent Product Extractor hook (services/product-extractor/productExtractor.js).
+// Runs AFTER the documents are already saved, over the same text, and upserts
+// any products it finds into the catalog — so a website scrape, a PDF/brochure
+// upload or a pasted note auto-populates the rich product cards with no separate
+// CSV step. The cheap, verbatim heuristic runs whenever AUTO_PRODUCT_EXTRACTION
+// is on (the default); the billable LLM pass is added only when the operator
+// opted into SCRAPE_DISTILLATION_PRODUCTS. Best-effort and never throws: a
+// failure here can only mean "no cards yet", never a failed upload. (The
+// documents are already committed, so this is effectively a background top-up.)
+async function autoPopulateCatalog(tenantId, text, { title = '' } = {}) {
+  if (!isAutoProductExtractionEnabled()) return 0;
+  try {
+    const products = await extractProducts(text, { title, useLlm: isProductImportEnabled() });
+    const { imported } = await importExtractedProducts(tenantId, products);
+    return imported;
+  } catch (err) {
+    console.warn(`[workspace] auto product extraction failed for tenant ${tenantId}: ${err.message}`);
+    return 0;
+  }
+}
 
 // ── PDF upload (same parser and 10MB limit as the signup wizard)
 const MAX_PDF_BYTES = 10 * 1024 * 1024;
@@ -112,7 +135,9 @@ router.post('/documents', async (req, res) => {
     select: DOC_FIELDS
   });
   await invalidateTenantKnowledge(req.tenant.id); // next chat request re-reads from the DB
-  res.status(201).json(doc);
+  // Auto-extract any products described in the pasted note into the catalog.
+  const importedProducts = await autoPopulateCatalog(req.tenant.id, content, { title });
+  res.status(201).json({ ...doc, importedProducts });
 });
 
 // ── Any supported file (PDF, .docx, .txt, .md, or a .zip of them), parsed
@@ -159,7 +184,11 @@ router.post('/documents/file', (req, res, next) => fileUpload.single('file')(req
   await prisma.tenantDocument.createMany({ data: docs });
   await invalidateTenantKnowledge(req.tenant.id);
   scheduleFaqGeneration(req.tenant.id);
-  res.status(201).json({ fileName: req.file.originalname, documentsCreated: docs.length, files: parsed.files });
+  // Auto-extract products from the uploaded file (e.g. a catalog/brochure) into
+  // the catalog, so its items show as rich cards with no CSV step.
+  const text = parsed.pages.map((p) => `# ${p.title}\n${p.markdown}`).join('\n\n');
+  const importedProducts = await autoPopulateCatalog(req.tenant.id, text, { title: req.file.originalname });
+  res.status(201).json({ fileName: req.file.originalname, documentsCreated: docs.length, importedProducts, files: parsed.files });
 });
 
 // multipart: file (the PDF), optional category. With a category, every
@@ -189,10 +218,15 @@ router.post('/documents/pdf', pdfUploadMiddleware, async (req, res) => {
   await invalidateTenantKnowledge(req.tenant.id);
   scheduleFaqGeneration(req.tenant.id); // new content -> fresh sandbox starter questions
 
+  // Auto-extract products from the uploaded PDF (e.g. a product catalog/brochure).
+  const text = parsed.pages.map((p) => `# ${p.title}\n${p.markdown}`).join('\n\n');
+  const importedProducts = await autoPopulateCatalog(req.tenant.id, text, { title: parsed.title || req.file.originalname });
+
   res.status(201).json({
     fileName: req.file.originalname,
     title: parsed.title,
     documentsCreated: docs.length,
+    importedProducts,
     truncated: parsed.truncated,
     categories: docs.reduce((m, d) => ({ ...m, [d.category]: (m[d.category] || 0) + 1 }), {})
   });
@@ -267,6 +301,25 @@ router.post('/scrape', async (req, res) => {
     if (e instanceof CrawlerError) return res.status(e.statusCode).json({ error: e.message });
     throw e; // an unexpected failure — let the global error handler log and 500 it
   }
+
+  // Tier 3 (opt-in, SCRAPE_DISTILLATION): clean each page's raw Markdown through
+  // an LLM pass and collect any structured products. It never throws and falls
+  // back to the raw text, so a failure here can only leave the pre-distillation
+  // content — never block the import. Page count is unchanged.
+  let distilledProducts = [];
+  if (isDistillationEnabled()) {
+    try {
+      const distilled = await distillPages(result.pages);
+      result.pages = distilled.pages;
+      distilledProducts = distilled.products;
+      if (distilled.distilledCount) {
+        console.info(`[scrape] distilled ${distilled.distilledCount}/${result.pages.length} pages for tenant ${req.tenant.id}`);
+      }
+    } catch (err) {
+      console.warn(`[scrape] distillation skipped for tenant ${req.tenant.id}: ${err.message}`);
+    }
+  }
+
   if (!(await roomForDocuments(req.tenant.id, result.pages.length))) return res.status(409).json(TOO_MANY_DOCS);
 
   const created = await prisma.$transaction(async (tx) => {
@@ -290,14 +343,34 @@ router.post('/scrape', async (req, res) => {
   await invalidateTenantKnowledge(req.tenant.id);
   scheduleFaqGeneration(req.tenant.id);
 
+  // Product import: the opt-in LLM pass above already produced `distilledProducts`
+  // (SCRAPE_DISTILLATION_PRODUCTS); on top of that the default-on heuristic reads
+  // the same pages (useLlm:false — don't pay for a second LLM pass). The merged,
+  // de-duplicated set is upserted once (catalogIngest.importExtractedProducts),
+  // so re-scraping a site refreshes rows rather than duplicating them. Best-effort
+  // — a failure here can only leave the catalog unchanged, never block the import.
+  let importedProducts = 0;
+  try {
+    const llmProducts = isProductImportEnabled() ? distilledProducts : [];
+    const heuristicProducts = isAutoProductExtractionEnabled()
+      ? await extractProducts(result.pages.map((p) => `# ${p.title}\n${p.markdown}`).join('\n\n'), { useLlm: false })
+      : [];
+    const merged = mergeProducts(llmProducts, heuristicProducts);
+    if (merged.length) importedProducts = (await importExtractedProducts(req.tenant.id, merged)).imported;
+  } catch (err) {
+    console.warn(`[scrape] product import skipped for tenant ${req.tenant.id}: ${err.message}`);
+  }
+
   res.status(201).json({
     message:
       `Imported ${created.length} page${created.length === 1 ? '' : 's'} from ${result.baseHost} — both bots can use them now` +
       (result.rendered ? ` (${result.rendered} rendered in a headless browser)` : '') +
+      (importedProducts ? ` and ${importedProducts} product${importedProducts === 1 ? '' : 's'}` : '') +
       (result.skipped ? `. Skipped ${result.skipped} low-content page${result.skipped === 1 ? '' : 's'}.` : '.'),
     crawled: result.crawled,
     skipped: result.skipped,
     rendered: result.rendered,
+    importedProducts,
     documents: created
   });
 });
