@@ -9,7 +9,10 @@ const { generateAnswer } = require('../../src/engine/llmClient');
 // default, does exactly one thing when on, and production refuses to start
 // with it.
 
-const SAFE = { DEPLOY_ENV: 'production', JWT_SECRET: '9f2c4e7a1b8d3f6e0a5c2b9d7e4f1a3c', CORS_ORIGINS: 'https://hub.example.com' };
+const SAFE = {
+  DEPLOY_ENV: 'production', JWT_SECRET: '9f2c4e7a1b8d3f6e0a5c2b9d7e4f1a3c', CORS_ORIGINS: 'https://hub.example.com',
+  ENCRYPTION_KEY: '3a7d1f9c5e2b8406d7c1a9f4e6b2083d', SHARED_STORE: 'redis', REDIS_URL: 'redis://redis:6379'
+};
 const KEYS = ['SMTP_HOST', 'SMTP_PORT', 'SMTP_SECURE', 'SMTP_ALLOW_INSECURE', 'CRAWLER_ALLOW_PRIVATE_HOSTS', 'OPENAI_BASE_URL', 'OPENAI_API_KEY', 'LLM_PRIMARY', 'LLM_FALLBACK', 'GROQ_API_KEY', 'ANTHROPIC_API_KEY'];
 const saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
 afterEach(() => {

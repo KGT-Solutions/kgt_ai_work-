@@ -12,7 +12,9 @@ const jwt = require('jsonwebtoken');
 const DEV_JWT_SECRET = 'dev-secret-change-me'; // assertProdSafety refuses to boot production with this
 // signup — proof that a signup email was verified by OTP, presented to
 //          /register/complete (services/verificationService.js)  { email, verificationId }
-const TOKEN_TTL = { operator: '12h', client: '7d', signup: '2h' };
+// crm_oauth — short-lived state carried through a CRM OAuth redirect so the
+//          public callback can trust which tenant/region it's for (routes/crmOAuth.routes.js) { tenantId, region }
+const TOKEN_TTL = { operator: '12h', client: '7d', signup: '2h', crm_oauth: '15m' };
 
 function jwtSecret() {
   return process.env.JWT_SECRET || DEV_JWT_SECRET;

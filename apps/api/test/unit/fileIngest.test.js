@@ -122,3 +122,62 @@ describe('.zip uploads', () => {
     await assert.rejects(ingestUpload(zip, 'media.zip'), (e) => e.statusCode === 422 && /photo\.jpg: unsupported type/.test(e.message));
   });
 });
+
+// ── .docx zip bombs (review #2, Major): a .docx is a zip that mammoth inflated
+// in full with no limit — 96 KB became 40 MB of XML and 49 s of CPU. Every
+// part is now inflated under a 25 MB budget first (assertDocxInflates).
+describe('.docx decompression bombs', () => {
+  const { mock } = require('node:test');
+  const mammoth = require('mammoth');
+  const { assertDocxInflates, MAX_DOCX_INFLATED_BYTES } = require('../../src/services/shared/fileIngest');
+  const MB = 1024 * 1024;
+  const filler = (bytes) => `<w:p><w:r><w:t>${'a'.repeat(bytes)}</w:t></w:r></w:p>`;
+
+  test('the budget is 25 MB', () => {
+    assert.equal(MAX_DOCX_INFLATED_BYTES, 25 * MB);
+  });
+
+  test('a small file that expands past 25 MB is refused with 413, quickly, before mammoth runs', async () => {
+    const bomb = await makeDocx(filler(30 * MB));
+    assert.ok(bomb.length < 200 * 1024, `the bomb itself is small (${bomb.length} bytes)`);
+    const convert = mock.method(mammoth, 'convertToHtml', async () => { throw new Error('mammoth must not run'); });
+    const started = Date.now();
+    await assert.rejects(ingestUpload(bomb, 'bomb.docx'),
+      (e) => e instanceof FileIngestError && e.statusCode === 413 && /expands to more than 25MB/.test(e.message));
+    const elapsed = Date.now() - started;
+    assert.equal(convert.mock.callCount(), 0, 'mammoth never saw the bomb');
+    mock.restoreAll();
+    assert.ok(elapsed < 2000, `refused in ${elapsed} ms`);
+  });
+
+  test('parts that are each small but together pass the budget are refused', async () => {
+    const parts = {};
+    for (let i = 0; i < 6; i += 1) parts[`word/media/part${i}.xml`] = Buffer.alloc(5 * MB, 97);
+    await assert.rejects(assertDocxInflates(await makeZip(parts)), (e) => e.statusCode === 413);
+  });
+
+  test('a part whose header under-declares its size is cut off while inflating, not trusted', async () => {
+    const zip = await makeZip({ 'word/document.xml': Buffer.alloc(5 * MB, 97) });
+    // Declared uncompressed size → 100 bytes, in the local header (offset 22)
+    // and the central directory entry (offset 24).
+    zip.writeUInt32LE(100, 22);
+    const central = zip.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+    zip.writeUInt32LE(100, central + 24);
+    await assert.rejects(assertDocxInflates(zip, 1 * MB), (e) => e instanceof FileIngestError && [413, 422].includes(e.statusCode));
+  });
+
+  test('the budget counts the bytes actually inflated', async () => {
+    const doc = await makeDocx(filler(2 * MB));
+    await assert.rejects(assertDocxInflates(doc, 1 * MB), (e) => e.statusCode === 413);
+    await assertDocxInflates(doc, 3 * MB); // under budget: resolves
+  });
+
+  test('a normal Word document is unaffected', async () => {
+    const r = await ingestUpload(await makeDocx(p('Refunds', 'Heading1') + p('Refunds take 5 days.')), 'handbook.docx');
+    assert.match(r.pages[0].markdown, /Refunds take 5 days\./);
+  });
+
+  test('something that is not a zip at all is still a 422, not a crash', async () => {
+    await assert.rejects(assertDocxInflates(Buffer.from('not a zip')), (e) => e.statusCode === 422);
+  });
+});

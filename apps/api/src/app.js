@@ -14,6 +14,9 @@ const tenantWorkspaceRoutes = require('./routes/tenantWorkspace.routes');
 const tenantChatRoutes = require('./routes/tenantChat.routes');
 const publicRegisterRoutes = require('./routes/publicRegister.routes');
 const publicAuthRoutes = require('./routes/publicAuth.routes');
+const crmWebhookRoutes = require('./routes/crmWebhook.routes');
+const crmOAuthRoutes = require('./routes/crmOAuth.routes');
+const brandAssetRoutes = require('./routes/brandAssets.routes');
 
 const app = express();
 // The API sits behind one proxy hop (Docker / the reverse proxy), so req.ip
@@ -57,6 +60,14 @@ app.use('/api/v1/client', wrapRouterAsync(clientAuthRoutes));
 app.use('/api/v1/tenant-chat', wrapRouterAsync(tenantChatRoutes));
 app.use('/api/v1/public/register', wrapRouterAsync(publicRegisterRoutes));
 app.use('/api/v1/public/auth', wrapRouterAsync(publicAuthRoutes)); // signup email OTP
+// CRM OAuth consent callback — public (the browser lands here from Zoho),
+// authenticated by the signed state it carries (routes/crmOAuth.routes.js).
+app.use('/api/v1/public/crm', wrapRouterAsync(crmOAuthRoutes));
+// Uploaded logos for the widget's <img> — public, content-addressed (brandAssets.routes.js).
+app.use('/api/v1/public/brand-assets', wrapRouterAsync(brandAssetRoutes));
+// Inbound CRM status webhooks — public, authenticated by a shared secret
+// (routes/crmWebhook.routes.js), never a client/operator token.
+app.use('/api/v1/webhooks', wrapRouterAsync(crmWebhookRoutes));
 
 // An unknown API path answers in JSON like every other API error, not with
 // Express's default HTML "Cannot GET" page.

@@ -2,7 +2,7 @@ const express = require('express');
 const multer = require('multer');
 const { Prisma } = require('@prisma/client');
 const prisma = require('../lib/prisma');
-const { issueApiKey } = require('../utils/tenantApiKeys');
+const { issueApiKey, normalizeAllowedOrigins } = require('../utils/tenantApiKeys');
 const { invalidateTenantKnowledge } = require('../domains/tenantProfile');
 const { crawlSite, CrawlerError } = require('../services/shared/crawler');
 const { distillPages, isDistillationEnabled, isProductImportEnabled } = require('../services/llm-distillation/llmDistillation');
@@ -12,7 +12,14 @@ const { parseCategory, suggestCategory } = require('../services/shared/documentC
 const { crawlConsentRecord, hostOf } = require('../services/shared/crawlConsent');
 const { createIpRateLimiter } = require('../utils/ipRateLimit');
 const { handleChat } = require('../services/tenantChat');
+const { transcribeAudio, isSttConfigured, MAX_AUDIO_BYTES } = require('../services/shared/speechToText');
+const { detectLanguage } = require('../engine/language');
 const { getMaskedConfig, upsertConfig, testConfig, SmtpConfigError } = require('../services/tenantSmtp');
+const crmSettings = require('../services/crm/crmSettings');
+const { CrmError } = require('../services/crm/zohoAuth');
+const { redirectUri: crmRedirectUri } = require('./crmOAuth.routes');
+const branding = require('../services/branding');
+const { LogoUploadError, MAX_LOGO_UPLOAD_BYTES, ACCEPTED_LOGO_TYPES } = require('../services/shared/logoUpload');
 const { ingestCatalogCsv, getCatalogSummary, listProducts, addProduct, updateProduct, deleteProduct, importExtractedProducts, ProductError } = require('../services/catalogIngest');
 const { CsvCatalogError, catalogTemplateCsv, MAX_CSV_BYTES } = require('../services/shared/csvCatalog');
 const { scheduleFaqGeneration, isFaqGenerationRunning } = require('../services/tenantFaqs');
@@ -41,7 +48,7 @@ const router = express.Router({ mergeParams: true });
 const DOC_FIELDS = {
   id: true, title: true, content: true, category: true, botScope: true, sourceUrl: true, createdAt: true, updatedAt: true
 };
-const API_KEY_PUBLIC_FIELDS = { id: true, keyPrefix: true, label: true, createdAt: true, lastUsedAt: true, revokedAt: true };
+const API_KEY_PUBLIC_FIELDS = { id: true, keyPrefix: true, label: true, createdAt: true, lastUsedAt: true, revokedAt: true, allowedOrigins: true };
 const MAX_TITLE_LEN = 200;
 const MAX_CONTENT_LEN = 20000;
 const MAX_DOCUMENTS_PER_TENANT = 500;
@@ -489,6 +496,147 @@ router.post('/smtp-config/test', async (req, res, next) => {
   }
 });
 
+// ── CRM integrations (services/crm/*). The dashboard's Integrations page.
+// Status never returns tokens; connect hands back a Zoho consent URL the
+// browser opens, and the public callback (routes/crmOAuth.routes.js) finishes
+// the flow and stores the encrypted tokens.
+router.get('/crm', async (req, res) => {
+  res.json(await crmSettings.getCrmStatus(req.tenant.id));
+});
+
+router.post('/crm/connect', async (req, res, next) => {
+  try {
+    // Either { authUrl } (OAuth redirect) or { connected: true } (server token).
+    const result = await crmSettings.beginConnect({
+      tenantId: req.tenant.id, region: req.body?.region, redirectUri: crmRedirectUri(req)
+    });
+    res.json(result);
+  } catch (err) {
+    if (err instanceof CrmError) return res.status(err.statusCode).json({ error: err.message });
+    next(err);
+  }
+});
+
+router.post('/crm/disconnect', async (req, res) => {
+  res.json(await crmSettings.disconnect(req.tenant.id));
+});
+
+// ── Bot Branding & Theme Studio (services/branding.js). The brand kit and
+// three generated widget designs; the selected design is what the embeddable
+// widget renders (GET /tenant-chat/:slug/theme).
+// A rescan fetches someone's homepage and stylesheets, so it's rate-limited per tenant.
+const isBrandScanLimited = createIpRateLimiter({ name: 'workspace-brand-scan', max: 6, windowMs: 60 * 60 * 1000 });
+
+function sendBrandingError(err, res, next) {
+  if (err instanceof branding.BrandingError || err instanceof CrawlerError || err instanceof LogoUploadError) {
+    return res.status(err.statusCode).json({ error: err.message });
+  }
+  return next(err);
+}
+
+// Logo uploads: one image, checked by its type here and by its actual bytes in
+// shared/logoUpload.js (which re-encodes it — the upload itself is never stored).
+const isLogoUploadLimited = createIpRateLimiter({ name: 'workspace-logo-upload', max: 20, windowMs: 60 * 60 * 1000 });
+const logoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_LOGO_UPLOAD_BYTES, files: 1, fields: 0 },
+  fileFilter: (req, file, cb) => {
+    if (ACCEPTED_LOGO_TYPES.includes(file.mimetype)) return cb(null, true);
+    return cb(new LogoUploadError('The logo must be a PNG, JPEG or WebP image.'));
+  }
+});
+function parseLogoUpload(req, res, next) {
+  logoUpload.single('logo')(req, res, (err) => {
+    if (!err) return next();
+    if (err instanceof LogoUploadError) return res.status(err.statusCode).json({ error: err.message });
+    if (err instanceof multer.MulterError) {
+      return res.status(err.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({
+        error: err.code === 'LIMIT_FILE_SIZE' ? `Logos are limited to ${MAX_LOGO_UPLOAD_BYTES / (1024 * 1024)}MB.` : 'Upload one image in a field named "logo"'
+      });
+    }
+    return next(err);
+  });
+}
+
+router.get('/branding', async (req, res, next) => {
+  try {
+    res.json(await branding.getBranding(req.tenant));
+  } catch (err) {
+    sendBrandingError(err, res, next);
+  }
+});
+
+// body { themeId } — a design id, or null for the classic look. themeId must be
+// sent explicitly, so an empty body can't silently revert a live design.
+router.post('/branding/select', async (req, res, next) => {
+  if (!req.body || !Object.prototype.hasOwnProperty.call(req.body, 'themeId')) {
+    return res.status(400).json({ error: 'themeId is required (a design id, or null for the classic look)' });
+  }
+  try {
+    res.json(await branding.selectTheme(req.tenant, req.body.themeId));
+  } catch (err) {
+    sendBrandingError(err, res, next);
+  }
+});
+
+// body { url } — re-read logo + colours from this site and regenerate the designs.
+router.post('/branding/scan', async (req, res, next) => {
+  if (await isBrandScanLimited(req.tenant.id)) {
+    return res.status(429).json({ error: 'Too many website scans. Please try again in an hour.' });
+  }
+  const url = String(req.body?.url || '').trim();
+  if (!url) return res.status(400).json({ error: 'url is required' });
+  try {
+    res.json(await branding.rescanBranding(req.tenant, url));
+  } catch (err) {
+    sendBrandingError(err, res, next);
+  }
+});
+
+// body { logoUrl?, primaryColor?, botName? } — manual edits; '' or null clears any of them.
+// A logo URL makes the server download and decode that image (twice: analyse,
+// then clean), so it draws on the same per-tenant budget as a website scan —
+// unthrottled, pasting URLs in a loop was a CPU sink and a way to point our
+// servers at third-party hosts. Clearing the logo or saving a colour/name doesn't count.
+router.patch('/branding', async (req, res, next) => {
+  const logoUrl = req.body?.logoUrl;
+  if (typeof logoUrl === 'string' && logoUrl.trim() && await isBrandScanLimited(req.tenant.id)) {
+    return res.status(429).json({ error: 'Too many logo or website lookups. Please try again in an hour.' });
+  }
+  try {
+    res.json(await branding.updateBrandKit(req.tenant, {
+      logoUrl: req.body?.logoUrl, primaryColor: req.body?.primaryColor, botName: req.body?.botName
+    }));
+  } catch (err) {
+    sendBrandingError(err, res, next);
+  }
+});
+
+// multipart field "logo" (PNG / JPEG / WebP, ≤ 2 MB) — becomes THE logo, ahead
+// of any scanned or pasted one; the designs are regenerated around it.
+router.post('/branding/logo', async (req, res, next) => {
+  if (await isLogoUploadLimited(req.tenant.id)) {
+    return res.status(429).json({ error: 'Too many logo uploads. Please try again in an hour.' });
+  }
+  return next();
+}, parseLogoUpload, async (req, res, next) => {
+  if (!req.file) return res.status(400).json({ error: 'Choose an image file to upload (field "logo").' });
+  try {
+    res.json(await branding.uploadLogo(req.tenant, req.file.buffer));
+  } catch (err) {
+    sendBrandingError(err, res, next);
+  }
+});
+
+// Remove the logo (uploaded or linked): the widget shows the company's initial.
+router.delete('/branding/logo', async (req, res, next) => {
+  try {
+    res.json(await branding.removeLogo(req.tenant));
+  } catch (err) {
+    sendBrandingError(err, res, next);
+  }
+});
+
 router.post('/faqs/regenerate', async (req, res) => {
   if (isFaqGenerationRunning(req.tenant.id)) return res.status(202).json({ status: 'pending' });
   if (!(await prisma.tenantDocument.count({ where: { tenantId: req.tenant.id } }))) {
@@ -575,6 +723,21 @@ router.post('/api-keys', async (req, res) => {
   res.status(201).json({ id: row.id, keyPrefix: row.keyPrefix, label: row.label, createdAt: row.createdAt, apiKey: key });
 });
 
+// body { allowedOrigins: ["https://www.acme.com", …] } — the websites allowed
+// to use this key from a browser (utils/tenantApiKeys.js); [] allows any.
+router.patch('/api-keys/:keyId', async (req, res) => {
+  const parsed = normalizeAllowedOrigins(req.body?.allowedOrigins);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const key = await prisma.tenantApiKey.findFirst({ where: { id: req.params.keyId, tenantId: req.tenant.id } });
+  if (!key) return res.status(404).json({ error: 'API key not found' });
+  if (key.revokedAt) return res.status(409).json({ error: 'That key is revoked — issue a new key instead.' });
+  res.json(await prisma.tenantApiKey.update({
+    where: { id: key.id },
+    data: { allowedOrigins: parsed.origins },
+    select: API_KEY_PUBLIC_FIELDS
+  }));
+});
+
 router.delete('/api-keys/:keyId', async (req, res) => {
   const key = await prisma.tenantApiKey.findFirst({ where: { id: req.params.keyId, tenantId: req.tenant.id } });
   if (!key) return res.status(404).json({ error: 'API key not found' });
@@ -596,6 +759,34 @@ router.delete('/api-keys/:keyId', async (req, res) => {
 // ── Test chat: the tenant's own bots, authenticated by the session instead
 // of an API key (keys are stored hashed and can't be read back).
 router.post('/chat', handleChat);
+
+// Voice input for the dashboard sandbox: transcribe an audio blob (Groq Whisper)
+// and return { text, language } so the composer populates the input and the bot
+// replies in the spoken language. Same service as the public widget endpoint,
+// JWT-scoped to req.tenant here. Billable, so rate-limited per tenant.
+const audioUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_AUDIO_BYTES, files: 1 } });
+const isWsTranscribeLimited = createIpRateLimiter({ name: 'workspace-transcribe', max: 60, windowMs: 10 * 60 * 1000 });
+router.post('/transcribe', (req, res, next) => audioUpload.single('audio')(req, res, (err) => {
+  if (!err) return next();
+  if (err instanceof multer.MulterError) {
+    return res.status(err.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({
+      error: err.code === 'LIMIT_FILE_SIZE' ? `Audio must be ${Math.round(MAX_AUDIO_BYTES / (1024 * 1024))}MB or smaller` : 'Upload one audio file in a field named "audio"'
+    });
+  }
+  return next(err);
+}), async (req, res, next) => {
+  if (!isSttConfigured()) return res.status(503).json({ error: 'Voice input is not available right now.' });
+  if (!req.file?.buffer?.length) return res.status(400).json({ error: 'Attach an audio file in a field named "audio"' });
+  if (await isWsTranscribeLimited(req.tenant.id)) return res.status(429).json({ error: 'Too many voice messages. Please wait a few minutes and try again.' });
+  try {
+    const { text } = await transcribeAudio({ buffer: req.file.buffer, filename: req.file.originalname || 'audio.webm', mimeType: req.file.mimetype || 'audio/webm' });
+    res.json({ text, language: detectLanguage(text) || 'en' });
+  } catch (err) {
+    if (err.statusCode === 503) return res.status(503).json({ error: 'Voice input is not available right now.' });
+    if (err.statusCode) return res.status(502).json({ error: 'Could not transcribe the audio. Please try again.' });
+    next(err);
+  }
+});
 
 // ── Tickets and usage
 

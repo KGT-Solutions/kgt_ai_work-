@@ -19,6 +19,9 @@ if (typeof globalThis.File === 'undefined') {
 const dns = require('dns').promises;
 const { URL } = require('url');
 const cheerio = require('cheerio');
+const { extractBrandSignals, resolveBrand } = require('./brandExtractor');
+const { analyzeLogo } = require('./logoAnalyzer');
+const { isPrivateIPv4, isPrivateIPv6, isPrivateAddress, privateHostsAllowed, publicAgent } = require('./netGuard');
 
 const envInt = (name, def) => {
   const v = parseInt(process.env[name], 10);
@@ -183,57 +186,31 @@ class CrawlerError extends Error {
 }
 
 // ---------------------------------------------------------------------
-// SSRF safety. This endpoint is operator-only, but it's still a server
-// making requests to a URL an admin typed in — the same category of risk as
-// any "fetch this URL for me" feature. Block loopback/private/link-local
-// targets (including the 169.254.169.254 cloud-metadata address) and
-// re-validate on every redirect hop, since a public hostname can still
-// redirect to an internal address.
+// SSRF safety. A server fetching a URL someone typed in: loopback, private,
+// link-local and cloud-metadata targets must be unreachable, on every redirect
+// hop. Two layers, both from netGuard.js:
+//   1. assertPublicHost — an early, cheap refusal before any request, and the
+//      ONLY check an IP-literal URL gets (sockets dial literals directly).
+//   2. publicAgent — fetchSafe's dispatcher, which re-checks every address in
+//      the connection itself. Layer 1 alone was beatable by DNS rebinding:
+//      a hostile DNS server answers this check with a public IP and the
+//      connection's own lookup with an internal one (verified exploitable).
 // ---------------------------------------------------------------------
 
-function isPrivateIPv4(ip) {
-  const parts = ip.split('.').map(Number);
-  if (parts.length !== 4 || parts.some((n) => Number.isNaN(n))) return true; // malformed -> treat as unsafe
-  const [a, b] = parts;
-  if (a === 127) return true; // loopback
-  if (a === 10) return true; // private
-  if (a === 172 && b >= 16 && b <= 31) return true; // private
-  if (a === 192 && b === 168) return true; // private
-  if (a === 169 && b === 254) return true; // link-local, incl. cloud metadata
-  if (a === 0) return true; // "this network"
-  if (a >= 224) return true; // multicast / reserved
-  return false;
-}
+const nonPublicError = (hostname) => new CrawlerError(`"${hostname}" resolves to a non-public address — refusing to crawl it`, 400);
 
-function isPrivateIPv6(ip) {
-  const lower = ip.toLowerCase();
-  if (lower === '::1') return true; // loopback
-  if (lower.startsWith('fe80:')) return true; // link-local
-  if (/^f[cd][0-9a-f]{0,2}:/.test(lower)) return true; // fc00::/7 unique local
-  if (lower.startsWith('::ffff:')) {
-    const mapped = lower.split(':').pop();
-    if (mapped && mapped.includes('.')) return isPrivateIPv4(mapped); // IPv4-mapped
-  }
-  return false;
-}
-
-// CRAWLER_ALLOW_PRIVATE_HOSTS=true lifts this guard so the E2E suite can scan
+// CRAWLER_ALLOW_PRIVATE_HOSTS=true lifts both layers so the E2E suite can scan
 // its fixture website on a private Docker network. It turns the crawler into
 // an SSRF tool, so production refuses to start with it (utils/assertProdSafety.js).
 async function assertPublicHost(hostname) {
-  if (String(process.env.CRAWLER_ALLOW_PRIVATE_HOSTS || '').toLowerCase() === 'true') return;
+  if (privateHostsAllowed()) return;
   let addresses;
   try {
     addresses = await dns.lookup(hostname, { all: true });
   } catch {
     throw new CrawlerError(`Could not resolve "${hostname}"`, 400);
   }
-  for (const { address, family } of addresses) {
-    const isPrivate = family === 4 ? isPrivateIPv4(address) : isPrivateIPv6(address);
-    if (isPrivate) {
-      throw new CrawlerError(`"${hostname}" resolves to a non-public address — refusing to crawl it`, 400);
-    }
-  }
+  if (addresses.some(({ address, family }) => isPrivateAddress(address, family))) throw nonPublicError(hostname);
 }
 
 function assertHttpUrl(urlString) {
@@ -253,50 +230,148 @@ function assertHttpUrl(urlString) {
 // Fetching, with manual (re-validated) redirect handling.
 // ---------------------------------------------------------------------
 
-async function fetchSafe(urlString, { timeoutMs = PER_REQUEST_TIMEOUT_MS } = {}) {
+const isHtml = (contentType) => contentType.includes('html');
+const isCss = (contentType) => contentType.includes('css') || contentType.includes('text/plain');
+const isImage = (contentType) => contentType.startsWith('image/');
+
+// The default cap for a body read as text (pages, stylesheets): far above any
+// real page, far below what would hurt the process.
+const MAX_HTML_BYTES = 3 * 1024 * 1024;
+
+/**
+ * A response body read under a byte cap. Reads chunk by chunk and stops the
+ * moment the cap is passed, cancelling the rest of the stream — res.text() /
+ * arrayBuffer() would buffer an unbounded (chunked) body in full before any
+ * size check could run.
+ *
+ * `signal` (the request's timeout) is watched here directly: on abort the
+ * reader is cancelled, which ends a pending read even when the stream's source
+ * ignores the abort — Node's fetch errors its own body streams on abort, but
+ * the timeout must not depend on that.
+ * @param {Response} res
+ * @param {{ maxBytes: number, binary?: boolean, overflow?: 'truncate'|'reject', signal?: AbortSignal }} opts
+ *   overflow: 'truncate' keeps the first maxBytes (text); 'reject' returns null
+ *   (binary — a cut-off image is useless).
+ * @returns {Promise<string|Buffer|null>}
+ * @throws {Error} name 'AbortError' when the signal fires mid-read
+ */
+async function readBody(res, { maxBytes, binary = false, overflow = 'truncate', signal } = {}) {
+  if (!res.body) return binary ? Buffer.alloc(0) : '';
+  const reader = res.body.getReader();
+  const aborted = () => Object.assign(new Error('The response body read was aborted'), { name: 'AbortError' });
+  // Cancelling the reader resolves a pending read() with done:true; the
+  // aborted checks below turn that into an error rather than a short body.
+  const onAbort = () => { reader.cancel().catch(() => {}); };
+  signal?.addEventListener('abort', onAbort, { once: true });
+  const chunks = [];
+  let total = 0;
+  try {
+    for (;;) {
+      if (signal?.aborted) throw aborted();
+      const { done, value } = await reader.read();
+      if (signal?.aborted) throw aborted();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => {});
+        if (overflow === 'reject') return null;
+        chunks.push(value.subarray(0, value.byteLength - (total - maxBytes)));
+        break;
+      }
+      chunks.push(value);
+    }
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
+  }
+  const buf = Buffer.concat(chunks);
+  return binary ? buf : buf.toString('utf8');
+}
+
+// Release a response we won't read: an unconsumed body keeps its connection busy.
+function discardBody(res) {
+  if (res.body) res.body.cancel().catch(() => {});
+}
+
+// accept: which content types the caller reads (HTML pages by default; the
+// brand scan also reads stylesheets and the logo image). maxBytes: the body
+// cap (default MAX_HTML_BYTES) — text is truncated at it; a binary body over
+// it is refused (null), early when Content-Length already says so.
+// responseType 'buffer' returns { body: Buffer } (images) instead of { html }.
+async function fetchSafe(urlString, { timeoutMs = PER_REQUEST_TIMEOUT_MS, accept = isHtml, maxBytes = 0, responseType = 'text' } = {}) {
   let current = assertHttpUrl(urlString);
+  const binary = responseType === 'buffer';
+  const cap = maxBytes || MAX_HTML_BYTES;
 
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
     await assertPublicHost(current.hostname);
 
+    // ONE timer for the whole exchange — headers and body. It used to be
+    // cleared once headers arrived, so a server that sent headers and then
+    // trickled (or never finished) the body held the request open forever.
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
-    let res;
-    try {
-      res = await fetch(current.toString(), { redirect: 'manual', signal: controller.signal, headers: REQUEST_HEADERS });
-    } catch (err) {
+    const failure = (err) => {
+      // The dispatcher refused a non-public address at dial time (DNS rebinding,
+      // or a name that only now resolves privately): an SSRF refusal, not an outage.
+      if (err?.cause?.code === 'EPRIVATE' || err?.code === 'EPRIVATE') return nonPublicError(current.hostname);
       const timedOut = controller.signal.aborted;
-      const failure = new CrawlerError(
+      const e = new CrawlerError(
         timedOut ? `${current.hostname} did not respond within ${timeoutMs / 1000} seconds` : `Could not reach ${current.hostname}: ${err.message}`,
         502
       );
-      failure.kind = timedOut ? 'timeout' : 'unreachable'; // read by describeStartFailure
-      throw failure;
+      e.kind = timedOut ? 'timeout' : 'unreachable'; // read by describeStartFailure
+      return e;
+    };
+    try {
+      let res;
+      try {
+        res = await fetch(current.toString(), {
+          redirect: 'manual', signal: controller.signal, headers: REQUEST_HEADERS,
+          dispatcher: publicAgent // every connection re-checks its address (anti DNS rebinding)
+        });
+      } catch (err) {
+        throw failure(err);
+      }
+
+      if ([301, 302, 303, 307, 308].includes(res.status)) {
+        discardBody(res);
+        const location = res.headers.get('location');
+        if (!location) throw new CrawlerError(`Redirect from ${current} had no Location header`, 502);
+        current = new URL(location, current);
+        if (current.protocol !== 'http:' && current.protocol !== 'https:') {
+          throw new CrawlerError('Refusing to follow a redirect to a non-http(s) URL', 400);
+        }
+        continue;
+      }
+
+      if (!res.ok) {
+        discardBody(res);
+        const err = new CrawlerError(`${current} returned HTTP ${res.status}`, 502);
+        err.httpStatus = res.status; // lets crawlSite tell "blocked" (403) from "missing" (404)
+        throw err;
+      }
+
+      const contentType = res.headers.get('content-type') || '';
+      if (!accept(contentType)) { // a type the caller doesn't read (PDF/image/etc.) — it skips it
+        discardBody(res);
+        return null;
+      }
+      if (binary && Number(res.headers.get('content-length')) > cap) {
+        discardBody(res);
+        return null;
+      }
+
+      let body;
+      try {
+        body = await readBody(res, { maxBytes: cap, binary, overflow: binary ? 'reject' : 'truncate', signal: controller.signal });
+      } catch (err) {
+        throw failure(err);
+      }
+      if (body === null) return null;
+      return binary ? { body, finalUrl: current } : { html: body, finalUrl: current };
     } finally {
       clearTimeout(timer);
     }
-
-    if ([301, 302, 303, 307, 308].includes(res.status)) {
-      const location = res.headers.get('location');
-      if (!location) throw new CrawlerError(`Redirect from ${current} had no Location header`, 502);
-      current = new URL(location, current);
-      if (current.protocol !== 'http:' && current.protocol !== 'https:') {
-        throw new CrawlerError('Refusing to follow a redirect to a non-http(s) URL', 400);
-      }
-      continue;
-    }
-
-    if (!res.ok) {
-      const err = new CrawlerError(`${current} returned HTTP ${res.status}`, 502);
-      err.httpStatus = res.status; // lets crawlSite tell "blocked" (403) from "missing" (404)
-      throw err;
-    }
-
-    const contentType = res.headers.get('content-type') || '';
-    if (!contentType.includes('html')) return null; // PDF/image/etc. — caller skips it
-
-    const html = await res.text();
-    return { html, finalUrl: current };
   }
 
   throw new CrawlerError('Too many redirects', 502);
@@ -322,10 +397,15 @@ function cleanText(str) {
 /**
  * @param {string} html
  * @param {URL} pageUrl
- * @returns {{ title: string, markdown: string, links: Array<{href:string,text:string}>, wordCount: number }}
+ * @param {{ brand?: boolean }} [opts] brand: also read the page's brand
+ *   signals (logo, colours — brandExtractor.js); crawlSite asks for the start page only
+ * @returns {{ title: string, markdown: string, links: Array<{href:string,text:string}>, wordCount: number, brandSignals?: object }}
  */
-function extractPage(html, pageUrl) {
+function extractPage(html, pageUrl, { brand = false } = {}) {
   const $ = cheerio.load(html);
+
+  // Before any stripping: the logo lives in exactly the header/nav removed below.
+  const brandSignals = brand ? extractBrandSignals($, pageUrl.toString()) : null;
 
   // Links must be collected BEFORE stripping nav/header/footer — that's
   // exactly where a site's own navigation (and therefore the About/Pricing/
@@ -382,7 +462,7 @@ function extractPage(html, pageUrl) {
   // Link density = discovered links per content word. A thin index/listing page
   // (lots of links, little prose) scores high; a real content page scores low.
   const linkDensity = links.length / Math.max(1, wordCount);
-  return { title: pageTitle, markdown, links, wordCount, linkDensity };
+  return { title: pageTitle, markdown, links, wordCount, linkDensity, ...(brandSignals ? { brandSignals } : {}) };
 }
 
 function countWords(str) {
@@ -625,6 +705,7 @@ async function crawlSite(baseUrlString, opts = {}) {
   // Why the start page gave nothing, for the error if the whole crawl does.
   let startFailure = null; // the CrawlerError from fetching it
   let startOutcome = null; // 'thin' | 'offsite' when it loaded but couldn't be used
+  let startBrand = null; // the start page's brand signals (logo, colours), when it loaded on-site
 
   // The start page gets one retry after a dropped connection or a gateway
   // error (a cold server, a CDN hiccup): it's the one page every crawl needs.
@@ -646,7 +727,8 @@ async function crawlSite(baseUrlString, opts = {}) {
     try {
       const rendered = await renderer(item.url.toString(), { checkHost: assertPublicHost, timeoutMs });
       if (!rendered || !sameSite(rendered.finalUrl)) return null; // non-HTML, or client-side nav off-site
-      return { item, page: extractPage(rendered.html, rendered.finalUrl), finalUrl: rendered.finalUrl, rendered: true };
+      const page = extractPage(rendered.html, rendered.finalUrl, { brand: item.depth === 0 });
+      return { item, page, finalUrl: rendered.finalUrl, rendered: true };
     } catch {
       return null;
     }
@@ -665,7 +747,8 @@ async function crawlSite(baseUrlString, opts = {}) {
     try {
       const fetched = await fetchPage(item);
       if (!fetched) return null; // non-HTML content-type — a browser won't make it a page
-      staticResult = { item, page: extractPage(fetched.html, fetched.finalUrl), finalUrl: fetched.finalUrl, rendered: false };
+      const page = extractPage(fetched.html, fetched.finalUrl, { brand: item.depth === 0 });
+      staticResult = { item, page, finalUrl: fetched.finalUrl, rendered: false };
     } catch (err) {
       if (item.depth === 0) startFailure = err;
       // Only an HTTP-level block is worth a browser retry; SSRF refusals,
@@ -714,6 +797,9 @@ async function crawlSite(baseUrlString, opts = {}) {
         continue;
       }
       const { item, page, finalUrl, rendered } = result;
+      // Kept even when the start page is too thin to save: a JS-only shell
+      // still carries the logo and the theme-color meta.
+      if (item.depth === 0 && page.brandSignals && sameSite(finalUrl)) startBrand = page.brandSignals;
 
       // After redirects (HTTP or client-side), the page must still be on
       // this site, and not a page already saved under another link (e.g.
@@ -763,10 +849,72 @@ async function crawlSite(baseUrlString, opts = {}) {
     );
   }
 
-  return { pages, crawled: pages.length, skipped, rendered: renderedCount, baseHost: base.hostname };
+  // Best-effort: a brand that can't be read is null, never a failed crawl.
+  let brand = null;
+  if (startBrand && opts.extractBrand !== false) {
+    brand = await resolveSiteBrand(startBrand).catch(() => null);
+  }
+
+  return { pages, crawled: pages.length, skipped, rendered: renderedCount, baseHost: base.hostname, brand };
+}
+
+// ---------------------------------------------------------------------
+// Brand kit (Bot Branding & Theme Studio, services/branding.js).
+// ---------------------------------------------------------------------
+
+const BRAND_CSS_TIMEOUT_MS = 4000;
+const BRAND_CSS_MAX_BYTES = 400 * 1024;
+const LOGO_MAX_BYTES = 1536 * 1024;
+
+/**
+ * Download a logo (SSRF-guarded, size-capped) and describe how it looks —
+ * logoAnalyzer.js. Never throws: an unreachable or unreadable logo is null.
+ * @param {string|null} url
+ */
+/** A logo image's bytes, through the same SSRF guards as a crawl; null on any failure. */
+async function fetchLogoImage(url) {
+  if (!url) return null;
+  const fetched = await fetchSafe(url, {
+    timeoutMs: BRAND_CSS_TIMEOUT_MS, accept: isImage, maxBytes: LOGO_MAX_BYTES, responseType: 'buffer'
+  }).catch(() => null);
+  return fetched ? fetched.body : null;
+}
+
+async function analyzeLogoUrl(url) {
+  const bytes = await fetchLogoImage(url);
+  return bytes ? analyzeLogo(bytes) : null;
+}
+
+// The start page's own signals plus up to three linked stylesheets and the
+// logo image, all fetched in parallel through fetchSafe so the SSRF guards
+// apply to them too. Anything that fails or is too large is simply skipped.
+async function resolveSiteBrand(signals) {
+  const [sheets, logoAppearance] = await Promise.all([
+    Promise.all(
+      (signals.stylesheetUrls || []).map((url) =>
+        fetchSafe(url, { timeoutMs: BRAND_CSS_TIMEOUT_MS, accept: isCss, maxBytes: BRAND_CSS_MAX_BYTES })
+          .then((r) => (r ? r.html : ''), () => ''))
+    ),
+    analyzeLogoUrl(signals.logoUrl)
+  ]);
+  return { ...resolveBrand(signals, sheets.filter(Boolean)), logoAppearance };
+}
+
+/**
+ * The brand kit for one site without crawling it — its homepage's logo and
+ * colours. Backs the Theme Studio's "Rescan website"; same SSRF guards as a crawl.
+ * @param {string} urlString
+ * @returns {Promise<ReturnType<typeof resolveBrand>>}
+ * @throws {CrawlerError} when the address is unsafe, unreachable or not a web page
+ */
+async function scanBrand(urlString) {
+  const fetched = await fetchSafe(assertHttpUrl(urlString).toString());
+  if (!fetched) throw new CrawlerError('That address did not return a web page', 422);
+  const $ = cheerio.load(fetched.html);
+  return resolveSiteBrand(extractBrandSignals($, fetched.finalUrl.toString()));
 }
 
 module.exports = {
-  crawlSite, CrawlerError, extractPage, isPrivateIPv4, isPrivateIPv6, isBoilerplateLine, assertPublicHost, describeStartFailure,
-  isNoisyPath, isFocusPath, passesQuality, MIN_WORDS_PER_PAGE
+  crawlSite, scanBrand, analyzeLogoUrl, fetchLogoImage, fetchSafe, readBody, MAX_HTML_BYTES, CrawlerError, extractPage, isPrivateIPv4, isPrivateIPv6,
+  isBoilerplateLine, assertPublicHost, describeStartFailure, isNoisyPath, isFocusPath, passesQuality, MIN_WORDS_PER_PAGE
 };

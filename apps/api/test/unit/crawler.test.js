@@ -27,15 +27,12 @@ function html(strings) {
   return strings.join('\n');
 }
 
+// A real fetch Response: fetchSafe reads the body as a byte-capped stream, as
+// it does from real fetch, so a duck-typed { text() } stand-in has no body.
 function htmlResponse(body, { status = 200, contentType = 'text/html', location } = {}) {
-  const headers = new Map([['content-type', contentType]]);
-  if (location) headers.set('location', location);
-  return {
-    ok: status >= 200 && status < 300,
-    status,
-    headers: { get: (k) => headers.get(k.toLowerCase()) || null },
-    text: async () => body
-  };
+  const headers = { 'content-type': contentType };
+  if (location) headers.location = location;
+  return new Response(body, { status, headers });
 }
 
 describe('crawler: SSRF guards', () => {

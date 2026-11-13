@@ -1,4 +1,5 @@
 const { store, keys } = require('../lib/sharedStore');
+const { ipBucket } = require('../services/shared/netGuard');
 
 // Sliding-window abuse limiter, keyed by whatever string the caller has to
 // limit on: an IP for the public endpoints that have no identity yet, an email
@@ -30,7 +31,10 @@ const { store, keys } = require('../lib/sharedStore');
 function createIpRateLimiter({ max, windowMs, name }) {
   if (!name) throw new Error('createIpRateLimiter requires a unique `name`: limiters share one keyspace');
   return async function isRateLimited(subject) {
-    const count = await store().incrWindow(keys.rateLimit(name, subject || 'unknown'), windowMs);
+    // An IP subject is bucketed: an IPv6 client usually holds a whole /64 and
+    // could rotate through it to dodge any per-address limit, so the /64 is
+    // the unit. Emails, tenant ids and other subjects pass through unchanged.
+    const count = await store().incrWindow(keys.rateLimit(name, ipBucket(subject || 'unknown')), windowMs);
     return count > max;
   };
 }

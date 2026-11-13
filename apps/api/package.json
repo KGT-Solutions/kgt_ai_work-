@@ -32,6 +32,8 @@
     "pdfjs-dist": "4.2.67",
     "porter-stemmer": "^0.9.1",
     "puppeteer-core": "22.15.0",
+    "sharp": "^0.33.5",
+    "undici": "^6.29.1",
     "yauzl": "^3.4.0"
   },
   "devDependencies": {

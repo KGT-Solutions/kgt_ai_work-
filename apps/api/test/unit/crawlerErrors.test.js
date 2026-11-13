@@ -14,10 +14,11 @@ const LONG_P =
 const PAGE = `<html><head><title>Home</title></head><body><main><h1>Home</h1><p>${LONG_P}</p></main></body></html>`;
 const SHELL = '<html><head><title>App</title></head><body><div id="root"></div><script src="/app.js"></script></body></html>';
 
+// A real fetch Response: fetchSafe reads the body as a byte-capped stream.
 function htmlResponse(body, { status = 200, location } = {}) {
-  const headers = new Map([['content-type', 'text/html']]);
-  if (location) headers.set('location', location);
-  return { ok: status >= 200 && status < 300, status, headers: { get: (k) => headers.get(k.toLowerCase()) || null }, text: async () => body };
+  const headers = { 'content-type': 'text/html' };
+  if (location) headers.location = location;
+  return new Response(body, { status, headers });
 }
 
 describe('crawlSite — a crawl that finds nothing says why', () => {

@@ -169,12 +169,39 @@ function workspace(base, auth) {
     listApiKeys: () => r('/api-keys'),
     createApiKey: (label) => r('/api-keys', { method: 'POST', body: { label } }),
     revokeApiKey: (keyId, { force = false } = {}) => r(`/api-keys/${enc(keyId)}${force ? '?force=true' : ''}`, { method: 'DELETE' }),
+    // The websites allowed to use a key from a browser; [] allows any.
+    setApiKeyOrigins: (keyId, allowedOrigins) => r(`/api-keys/${enc(keyId)}`, { method: 'PATCH', body: { allowedOrigins } }),
     chat: (payload) => r('/chat', { method: 'POST', body: payload }),
+    // Voice input: POST an audio blob, get back { text, language } from Groq Whisper.
+    transcribe: (blob, filename = 'voice.webm') => {
+      const formData = new FormData();
+      formData.append('audio', blob, filename);
+      return requestMultipart(`${base}/transcribe`, formData, auth);
+    },
     // Custom outbound SMTP. The password is write-only: getSmtpConfig returns
     // it masked, and saving/testing with the mask reuses the stored one.
     getSmtpConfig: () => r('/smtp-config'),
     saveSmtpConfig: (payload) => r('/smtp-config', { method: 'PUT', body: payload }),
     testSmtpConfig: (payload) => r('/smtp-config/test', { method: 'POST', body: payload }),
+    // CRM integrations (Zoho). Status never includes tokens. connectCrm returns
+    // { authUrl } — the page sends the browser there to grant consent; the
+    // backend callback finishes the link and redirects back here.
+    getCrmStatus: () => r('/crm'),
+    connectCrm: (region) => r('/crm/connect', { method: 'POST', body: { region } }),
+    disconnectCrm: () => r('/crm/disconnect', { method: 'POST' }),
+    // Bot Branding & Theme Studio: brand kit + three generated widget designs.
+    // selectTheme(null) puts the widget back on its classic look.
+    getBranding: () => r('/branding'),
+    selectTheme: (themeId) => r('/branding/select', { method: 'POST', body: { themeId } }),
+    scanBranding: (url) => r('/branding/scan', { method: 'POST', body: { url } }),
+    updateBranding: (changes) => r('/branding', { method: 'PATCH', body: changes }),
+    // A PNG / JPEG / WebP logo (≤ 2 MB) that becomes THE logo; remove clears any logo.
+    uploadBrandLogo: (file) => {
+      const formData = new FormData();
+      formData.append('logo', file);
+      return requestMultipart(`${base}/branding/logo`, formData, auth);
+    },
+    removeBrandLogo: () => r('/branding/logo', { method: 'DELETE' }),
     // Starter questions written from this tenant's documents: { status, supportFaqs, salesFaqs, generatedAt }
     getFaqs: () => r('/faqs'),
     regenerateFaqs: () => r('/faqs/regenerate', { method: 'POST' }),

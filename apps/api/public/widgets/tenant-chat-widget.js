@@ -82,6 +82,7 @@
   var sessionIds = {}; // botType -> sessionId, kept separate like the wizard's own test widget
   var open = false;
   var sending = false;
+  var customBotName = null; // the display name set in the Theme Studio; null = the default title
 
   // --- Language (English / Hindi) -------------------------------------
   // The widget's UI language: labels, the welcome greeting, placeholders. It
@@ -119,7 +120,9 @@
       errorGeneric: 'The bot could not respond.',
       attach: 'Attach image', imageReady: 'Image attached', removeImage: 'Remove image',
       imageTooBig: 'That image is too large (max 5MB).',
-      imageType: 'Please choose a PNG, JPEG, WebP or GIF image.'
+      imageType: 'Please choose a PNG, JPEG, WebP or GIF image.',
+      mic: 'Voice input', listening: 'Listening… tap to stop', transcribing: 'Transcribing…',
+      micDenied: 'Microphone access was blocked.', voiceError: 'Could not transcribe that. Please try again.'
     },
     hi: {
       titleSupport: 'सहायता', titleSales: 'सेल्स से बात करें',
@@ -132,36 +135,84 @@
       errorGeneric: 'बॉट जवाब नहीं दे सका।',
       attach: 'तस्वीर जोड़ें', imageReady: 'तस्वीर जोड़ी गई', removeImage: 'तस्वीर हटाएँ',
       imageTooBig: 'यह तस्वीर बहुत बड़ी है (अधिकतम 5MB)।',
-      imageType: 'कृपया PNG, JPEG, WebP या GIF तस्वीर चुनें।'
+      imageType: 'कृपया PNG, JPEG, WebP या GIF तस्वीर चुनें।',
+      mic: 'आवाज़ से बोलें', listening: 'सुन रहा हूँ… रोकने के लिए टैप करें', transcribing: 'लिखा जा रहा है…',
+      micDenied: 'माइक्रोफ़ोन की अनुमति नहीं मिली।', voiceError: 'उसे समझ नहीं पाया। कृपया फिर कोशिश करें।'
     }
   };
   function t(key) { return (STRINGS[lang] && STRINGS[lang][key]) || STRINGS.en[key] || ''; }
 
   var style = document.createElement('style');
   style.textContent =
+    // Theme tokens (Theme Studio). These defaults ARE the classic look; an
+    // applied design overrides them from a second <style> (applyTheme below).
+    '#' + ns + '-launcher,#' + ns + '-panel{--kgt-primary:#0f172a;--kgt-on-primary:#ffffff;--kgt-secondary:#cbd5e1;' +
+    '--kgt-bg:#ffffff;--kgt-text:#0f172a;--kgt-bot-bubble:#f1f5f9;--kgt-radius:12px;' +
+    '--kgt-font:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;--kgt-head-bg:#ffffff;--kgt-head-text:#0f172a;' +
+    '--kgt-head-muted:#64748b;--kgt-head-border:#e2e8f0;--kgt-head-chip:#f1f5f9;}' +
     '#' + ns + '-launcher{position:fixed;bottom:20px;right:20px;width:56px;height:56px;border-radius:50%;' +
-    'background:#0f172a;border:none;box-shadow:0 8px 24px rgba(15,23,42,.35);cursor:pointer;' +
+    'background:var(--kgt-primary);border:none;box-shadow:0 8px 24px rgba(15,23,42,.35);cursor:pointer;' +
     'z-index:2147483000;display:flex;align-items:center;justify-content:center;transition:transform .15s ease;}' +
     '#' + ns + '-launcher:hover{transform:scale(1.06);}' +
-    '#' + ns + '-launcher svg{width:26px;height:26px;fill:#fff;}' +
+    '#' + ns + '-launcher svg{width:26px;height:26px;fill:var(--kgt-on-primary);}' +
     '#' + ns + '-panel{position:fixed;bottom:88px;right:20px;width:360px;max-width:calc(100vw - 24px);' +
     'height:520px;max-height:calc(100vh - 120px);border-radius:18px;box-shadow:0 20px 48px rgba(6,10,26,.25);' +
-    'z-index:2147483000;display:none;background:#fff;overflow:hidden;flex-direction:column;' +
-    'font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;}' +
+    'z-index:2147483000;display:none;background:var(--kgt-bg);overflow:hidden;flex-direction:column;' +
+    'font-family:var(--kgt-font);color:var(--kgt-text);}' +
     '#' + ns + '-panel.open{display:flex;}' +
     '@media (max-width:480px){#' + ns + '-panel{right:12px;bottom:84px;width:calc(100vw - 24px);height:calc(100vh - 110px);}}' +
     '#' + ns + '-head{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;' +
-    'border-bottom:1px solid #e2e8f0;flex-shrink:0;}' +
-    '#' + ns + '-tabs{display:flex;background:#f1f5f9;border-radius:8px;padding:2px;gap:2px;}' +
+    'border-bottom:1px solid var(--kgt-head-border);flex-shrink:0;gap:8px;background:var(--kgt-head-bg);color:var(--kgt-head-text);}' +
+    '#' + ns + '-head-left{display:flex;align-items:center;gap:8px;min-width:0;flex:1;}' +
+    // Brand mark: the company logo in a badge chosen server-side for this
+    // design's header (themeGenerator.js logoBadgeFor), so only the artwork
+    // shows — never a pasted-on rectangle. A logo's white box is normally
+    // removed from the image itself on the server (logoUpload.js); these rules
+    // seat what's left:
+    //   plain — straight on the header; .tint-light / .tint-dark recolour a
+    //           single-colour mark to the header's ink; .blend (multiply) melts
+    //           a remaining white box into a light header;
+    //   pill  — a padded rounded chip for a mark that needs a contrasting plate;
+    //           .blend melts a white image box into a white chip;
+    //   tile  — a coloured/dark app-icon logo, edge to edge, rounded.
+    // The image keeps its proportions (object-fit:contain, height-led, capped
+    // width), so wide wordmarks and tall emblems both fit the 30px header slot.
+    // The company's initial stands in when there's no logo or it fails to load.
+    // Keep in step with BrandMark in apps/web/components/workspace/BrandingStudio.js.
+    '#' + ns + '-brand{display:none;align-items:center;flex-shrink:0;}' +
+    '#' + ns + '-brand.show{display:flex;}' +
+    '#' + ns + '-brand .badge{display:flex;align-items:center;justify-content:center;box-sizing:border-box;' +
+    'height:30px;max-width:112px;min-width:0;border-radius:9px;overflow:hidden;flex-shrink:0;}' +
+    '#' + ns + '-brand .badge img{display:block;height:100%;width:auto;max-width:100%;object-fit:contain;object-position:center;' +
+    'user-select:none;-webkit-user-drag:none;}' +
+    '#' + ns + '-brand .badge.plain{height:28px;max-width:120px;padding:2px 0;border-radius:0;background:transparent;}' +
+    '#' + ns + '-brand .badge.pill{padding:4px 10px;border-radius:10px;}' +
+    '#' + ns + '-brand .badge.tile{padding:2px;border-radius:9px;}' +
+    // multiply erases only PURE white; the 5% lift first pushes a near-white
+    // box (#f3–#fe: JPEG noise, off-white exports) to exact white so it melts
+    // away completely. Only reached by logos the server couldn't clean.
+    '#' + ns + '-brand .badge.blend img{mix-blend-mode:multiply;filter:brightness(1.05);}' +
+    '#' + ns + '-brand .badge.tint-light img{filter:brightness(0) invert(1);}' +
+    '#' + ns + '-brand .badge.tint-dark img{filter:brightness(0);opacity:.86;}' +
+    '#' + ns + '-brand .initial{width:26px;height:26px;border-radius:50%;background:var(--kgt-head-chip);color:var(--kgt-head-text);' +
+    'font-size:12.5px;font-weight:700;display:flex;align-items:center;justify-content:center;}' +
+    '#' + ns + '-tabs{display:flex;background:var(--kgt-head-chip);border-radius:8px;padding:2px;gap:2px;}' +
     '#' + ns + '-tabs button{border:none;background:transparent;font-size:12px;font-weight:600;padding:5px 10px;' +
-    'border-radius:6px;cursor:pointer;color:#64748b;text-transform:capitalize;}' +
+    'border-radius:6px;cursor:pointer;color:var(--kgt-head-muted);text-transform:capitalize;font-family:inherit;}' +
     '#' + ns + '-tabs button.active{background:#fff;color:#0f172a;box-shadow:0 1px 2px rgba(0,0,0,.08);}' +
-    '#' + ns + '-title{font-size:13.5px;font-weight:600;color:#0f172a;}' +
-    '#' + ns + '-close{border:none;background:none;cursor:pointer;color:#94a3b8;font-size:18px;line-height:1;padding:2px 6px;}' +
+    '#' + ns + '-title{font-size:13.5px;font-weight:600;color:var(--kgt-head-text);min-width:0;' +
+    'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}' +
+    // With a custom bot name the header holds the name, so the Support/Sales
+    // tabs move to a slim row of their own beneath it.
+    '#' + ns + '-subhead{display:flex;justify-content:center;padding:8px 14px 2px;flex-shrink:0;background:var(--kgt-bg);}' +
+    '#' + ns + '-subhead #' + ns + '-tabs{background:#f1f5f9;}' +
+    '#' + ns + '-subhead #' + ns + '-tabs button{color:#64748b;}' +
+    '#' + ns + '-subhead #' + ns + '-tabs button.active{color:#0f172a;}' +
+    '#' + ns + '-close{border:none;background:none;cursor:pointer;color:var(--kgt-head-muted);font-size:18px;line-height:1;padding:2px 6px;}' +
     '#' + ns + '-body{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:8px;}' +
-    '#' + ns + '-body .msg{max-width:85%;padding:8px 11px;border-radius:12px;font-size:13.5px;line-height:1.4;white-space:pre-line;}' +
-    '#' + ns + '-body .msg.user{align-self:flex-end;background:#0f172a;color:#fff;}' +
-    '#' + ns + '-body .msg.bot{align-self:flex-start;background:#f1f5f9;color:#0f172a;}' +
+    '#' + ns + '-body .msg{max-width:85%;padding:8px 11px;border-radius:var(--kgt-radius);font-size:13.5px;line-height:1.4;white-space:pre-line;}' +
+    '#' + ns + '-body .msg.user{align-self:flex-end;background:var(--kgt-primary);color:var(--kgt-on-primary);}' +
+    '#' + ns + '-body .msg.bot{align-self:flex-start;background:var(--kgt-bot-bubble);color:var(--kgt-text);}' +
     '#' + ns + '-body .msg.bot p{margin:0 0 8px;}' +
     '#' + ns + '-body .msg.bot ul,#' + ns + '-body .msg.bot ol{margin:0 0 8px;padding-left:18px;}' +
     '#' + ns + '-body .msg.bot li{margin:0 0 4px;padding-left:2px;}' +
@@ -172,11 +223,11 @@
     '#' + ns + '-body .chips{align-self:flex-start;display:flex;flex-wrap:wrap;gap:6px;max-width:92%;}' +
     '#' + ns + '-body .chip{border:1px solid #cbd5e1;background:#fff;color:#0f172a;border-radius:999px;' +
     'padding:5px 10px;font-size:12px;line-height:1.3;text-align:left;cursor:pointer;font-family:inherit;}' +
-    '#' + ns + '-body .chip:hover{border-color:#0f172a;background:#f8fafc;}' +
+    '#' + ns + '-body .chip:hover{border-color:var(--kgt-primary);background:#f8fafc;}' +
     '#' + ns + '-form{display:flex;gap:8px;padding:10px;border-top:1px solid #e2e8f0;flex-shrink:0;}' +
     '#' + ns + '-input{flex:1;border:1px solid #cbd5e1;border-radius:8px;padding:8px 10px;font-size:13px;outline:none;}' +
-    '#' + ns + '-input:focus{border-color:#0f172a;}' +
-    '#' + ns + '-send{border:none;background:#0f172a;color:#fff;font-size:13px;font-weight:600;padding:0 14px;' +
+    '#' + ns + '-input:focus{border-color:var(--kgt-primary);}' +
+    '#' + ns + '-send{border:none;background:var(--kgt-primary);color:var(--kgt-on-primary);font-size:13px;font-weight:600;padding:0 14px;' +
     'border-radius:8px;cursor:pointer;}' +
     '#' + ns + '-send:disabled{opacity:.4;cursor:not-allowed;}' +
     // Product cards under a bot reply.
@@ -187,8 +238,8 @@
     '#' + ns + '-body .pcard-body{min-width:0;flex:1;}' +
     '#' + ns + '-body .pcard-name{font-size:12.5px;font-weight:600;color:#0f172a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}' +
     '#' + ns + '-body .pcard-price{font-size:12px;color:#334155;margin-top:1px;}' +
-    '#' + ns + '-body .pcard-btn{display:inline-flex;align-items:center;border:1px solid #0f172a;background:#0f172a;' +
-    'color:#fff;border-radius:8px;padding:6px 10px;font-size:11.5px;font-weight:600;cursor:pointer;' +
+    '#' + ns + '-body .pcard-btn{display:inline-flex;align-items:center;border:1px solid var(--kgt-primary);background:var(--kgt-primary);' +
+    'color:var(--kgt-on-primary);border-radius:8px;padding:6px 10px;font-size:11.5px;font-weight:600;cursor:pointer;' +
     'font-family:inherit;flex-shrink:0;text-decoration:none;}' +
     '#' + ns + '-body .pcard-btn:hover{opacity:.9;}' +
     // Image upload: an attach button in the form, a preview bar, and a thumbnail
@@ -201,11 +252,17 @@
     '#' + ns + '-preview .pv-name{flex:1;min-width:0;font-size:12px;color:#334155;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}' +
     '#' + ns + '-preview .pv-remove{border:none;background:none;color:#94a3b8;font-size:17px;line-height:1;cursor:pointer;padding:2px 4px;}' +
     '#' + ns + '-body .msg.user img{display:block;max-width:160px;max-height:160px;border-radius:8px;margin-top:6px;}' +
+    // Voice input: mic button + its recording (pulsing) state.
+    '#' + ns + '-mic{border:1px solid #cbd5e1;background:#fff;color:#64748b;border-radius:8px;cursor:pointer;' +
+    'font-size:15px;line-height:1;padding:0 10px;flex-shrink:0;}' +
+    '#' + ns + '-mic:hover{border-color:#0f172a;color:#0f172a;}' +
+    '#' + ns + '-mic.rec{border-color:#dc2626;color:#dc2626;background:#fef2f2;animation:' + ns + '-pulse 1.1s ease-in-out infinite;}' +
+    '@keyframes ' + ns + '-pulse{0%,100%{box-shadow:0 0 0 0 rgba(220,38,38,.45);}50%{box-shadow:0 0 0 5px rgba(220,38,38,0);}}' +
     // Header right side: the small EN/हिं language toggle beside the close button.
     '#' + ns + '-head-right{display:flex;align-items:center;gap:6px;}' +
-    '#' + ns + '-lang{display:flex;gap:2px;background:#f1f5f9;border-radius:999px;padding:2px;}' +
+    '#' + ns + '-lang{display:flex;gap:2px;background:var(--kgt-head-chip);border-radius:999px;padding:2px;}' +
     '#' + ns + '-lang button{border:none;background:transparent;font-size:11px;font-weight:700;' +
-    'padding:3px 8px;border-radius:999px;cursor:pointer;color:#64748b;font-family:inherit;line-height:1.4;}' +
+    'padding:3px 8px;border-radius:999px;cursor:pointer;color:var(--kgt-head-muted);font-family:inherit;line-height:1.4;}' +
     '#' + ns + '-lang button.active{background:#fff;color:#0f172a;box-shadow:0 1px 2px rgba(0,0,0,.08);}' +
     // Prominent language picker shown on the welcome/FAQ (empty) view.
     '#' + ns + '-body .langpick{margin:auto;display:flex;flex-direction:column;gap:10px;align-items:center;' +
@@ -215,7 +272,7 @@
     '#' + ns + '-body .langpick button{border:1px solid #cbd5e1;background:#fff;color:#0f172a;border-radius:999px;' +
     'padding:8px 18px;font-size:13.5px;font-weight:600;cursor:pointer;font-family:inherit;}' +
     '#' + ns + '-body .langpick button:hover{border-color:#0f172a;}' +
-    '#' + ns + '-body .langpick button.active{background:#0f172a;color:#fff;border-color:#0f172a;}' +
+    '#' + ns + '-body .langpick button.active{background:var(--kgt-primary);color:var(--kgt-on-primary);border-color:var(--kgt-primary);}' +
     '#' + ns + '-body .langpick .lp-hint{color:#94a3b8;font-size:12px;line-height:1.4;}';
   document.head.appendChild(style);
 
@@ -230,12 +287,15 @@
   panel.id = ns + '-panel';
   panel.innerHTML =
     '<div id="' + ns + '-head">' +
+    '<div id="' + ns + '-head-left">' +
+    '<div id="' + ns + '-brand"></div>' +
     (lockedBot
       ? '<div id="' + ns + '-title"></div>'
       : '<div id="' + ns + '-tabs">' +
         '<button type="button" data-bot="support"></button>' +
         '<button type="button" data-bot="sales"></button>' +
         '</div>') +
+    '</div>' +
     '<div id="' + ns + '-head-right">' +
     '<div id="' + ns + '-lang" role="group" aria-label="Language">' +
     '<button type="button" data-lang="en">EN</button>' +
@@ -248,6 +308,7 @@
     '<div id="' + ns + '-preview"></div>' +
     '<form id="' + ns + '-form">' +
     '<button type="button" id="' + ns + '-attach">📎</button>' +
+    '<button type="button" id="' + ns + '-mic" style="display:none">🎤</button>' +
     '<input id="' + ns + '-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif" style="display:none" />' +
     '<input id="' + ns + '-input" type="text" autocomplete="off" />' +
     '<button id="' + ns + '-send" type="submit"></button>' +
@@ -271,7 +332,7 @@
   // language pill. Called on mount and whenever the language changes.
   function applyStaticStrings() {
     var title = panel.querySelector('#' + ns + '-title');
-    if (title) title.textContent = t(lockedBot === 'sales' ? 'titleSales' : 'titleSupport');
+    if (title) title.textContent = customBotName || t(lockedBot === 'sales' ? 'titleSales' : 'titleSupport');
     var input = panel.querySelector('#' + ns + '-input');
     if (input) input.setAttribute('placeholder', t('placeholder'));
     var send = panel.querySelector('#' + ns + '-send');
@@ -543,6 +604,75 @@
     reader.readAsDataURL(file);
   });
 
+  // ── Voice input: MediaRecorder → POST /transcribe (Groq Whisper) → fill the
+  // input with the transcript (editable) and switch the UI to the spoken
+  // language so the bot replies in it. Hidden where the browser can't record.
+  var micBtn = panel.querySelector('#' + ns + '-mic');
+  var recording = false; var recorder = null; var recChunks = []; var recStream = null;
+  var voiceSupported = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder);
+  if (voiceSupported) {
+    micBtn.style.display = '';
+    micBtn.setAttribute('aria-label', t('mic'));
+    micBtn.setAttribute('title', t('mic'));
+    micBtn.addEventListener('click', function () { if (recording) stopRecording(); else startRecording(); });
+  }
+
+  function setComposerBusy(busy, placeholderKey) {
+    var input = panel.querySelector('#' + ns + '-input');
+    input.disabled = busy;
+    input.setAttribute('placeholder', t(placeholderKey || 'placeholder'));
+    panel.querySelector('#' + ns + '-send').disabled = busy;
+    panel.querySelector('#' + ns + '-attach').disabled = busy;
+  }
+  function cleanupStream() {
+    if (recStream) { recStream.getTracks().forEach(function (tr) { tr.stop(); }); recStream = null; }
+    recorder = null;
+  }
+  function startRecording() {
+    if (recording || sending) return;
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+      recStream = stream; recChunks = [];
+      try { recorder = new MediaRecorder(stream); } catch (e) { cleanupStream(); renderPreview(t('voiceError')); return; }
+      recorder.addEventListener('dataavailable', function (e) { if (e.data && e.data.size) recChunks.push(e.data); });
+      recorder.addEventListener('stop', onRecordingStop);
+      recorder.start();
+      recording = true;
+      micBtn.className = 'rec'; micBtn.textContent = '⏹'; // stop square while recording
+      setComposerBusy(true, 'listening');
+    }).catch(function () { renderPreview(t('micDenied')); });
+  }
+  function stopRecording() {
+    if (!recording || !recorder) return;
+    recording = false;
+    micBtn.className = ''; micBtn.textContent = '🎤';
+    try { recorder.stop(); } catch (e) { cleanupStream(); setComposerBusy(false); }
+  }
+  function onRecordingStop() {
+    var type = (recorder && recorder.mimeType) || 'audio/webm';
+    cleanupStream();
+    var blob = new Blob(recChunks, { type: type }); recChunks = [];
+    if (!blob.size) { setComposerBusy(false); return; }
+    setComposerBusy(true, 'transcribing');
+    var ext = type.indexOf('ogg') >= 0 ? 'ogg' : type.indexOf('mp4') >= 0 ? 'mp4' : 'webm';
+    var form = new FormData();
+    form.append('audio', blob, 'voice.' + ext);
+    fetch(apiBase + '/api/v1/tenant-chat/' + encodeURIComponent(tenantSlug) + '/transcribe', {
+      method: 'POST', headers: { 'x-tenant-api-key': apiKey }, body: form
+    })
+      .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
+      .then(function (result) {
+        if (!result.ok) throw new Error((result.data && result.data.error) || t('voiceError'));
+        var text = (result.data && result.data.text) || '';
+        // Reply in the language actually spoken (detected server-side from the transcript).
+        if (result.data && (result.data.language === 'en' || result.data.language === 'hi')) setLang(result.data.language);
+        setComposerBusy(false);
+        var input = panel.querySelector('#' + ns + '-input');
+        input.value = input.value ? (input.value + ' ' + text) : text;
+        input.focus();
+      })
+      .catch(function (err) { setComposerBusy(false); renderPreview(err.message || t('voiceError')); });
+  }
+
   panel.querySelector('#' + ns + '-form').addEventListener('submit', function (e) {
     e.preventDefault();
     var input = panel.querySelector('#' + ns + '-input');
@@ -615,11 +745,162 @@
     }
   });
 
+  // ── Brand theme (Theme Studio). The design the company applied in its
+  // dashboard plus its logo, fetched once at start-up. The widget is already
+  // usable in its classic look, so a slow or failed fetch changes nothing.
+  // Every value is re-checked here before it reaches CSS — colours must be
+  // #rrggbb, the radius a small number, the header style a known keyword, the
+  // font stack plain characters — and the logo is set through the img's src
+  // property, never as HTML.
+  var themeStyle = document.createElement('style');
+  var HEX_RE = /^#[0-9a-fA-F]{6}$/;
+  var FONT_RE = /^[\w\s,"'-]{1,200}$/;
+  function hexOr(value, fallback) { return typeof value === 'string' && HEX_RE.test(value) ? value : fallback; }
+  function rgba(hex, alpha) {
+    var n = parseInt(hex.slice(1), 16);
+    return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + alpha + ')';
+  }
+  function isDark(hex) {
+    var n = parseInt(hex.slice(1), 16);
+    return (((n >> 16) & 255) * 299 + ((n >> 8) & 255) * 587 + (n & 255) * 114) / 1000 < 150;
+  }
+
+  // badge: the design's logoBadge { mode, background, blend, ring, tint },
+  // re-checked here; colours go in through the style property, never as CSS text.
+  function renderBrand(logoUrl, companyName, badge, ringColor) {
+    var brand = panel.querySelector('#' + ns + '-brand');
+    if (!brand) return;
+    brand.innerHTML = '';
+    function showInitial() {
+      brand.innerHTML = '';
+      var initial = document.createElement('div');
+      initial.className = 'initial';
+      initial.textContent = String(companyName || tenantSlug || '?').trim().charAt(0).toUpperCase() || '?';
+      brand.appendChild(initial);
+    }
+    // An uploaded logo comes as a path on this API (/api/v1/public/brand-assets/…),
+    // resolved against apiBase; anything else must be an absolute http(s) URL.
+    if (typeof logoUrl === 'string' && /^\/api\/v1\/public\/brand-assets\/[A-Za-z0-9._~%\/-]+$/.test(logoUrl)) {
+      logoUrl = apiBase + logoUrl;
+    }
+    if (typeof logoUrl === 'string' && /^https?:\/\//i.test(logoUrl)) {
+      var b = badge && typeof badge === 'object' ? badge : {};
+      var mode = b.mode === 'plain' || b.mode === 'tile' ? b.mode : 'pill';
+      var holder = document.createElement('span');
+      var tint = mode === 'plain' && (b.tint === 'light' || b.tint === 'dark') ? b.tint : null;
+      holder.className = 'badge ' + mode + (b.blend === true && !tint ? ' blend' : '') + (tint ? ' tint-' + tint : '');
+      if (mode !== 'plain') holder.style.backgroundColor = hexOr(b.background, '#ffffff');
+      // A chip gets a soft lift so it reads as a deliberate plate; the ring adds
+      // a hairline where the plate is close to the header colour.
+      var shadows = [];
+      if (b.ring === true && ringColor && mode !== 'plain') shadows.push('0 0 0 1px ' + ringColor);
+      if (mode === 'pill') shadows.push('0 1px 2px rgba(15,23,42,.12)');
+      if (shadows.length) holder.style.boxShadow = shadows.join(',');
+      var img = document.createElement('img');
+      img.alt = companyName ? String(companyName) : '';
+      img.referrerPolicy = 'no-referrer';
+      img.onerror = showInitial; // a broken or blocked logo falls back to the initial
+      img.src = logoUrl;
+      holder.appendChild(img);
+      brand.appendChild(holder);
+    } else {
+      showInitial();
+    }
+    brand.className = 'show';
+  }
+
+  // The custom display name replaces the default title. With both bots shown,
+  // the header has no title — so one is added, and the Support/Sales tabs move
+  // to a row of their own beneath the header (their click handlers move too).
+  function applyBotName(name) {
+    // Control characters, markup and invisible formatting (zero-width, bidi
+    // overrides/isolates, BOM — a right-to-left override would make the header
+    // read as something it isn't). Same set as branding.js cleanBotName.
+    var clean = typeof name === 'string'
+      ? name.replace(/[\u0000-\u001f\u007f<>]/g, '').replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u2069\uFEFF]/g, '')
+        .replace(/\s+/g, ' ').trim().slice(0, 40)
+      : '';
+    if (!clean) return;
+    customBotName = clean;
+    if (!lockedBot) {
+      var left = panel.querySelector('#' + ns + '-head-left');
+      if (left && !panel.querySelector('#' + ns + '-title')) {
+        var title = document.createElement('div');
+        title.id = ns + '-title';
+        left.appendChild(title);
+      }
+      var tabs = panel.querySelector('#' + ns + '-tabs');
+      if (tabs && !panel.querySelector('#' + ns + '-subhead')) {
+        var sub = document.createElement('div');
+        sub.id = ns + '-subhead';
+        sub.appendChild(tabs);
+        panel.insertBefore(sub, panel.querySelector('#' + ns + '-body'));
+      }
+    }
+    applyStaticStrings(); // writes the name (textContent — never HTML)
+  }
+
+  function applyTheme(data) {
+    applyBotName(data && data.botName); // the name applies with or without a design
+    var th = data && data.theme;
+    if (!th || typeof th !== 'object') return; // no design applied: keep the classic look
+    var primary = hexOr(th.primaryColor, '#0f172a');
+    var accent = hexOr(th.accentColor, primary);
+    var bg = hexOr(th.backgroundColor, '#ffffff');
+    var text = hexOr(th.textColor, '#0f172a');
+    var onPrimary = hexOr(th.onPrimaryColor, isDark(primary) ? '#ffffff' : '#0f172a');
+    var radius = Math.max(0, Math.min(28, parseInt(th.borderRadius, 10) || 0));
+    var font = typeof th.fontFamily === 'string' && FONT_RE.test(th.fontFamily) ? th.fontFamily : '-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif';
+
+    var head = { bg: bg, text: text, muted: '#64748b', border: '#e2e8f0', chip: '#f1f5f9' };
+    if (th.headerStyle === 'solid' || th.headerStyle === 'gradient') {
+      head = {
+        bg: th.headerStyle === 'gradient' ? 'linear-gradient(135deg,' + primary + ',' + accent + ')' : primary,
+        text: onPrimary, muted: rgba(onPrimary, 0.75), border: 'transparent', chip: rgba(onPrimary, 0.18)
+      };
+    } else if (th.headerStyle === 'glass') {
+      head = { bg: rgba(primary, 0.1), text: text, muted: rgba(text, 0.6), border: rgba(primary, 0.18), chip: rgba(primary, 0.12) };
+    }
+    // Inactive tabs, language chips and the close button: the server's
+    // contrast-checked colour (4.5:1 on every header surface —
+    // themeGenerator.js mutedHeaderColor); the faded ink only for an old payload.
+    head.muted = hexOr(th.headerMutedColor, head.muted);
+
+    themeStyle.textContent = '#' + ns + '-launcher,#' + ns + '-panel{' +
+      '--kgt-primary:' + primary + ';--kgt-on-primary:' + onPrimary + ';' +
+      '--kgt-secondary:' + hexOr(th.secondaryColor, '#cbd5e1') + ';' +
+      '--kgt-bg:' + bg + ';--kgt-text:' + text + ';' +
+      '--kgt-bot-bubble:' + hexOr(th.botBubbleColor, '#f1f5f9') + ';' +
+      '--kgt-radius:' + radius + 'px;--kgt-font:' + font + ';' +
+      '--kgt-head-bg:' + head.bg + ';--kgt-head-text:' + head.text + ';--kgt-head-muted:' + head.muted + ';' +
+      '--kgt-head-border:' + head.border + ';--kgt-head-chip:' + head.chip + ';}';
+    renderBrand(data.logoUrl, data.companyName, th.logoBadge, rgba(hexOr(head.text, '#0f172a'), 0.22));
+  }
+
+  function loadTheme() {
+    if (typeof fetch !== 'function') return;
+    fetch(apiBase + '/api/v1/tenant-chat/' + encodeURIComponent(tenantSlug) + '/theme', {
+      headers: { 'x-tenant-api-key': apiKey }
+    })
+      .then(function (res) {
+        if (res.status === 403) {
+          // The key is restricted to other websites (dashboard → API keys → Websites).
+          console.warn('[kgt-chat-widget] This API key is not enabled for ' + window.location.origin +
+            '. Add this website to the key\'s allowed websites in your KGT dashboard.');
+        }
+        return res.ok ? res.json() : null;
+      })
+      .then(function (data) { if (data) applyTheme(data); })
+      .catch(function () { /* keep the classic look */ });
+  }
+
   function mount() {
+    document.head.appendChild(themeStyle); // after the base <style>, so its tokens win
     document.body.appendChild(panel);
     document.body.appendChild(launcher);
     applyStaticStrings();
     renderTabs();
+    loadTheme();
   }
 
   if (document.body) {

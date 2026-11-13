@@ -22,52 +22,56 @@ model Operator {
 }
 
 model Tenant {
-  id                String   @id @default(uuid())
-  slug              String   @unique
-  name              String
-  industryLabel     String   // e.g. "Retail Customer Support", "IT Helpdesk" — shown to the model as its role
-  persona           String?  // optional extra tone/rules text layered onto the generic template
-  outOfScopeMessage String   @default("I'm your dedicated assistant here, and I want to make sure you get the very best care for this particular request. Would you like me to drop a quick note for our team so they can follow up with you directly?")
-  minConfidence     Float    @default(0.30)
-  active            Boolean  @default(true)
+  id                   String    @id @default(uuid())
+  slug                 String    @unique
+  name                 String
+  industryLabel        String // e.g. "Retail Customer Support", "IT Helpdesk" — shown to the model as its role
+  persona              String? // optional extra tone/rules text layered onto the generic template
+  outOfScopeMessage    String    @default("I'm your dedicated assistant here, and I want to make sure you get the very best care for this particular request. Would you like me to drop a quick note for our team so they can follow up with you directly?")
+  minConfidence        Float     @default(0.30)
+  active               Boolean   @default(true)
   // Set when provisioned via the public self-serve wizard; null for a
   // staff-created tenant. Unique: one self-serve company per email address
   // (migration 20261011090000_one_account_per_email).
-  signupEmail       String?  @unique
+  signupEmail          String?   @unique
   // Which bots the company deploys: support | sales | both (CHECK constraint
   // in migration 20261010090000_bot_preference). With one bot, that bot uses
   // all of the knowledge and the readiness audit judges only its scope
   // (services/shared/botScope.js, services/botAuditor.js).
-  botPreference     String   @default("both")
+  botPreference        String    @default("both")
   // The company's business category, chosen in the onboarding wizard
   // (ecommerce | saas | healthcare | real_estate | services | other). Drives
   // the tailored upload prompts and a light tone hint for the bots
   // (services/shared/businessCategory.js). Null for tenants created before it.
-  businessCategory  String?
+  businessCategory     String?
   // Where lead and low-confidence alerts go (services/teamAlerts.js). Null =
   // the signup email, then the tenant's dashboard users. Lower-cased.
-  teamEmail         String?
+  teamEmail            String?
   // Pre-flight knowledge audit (services/botAuditor.js): the latest report,
   // its 0-100 score and level, and a hash of the documents it judged — a
   // different hash now means documents changed since and the report is stale.
   readinessScore       Int?
-  readinessLevel       String?   // Not Ready | Moderate | Production Ready
+  readinessLevel       String? // Not Ready | Moderate | Production Ready
   readinessReport      Json?
   readinessContentHash String?
   readinessAuditedAt   DateTime?
-  createdAt         DateTime @default(now())
+  createdAt            DateTime  @default(now())
 
-  users        TenantUser[]
-  documents    TenantDocument[]
-  apiKeys      TenantApiKey[]
-  consents     TenantConsent[]
-  chatSessions ChatSession[]
-  tickets      SupportTicket[]
-  leads        Lead[]
-  usageLogs    UsageLog[]
-  starterFaqs  TenantFaq?
-  smtpConfig   TenantSmtpConfig?
-  products     ProductCatalog[]
+  users          TenantUser[]
+  documents      TenantDocument[]
+  apiKeys        TenantApiKey[]
+  consents       TenantConsent[]
+  chatSessions   ChatSession[]
+  tickets        SupportTicket[]
+  leads          Lead[]
+  usageLogs      UsageLog[]
+  starterFaqs    TenantFaq?
+  smtpConfig     TenantSmtpConfig?
+  products       ProductCatalog[]
+  crmIntegration TenantCRMIntegration?
+  crmSyncLogs    CRMSyncLog[]
+  branding       TenantBranding?
+  logoAssets     TenantLogoAsset[]
 }
 
 // Structured product rows from a catalog CSV upload (services/catalogIngest.js).
@@ -83,11 +87,11 @@ model ProductCatalog {
   documentId  String?
   name        String
   sku         String
-  price       String          // kept as text: currencies, ranges and "POA" are all valid
+  price       String // kept as text: currencies, ranges and "POA" are all valid
   description String          @default("")
-  category    String?         // the item's own category/type (e.g. "Electronics", "Course"), not the tenant's business category
-  imageUrl    String?         // an image/picture URL for the product or course
-  productUrl  String?         // a direct product / purchase / checkout link shown on the card
+  category    String? // the item's own category/type (e.g. "Electronics", "Course"), not the tenant's business category
+  imageUrl    String? // an image/picture URL for the product or course
+  productUrl  String? // a direct product / purchase / checkout link shown on the card
   createdAt   DateTime        @default(now())
   updatedAt   DateTime        @updatedAt
 
@@ -105,11 +109,11 @@ model TenantSmtpConfig {
   id        String   @id @default(uuid())
   tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   tenantId  String   @unique
-  provider  String?  // 'gmail' | 'outlook' | null (custom) — drives the UI's provider picker and help text
+  provider  String? // 'gmail' | 'outlook' | null (custom) — drives the UI's provider picker and help text
   smtpHost  String
   smtpPort  Int      @default(587)
   smtpUser  String
-  smtpPass  String   // AES-256-GCM ciphertext (never plaintext, never sent to the client)
+  smtpPass  String // AES-256-GCM ciphertext (never plaintext, never sent to the client)
   smtpFrom  String
   isEnabled Boolean  @default(true)
   createdAt DateTime @default(now())
@@ -122,17 +126,17 @@ model TenantSmtpConfig {
 // status: pending (generation queued/running) | ready | failed. A failed
 // regeneration keeps the previous questions, so the sandbox never goes blank.
 model TenantFaq {
-  id          String    @id @default(uuid())
-  tenant      Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  tenantId    String    @unique
-  supportFaqs String[]  @default([]) // English starter questions (index-aligned with the *Hi arrays)
-  salesFaqs   String[]  @default([])
-  supportFaqsHi String[] @default([]) // Hindi variants, same order; falls back to English where a translation is missing
-  salesFaqsHi   String[] @default([])
-  status      String    @default("pending")
-  error       String?   // last failure reason, for staff; never shown to clients
-  generatedAt DateTime? // when the current questions were written
-  updatedAt   DateTime  @updatedAt
+  id            String    @id @default(uuid())
+  tenant        Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantId      String    @unique
+  supportFaqs   String[]  @default([]) // English starter questions (index-aligned with the *Hi arrays)
+  salesFaqs     String[]  @default([])
+  supportFaqsHi String[]  @default([]) // Hindi variants, same order; falls back to English where a translation is missing
+  salesFaqsHi   String[]  @default([])
+  status        String    @default("pending")
+  error         String? // last failure reason, for staff; never shown to clients
+  generatedAt   DateTime? // when the current questions were written
+  updatedAt     DateTime  @updatedAt
 }
 
 // A client company's own login to its dashboard (/dashboard). Belongs to
@@ -202,15 +206,20 @@ model EmailVerification {
 // recovered, only rotated. Several keys per tenant, so a key can be replaced
 // without downtime: issue the new one, update the embed, then revoke the old.
 model TenantApiKey {
-  id         String    @id @default(uuid())
-  tenant     Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  tenantId   String
-  keyHash    String    @unique // sha256 hex of the full plaintext key
-  keyPrefix  String    // first chars of the key, e.g. "tk_3f9a1c" — lets admins tell keys apart
-  label      String    @default("Default")
-  createdAt  DateTime  @default(now())
-  lastUsedAt DateTime? // updated at most every few minutes, not on every request
-  revokedAt  DateTime? // non-null = rejected; kept for the audit trail rather than deleted
+  id             String    @id @default(uuid())
+  tenant         Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantId       String
+  keyHash        String    @unique // sha256 hex of the full plaintext key
+  keyPrefix      String // first chars of the key, e.g. "tk_3f9a1c" — lets admins tell keys apart
+  label          String    @default("Default")
+  createdAt      DateTime  @default(now())
+  lastUsedAt     DateTime? // updated at most every few minutes, not on every request
+  revokedAt      DateTime? // non-null = rejected; kept for the audit trail rather than deleted
+  // Websites allowed to use this key from a browser, as origins
+  // ("https://www.acme.com"). The key ships in the public embed snippet, so
+  // without a list any site could embed it and spend this tenant's budget.
+  // Empty = any origin (keys issued before this field existed keep working).
+  allowedOrigins String[]  @default([])
 
   @@index([tenantId])
 }
@@ -227,10 +236,10 @@ model TenantConsent {
   tenant           Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   tenantId         String
   kind             ConsentKind
-  domain           String?     // the crawled host, for WEBSITE_CRAWL
+  domain           String? // the crawled host, for WEBSITE_CRAWL
   statement        String
   statementVersion String
-  email            String      // who gave it (the signup email)
+  email            String // who gave it (the signup email)
   ipAddress        String?
   userAgent        String?
   createdAt        DateTime    @default(now())
@@ -242,32 +251,32 @@ model TenantConsent {
 // constants in src/services/shared/documentCategory.js — keep in sync.
 enum DocumentCategory {
   CORE_OVERVIEW // who the company is, what it offers, positioning
-  FAQ           // question/answer content, troubleshooting
+  FAQ // question/answer content, troubleshooting
   CUSTOM_POLICY // pricing, policies, terms, manuals, spec sheets
 }
 
 // Mirrored as DOC_SCOPES in src/services/shared/botScope.js — keep in sync.
 enum BotScope {
-  AUTO    // each section classified on its own
-  BOTH    // both bots
+  AUTO // each section classified on its own
+  BOTH // both bots
   SUPPORT // Support Bot only
-  SALES   // Sales Bot only
+  SALES // Sales Bot only
 }
 
 model TenantDocument {
-  id         String           @id @default(uuid())
-  tenant     Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  tenantId   String
-  title      String
-  content    String           // plain markdown/text — parsed into chunks the same way docs/*.md files are
-  category   DocumentCategory @default(CORE_OVERVIEW) // drives per-bot retrieval weighting (domains/tenantProfile.js)
-  sourceUrl  String?          // set when this document came from the auto-scraper; null for a hand-authored one
+  id        String           @id @default(uuid())
+  tenant    Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantId  String
+  title     String
+  content   String // plain markdown/text — parsed into chunks the same way docs/*.md files are
+  category  DocumentCategory @default(CORE_OVERVIEW) // drives per-bot retrieval weighting (domains/tenantProfile.js)
+  sourceUrl String? // set when this document came from the auto-scraper; null for a hand-authored one
   // Which bot may use it (services/shared/botScope.js): AUTO classifies each
   // section separately; BOTH / SUPPORT / SALES apply to the whole document.
-  botScope   BotScope         @default(AUTO)
-  createdAt  DateTime         @default(now())
-  updatedAt  DateTime         @updatedAt
-  products   ProductCatalog[]
+  botScope  BotScope         @default(AUTO)
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+  products  ProductCatalog[]
 
   @@index([tenantId])
   @@index([tenantId, category])
@@ -279,27 +288,27 @@ model TenantDocument {
 // once it goes idle or ends; for a conversation that produced a lead, the
 // lead's summary (services/leads.js) is copied here instead of a second call.
 model ChatSession {
-  id             String    @id @default(uuid())
-  tenant         Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  tenantId       String
-  externalUserId String?   // identity from whatever host app is embedding the widget — opaque to us
-  startedAt      DateTime  @default(now())
+  id               String        @id @default(uuid())
+  tenant           Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantId         String
+  externalUserId   String? // identity from whatever host app is embedding the widget — opaque to us
+  startedAt        DateTime      @default(now())
   // support | sales — the bot of the first turn (CHECK constraint in
   // migration 20261016090000_session_summaries_team_alerts)
-  botType        String?
-  lastMessageAt  DateTime?
-  messageCount   Int       @default(0)
-  endedAt        DateTime? // the widget reported the page closed (POST /session/end)
-  summary        String?
-  summaryStatus  String    @default("none") // none | pending | ready | failed
-  summarizedAt   DateTime? // when the last attempt finished; older than lastMessageAt = stale
+  botType          String?
+  lastMessageAt    DateTime?
+  messageCount     Int           @default(0)
+  endedAt          DateTime? // the widget reported the page closed (POST /session/end)
+  summary          String?
+  summaryStatus    String        @default("none") // none | pending | ready | failed
+  summarizedAt     DateTime? // when the last attempt finished; older than lastMessageAt = stale
   // Lease taken when an API instance starts writing this conversation's
   // summary. The claim is what stops two instances paying for the same
   // summary twice (services/chatSessions.js); a claim older than
   // SESSION_SUMMARY_LEASE_MIN means the holder died mid-run, so the
   // conversation becomes claimable again instead of being stuck pending.
   summaryClaimedAt DateTime?
-  messages       ChatMessage[]
+  messages         ChatMessage[]
 
   @@index([tenantId])
   @@index([tenantId, lastMessageAt])
@@ -310,9 +319,9 @@ model ChatMessage {
   id         String      @id @default(uuid())
   session    ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   sessionId  String
-  role       String      // user | assistant
+  role       String // user | assistant
   content    String
-  confidence Float?      // the gate score behind this assistant reply, if applicable
+  confidence Float? // the gate score behind this assistant reply, if applicable
   // support | sales — which bot this turn went to; null on rows from before
   // per-bot tracking. CHECK constraint in migration 20261002090000_bot_type_check.
   botType    String?
@@ -326,18 +335,18 @@ model ChatMessage {
 }
 
 model SupportTicket {
-  id         String   @id @default(uuid())
-  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  tenantId   String
+  id           String   @id @default(uuid())
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantId     String
   query        String
-  transcript   Json     // recent turns, for whoever picks this up
-  confidence   Float?   // the score below the handoff threshold; null for requests (demo, human, contact)
+  transcript   Json // recent turns, for whoever picks this up
+  confidence   Float? // the score below the handoff threshold; null for requests (demo, human, contact)
   // unanswered | outage | human_request | demo_request | contact_request
   // (CHECK constraint in migration 20261002120000_conversational_handoffs)
   kind         String   @default("unanswered")
-  botType      String?  // support | sales
-  sessionId    String?  // the conversation, so an email left later attaches here
-  contactEmail String?  // left by the visitor in the chat
+  botType      String? // support | sales
+  sessionId    String? // the conversation, so an email left later attaches here
+  contactEmail String? // left by the visitor in the chat
   status       String   @default("open")
   createdAt    DateTime @default(now())
 
@@ -346,7 +355,7 @@ model SupportTicket {
 }
 
 enum LeadStatus {
-  NEW       // not yet followed up
+  NEW // not yet followed up
   CONTACTED // someone on the tenant's team has reached out
 }
 
@@ -356,24 +365,106 @@ enum LeadStatus {
 // rewritten in the background as the conversation goes on, so the summary
 // covers what was said after the email too.
 model Lead {
-  id                 String     @id @default(uuid())
-  tenant             Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  id                 String       @id @default(uuid())
+  tenant             Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   tenantId           String
   // support | sales (CHECK constraint in migration 20261005090000_leads)
   botType            String
-  sessionId          String?    // the ChatSession the email was left in
+  sessionId          String? // the ChatSession the email was left in
   email              String
-  chatSummary        String?    // the LLM's executive summary; null until one is written
-  summaryStatus      String     @default("pending") // pending | ready | failed
-  fullTranscript     Json       @default("[]") // [{ role, content, botType, at }], oldest first
-  status             LeadStatus @default(NEW)
-  confirmationSentAt DateTime?  // when the "we've received your request" email went out
-  createdAt          DateTime   @default(now())
-  updatedAt          DateTime   @updatedAt
+  chatSummary        String? // the LLM's executive summary; null until one is written
+  summaryStatus      String       @default("pending") // pending | ready | failed
+  fullTranscript     Json         @default("[]") // [{ role, content, botType, at }], oldest first
+  status             LeadStatus   @default(NEW)
+  confirmationSentAt DateTime? // when the "we've received your request" email went out
+  // CRM mirror (services/crm/zohoSync.js). crmRecordId is the id of this lead
+  // in the tenant's CRM, set once it's created/matched there, so an inbound
+  // status webhook (routes/crmWebhook.routes.js) can map a CRM record back to
+  // this row. Null until the lead has been synced.
+  crmProvider        CRMProvider?
+  crmRecordId        String?
+  crmSyncedAt        DateTime?
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
 
+  // One lead per visitor email per conversation and bot: the database, not a
+  // find-then-create, decides — two simultaneous captures otherwise both
+  // inserted (and both alerted the team and synced to the CRM). A null
+  // sessionId never collides (Postgres treats NULLs as distinct).
+  @@unique([tenantId, botType, sessionId, email])
   @@index([tenantId, createdAt])
   @@index([tenantId, sessionId])
   @@index([tenantId, email])
+  @@index([tenantId, crmRecordId])
+  // The inbound Zoho webhook (zohoSync.applyInboundStatus) finds a lead by its
+  // CRM record id, usually with no tenant hint — the index above leads with
+  // tenantId, so without this one that lookup scans the whole table.
+  @@index([crmProvider, crmRecordId])
+}
+
+// ── CRM integration (services/crm/*). A tenant can connect one external CRM
+// (Zoho today, HubSpot modelled for later) so captured leads mirror into it
+// and sales-rep status changes mirror back. OAuth tokens are stored ONLY as
+// AES-256-GCM ciphertext (utils/encryption.js), exactly like SMTP passwords,
+// and are never returned to the client or logged.
+
+enum CRMProvider {
+  ZOHO
+  HUBSPOT
+}
+
+enum CRMSyncStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  RETRYING
+}
+
+model TenantCRMIntegration {
+  id           String      @id @default(uuid())
+  tenant       Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantId     String      @unique // one CRM connection per tenant
+  provider     CRMProvider @default(ZOHO)
+  // The CRM data centre / regional domain: 'in' (zohoapis.in), 'com', 'eu',
+  // 'au', 'jp', ... — resolved to a base URL in services/crm/zohoAuth.js.
+  region       String      @default("com")
+  accessToken  String? // AES-256-GCM ciphertext; short-lived, refreshed on expiry
+  refreshToken String? // AES-256-GCM ciphertext; long-lived, mints access tokens
+  tokenExpiry  DateTime? // when accessToken stops being valid
+  // Editable KGT→CRM field map, e.g. { "email": "Email", "phone": "Phone",
+  // "name": "Last_Name" }. Defaults are applied in code when a key is absent.
+  fieldMapping Json        @default("{}")
+  isEnabled    Boolean     @default(true)
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  syncLogs CRMSyncLog[]
+
+  @@index([tenantId])
+}
+
+// Audit trail of every sync attempt, in either direction, so a failed or
+// retrying sync can always be traced. error holds a safe summary only
+// ({ message, statusCode }) — never the raw provider body, tokens or secrets.
+model CRMSyncLog {
+  id            String                @id @default(uuid())
+  tenant        Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantId      String
+  integration   TenantCRMIntegration? @relation(fields: [integrationId], references: [id], onDelete: SetNull)
+  integrationId String?
+  leadId        String? // the KGT Lead this sync was for, when applicable
+  provider      CRMProvider           @default(ZOHO)
+  direction     String                @default("outbound") // outbound (KGT→CRM) | inbound (CRM→KGT)
+  operation     String // lead.upsert | note.attach | webhook.status
+  status        CRMSyncStatus         @default(PENDING)
+  crmRecordId   String? // the CRM record id, once known
+  attempts      Int                   @default(0)
+  error         Json? // { message, statusCode? } — never raw bodies or secrets
+  createdAt     DateTime              @default(now())
+  updatedAt     DateTime              @updatedAt
+
+  @@index([tenantId, createdAt])
+  @@index([leadId])
 }
 
 // One row per answer that would have cost an LLM call: a real call, or a
@@ -388,7 +479,7 @@ model UsageLog {
   // tenant (starter-FAQ generation) and for rows from before per-bot tracking.
   // CHECK constraint in migration 20261002090000_bot_type_check.
   botType          String?
-  provider         String   // groq | openai | anthropic | cache
+  provider         String // groq | openai | anthropic | cache
   model            String
   promptTokens     Int
   completionTokens Int
@@ -400,4 +491,68 @@ model UsageLog {
 
   @@index([tenantId, createdAt])
   @@index([tenantId, botType, createdAt])
+}
+
+// ── Bot Branding & Theme Studio (services/branding.js). The company's brand
+// kit — scraped from its homepage at signup (services/shared/brandExtractor.js)
+// or edited in the dashboard — and the three widget designs generated from it
+// (services/shared/themeGenerator.js). selectedThemeId is the design the
+// embeddable widget renders; null keeps the classic widget look.
+// A hosted logo: the image as the server re-encoded it (PNG, at most 512px,
+// metadata stripped — never the uploaded bytes), served publicly at
+// /api/v1/public/brand-assets/logo/:tenantId/:key.png. Its own table so the
+// bytes are never read along with every TenantBranding row.
+//
+// Content-keyed: one row per (tenant, image). A new logo is INSERTED beside
+// the old one and TenantBranding.customLogoKey switched to it in the same
+// transaction, which then deletes every other row of the tenant — so the live
+// key always has its row, and a failed or concurrent change can never leave
+// the widget pointing at a deleted image (services/branding.js commitBranding).
+model TenantLogoAsset {
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  key       String // sha256 prefix of data; TenantBranding.customLogoKey when live
+  data      Bytes
+  mimeType  String   @default("image/png")
+  width     Int
+  height    Int
+  // The "reversed" logo for headers the original doesn't contrast with: its
+  // neutral parts (dark lettering, grey taglines) flipped light — or dark, for
+  // a light logo — and its brand colours kept (logoUpload.js reverseNeutrals).
+  // Null when a reversal wouldn't help (a single-colour mark is tinted by CSS
+  // instead; an all-colour mark has no neutrals to flip).
+  reversedKey  String?
+  reversedData Bytes?
+  createdAt DateTime @default(now())
+
+  @@id([tenantId, key])
+  // The public route resolves a reversed key too (branding.js getLogoAsset).
+  @@index([tenantId, reversedKey])
+}
+
+model TenantBranding {
+  id              String    @id @default(uuid())
+  tenant          Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantId        String    @unique
+  logoUrl         String?
+  faviconUrl      String?
+  // Distinct brand colours found on the site, strongest first: ["#1a73e8", ...]
+  scrapedColors   Json      @default("[]")
+  // { primaryColor, secondaryColor, accentColor, fontHints, siteName }
+  brandTokens     Json      @default("{}")
+  // The three generated widget designs (themeGenerator.js shape).
+  generatedThemes Json      @default("[]")
+  selectedThemeId String?
+  // The bot's display name in the widget header ("Support Assistant", "Aria").
+  // Null = the widget's default title. Independent of the applied design.
+  botName         String?
+  // The logo the client uploaded themselves (TenantLogoAsset), by content
+  // hash — part of its public URL, so a new upload is a new URL and browsers
+  // never show a stale cached one. Non-null = it is THE logo, ahead of logoUrl.
+  customLogoKey   String?
+  source          String    @default("fallback") // website | manual | fallback
+  sourceUrl       String?
+  scannedAt       DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 }

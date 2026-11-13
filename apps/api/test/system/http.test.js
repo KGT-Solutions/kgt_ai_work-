@@ -46,8 +46,9 @@ describe('system: HTTP contract', { skip: skipReason }, () => {
       assert.equal(r.status, 401, path);
       assert.equal(typeof r.body.error, 'string', path);
     }
+    // 401, not 404: an unknown slug answers exactly like a bad key (no slug enumeration).
     const chat = await http(server.base, 'POST', '/api/v1/tenant-chat/no-such-company/chat', { body: { query: 'hi' } });
-    assert.equal(chat.status, 404);
+    assert.equal(chat.status, 401);
   });
 
   test('a forged or expired token is refused', async () => {

@@ -243,6 +243,44 @@ describe('captureLead', () => {
     assert.equal(leads.length, 2, 'still recorded as its own lead');
     assert.equal(sendMailMock.mock.callCount(), 1);
   });
+
+  // Review #2: two simultaneous captures both passed the find and both
+  // inserted — two leads, two confirmations, two team alerts, two CRM syncs.
+  // The fake below enforces the @@unique([tenantId, botType, sessionId, email])
+  // index the way Postgres does, and both finds run before either create.
+  test('two simultaneous captures of the same visitor make ONE lead and one confirmation (unique index + P2002)', async () => {
+    const uniqueKey = (d) => [d.tenantId, d.botType, d.sessionId, d.email].join('|');
+    const realCreate = prisma.lead.create;
+    prisma.lead.create = async (args) => {
+      if (args.data.sessionId != null && leads.some((l) => uniqueKey(l) === uniqueKey(args.data))) {
+        throw Object.assign(new Error('Unique constraint failed on the fields: (`tenantId`,`botType`,`sessionId`,`email`)'), { code: 'P2002' });
+      }
+      return realCreate(args);
+    };
+    const realFind = prisma.lead.findFirst;
+    let pending = 2;
+    let release;
+    const bothFound = new Promise((r) => { release = r; });
+    prisma.lead.findFirst = async (args) => {
+      const hit = await realFind(args);
+      if (pending > 0) { pending -= 1; if (pending === 0) release(); await bothFound; } // the race window
+      return hit;
+    };
+
+    const results = await Promise.all([
+      captureLead({ tenant: TENANT, botType: 'sales', sessionId: 's9', email: 'race@x.com' }),
+      captureLead({ tenant: TENANT, botType: 'sales', sessionId: 's9', email: 'race@x.com' })
+    ]);
+    await waitForBackground();
+    assert.equal(leads.length, 1, 'one row');
+    assert.equal(sendMailMock.mock.callCount(), 1, 'one confirmation');
+    assert.ok(results.every(Boolean), 'both callers got the lead back, neither threw');
+  });
+
+  test('any other create error still surfaces', async () => {
+    prisma.lead.create = async () => { throw Object.assign(new Error('connection lost'), { code: 'P1001' }); };
+    await assert.rejects(captureLead({ tenant: TENANT, botType: 'sales', sessionId: 's1', email: 'x@x.com' }), /connection lost/);
+  });
 });
 
 describe('email delivery failures', () => {

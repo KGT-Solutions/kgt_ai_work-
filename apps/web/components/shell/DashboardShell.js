@@ -6,7 +6,7 @@ import { api, clientWorkspace, setToken } from '../../lib/api';
 import { Logo, Skeleton, cx } from '../ui';
 import { useToast } from '../ui/toast';
 import {
-  IconBuilding, IconBot, IconChart, IconDocs, IconGlobe, IconInbox, IconKey, IconLogout, IconMail, IconOverview, IconPlus, IconSidebar, IconTicket, IconX
+  IconBuilding, IconBot, IconChart, IconDocs, IconGlobe, IconInbox, IconKey, IconLayers, IconLogout, IconMail, IconOverview, IconPlus, IconSidebar, IconSpark, IconTicket, IconX
 } from '../ui/icons';
 
 // Signed-in shell for both audiences. It confirms the session before
@@ -25,11 +25,13 @@ const AUDIENCES = {
       { href: '/dashboard', label: 'Overview', icon: IconOverview },
       { href: '/dashboard/documents', label: 'Documents', icon: IconDocs },
       { href: '/dashboard/bots', label: 'Test bots', icon: IconBot },
+      { href: '/dashboard/branding', label: 'Bot branding & theme', icon: IconSpark },
       { href: '/dashboard/keys', label: 'API keys', icon: IconKey },
       { href: '/dashboard/tickets', label: 'Tickets', icon: IconTicket },
       { href: '/dashboard/leads', label: 'Leads & Summaries', icon: IconInbox },
       { href: '/dashboard/usage', label: 'Usage', icon: IconChart },
-      { href: '/dashboard/smtp', label: 'Email settings', icon: IconMail }
+      { href: '/dashboard/smtp', label: 'Email settings', icon: IconMail },
+      { href: '/dashboard/integrations', label: 'Integrations', icon: IconLayers }
     ]
   },
   staff: {

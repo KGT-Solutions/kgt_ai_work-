@@ -16,6 +16,8 @@ const { parseBusinessCategory } = require('../services/shared/businessCategory')
 const { claimVerification, ACCOUNT_EXISTS } = require('../services/verificationService');
 const { maskAddress } = require('../services/mailer');
 const { ingestUpload, FileIngestError, MAX_UPLOAD_BYTES } = require('../services/shared/fileIngest');
+const { sanitizeBrand } = require('../services/shared/themeGenerator');
+const { saveBrandKit } = require('../services/branding');
 
 class UnverifiedEmail extends Error {}
 const {
@@ -223,6 +225,9 @@ router.post('/analyze', async (req, res) => {
       baseHost: result.baseHost,
       crawled: result.crawled,
       skipped: result.skipped,
+      // Logo + colours from the homepage (Theme Studio). The wizard sends it
+      // back to /complete, which re-validates it; null when nothing was readable.
+      branding: result.brand ? sanitizeBrand(result.brand) : null,
       // category is a suggestion for which wizard tab the page starts in;
       // the visitor can move it, and /complete saves whatever they chose.
       pages: result.pages.map((p) => ({
@@ -383,6 +388,18 @@ router.post('/complete', async (req, res) => {
     throw e;
   }
   console.log(`[register] account created for ${maskAddress(email)} (tenant ${created.tenant.slug})`);
+  // Brand kit + the three widget designs (Theme Studio). `branding` is what
+  // /analyze returned, sent back by the wizard — untrusted like everything in
+  // this body, so saveBrandKit re-validates every field. With real brand
+  // colours the first design goes live at once; without, the widget keeps its
+  // classic look until one is applied. Best-effort: never blocks a signup.
+  const brand = req.body?.branding && typeof req.body.branding === 'object' ? req.body.branding : null;
+  await saveBrandKit(created.tenant, {
+    brand,
+    source: brand ? 'website' : 'fallback',
+    sourceUrl: consentHost ? `https://${consentHost}` : null,
+    autoSelect: true
+  }).catch((err) => console.warn(`[register] tenant ${created.tenant.id}: could not save the brand kit: ${err.message}`));
   // No invalidateTenantKnowledge call needed — this tenant's knowledge
   // cache has never been populated, so there's nothing stale to clear.
   // Starter questions are written in the background, usually before the

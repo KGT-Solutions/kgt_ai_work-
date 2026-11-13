@@ -1,6 +1,8 @@
+const net = require('net');
 const nodemailer = require('nodemailer');
 const prisma = require('../lib/prisma');
 const { encrypt, decrypt, encryptionConfigured } = require('../utils/encryption');
+const { isPrivateAddress, resolvePublicHost } = require('./shared/netGuard');
 
 // A tenant's own outbound SMTP. The password is encrypted at rest
 // (utils/encryption.js) and is NEVER returned to the client — reads mask it.
@@ -27,11 +29,64 @@ function requiredString(value, field, max = 255) {
   return s;
 }
 
+// The host and port are tenant-supplied and the server connects to them, so
+// left open this was an internal port scanner: the "test" told an open service
+// (its banner echoed back), a silent port and a closed one apart, for any host
+// and any of 65535 ports. Now: mail ports only, public hosts only (checked at
+// connect time against the address actually dialled), fixed error wording.
+const SMTP_PORTS = [25, 465, 587, 2525];
+const PRIVATE_NAME_RE = /^(localhost|.*\.localhost|.*\.local|.*\.internal|.*\.localdomain)$/i;
+
 function validatePort(value) {
   const n = Number(value);
-  if (!Number.isInteger(n) || n < 1 || n > 65535) throw new SmtpConfigError('smtpPort must be a whole number between 1 and 65535');
+  if (!Number.isInteger(n) || !SMTP_PORTS.includes(n)) {
+    throw new SmtpConfigError('smtpPort must be an SMTP port: 587 (STARTTLS), 465 (SSL), 25 or 2525');
+  }
   return n;
 }
+
+// The cheap, no-DNS part of the host check, so an obviously internal host is
+// refused when it's typed rather than when the first email fails. The real
+// check happens at connect time (smtpTarget).
+function validateHost(value) {
+  const host = requiredString(value, 'smtpHost').toLowerCase().replace(/^\[|\]$/g, '');
+  if ((net.isIP(host) && isPrivateAddress(host)) || PRIVATE_NAME_RE.test(host)) {
+    throw new SmtpConfigError('smtpHost must be your email provider\'s public SMTP server, not a private network address');
+  }
+  return host;
+}
+
+/**
+ * Resolve the SMTP host and insist it is public; the IP to connect to. Dialling
+ * that IP (with TLS still verified against the hostname) means nothing can
+ * re-resolve the name to an internal address between this check and the
+ * connection — the same DNS-rebinding defence as the crawler's.
+ * @throws {SmtpConfigError}
+ */
+async function smtpTarget(host) {
+  try {
+    return await resolvePublicHost(host);
+  } catch (err) {
+    if (err.code === 'EPRIVATE') {
+      throw new SmtpConfigError('smtpHost resolves to a private network address — use your email provider\'s public SMTP server');
+    }
+    throw new SmtpConfigError(`Could not find the SMTP server "${host}"`);
+  }
+}
+
+// What a tenant sees when a test fails: fixed wording per category. Never the
+// server's own reply (a non-mail service answers with its banner), and never
+// mailer.js's hints, which describe the PLATFORM's SMTP — its host and env
+// var names — not the tenant's.
+const TEST_FAILURES = {
+  auth: { error: 'The server rejected the username or password.', hint: 'Check the SMTP username and password. Accounts with 2-step verification (Gmail, Microsoft 365) need an app password.' },
+  timeout: { error: 'The server did not answer in time.', hint: 'Check the host and port, and that the server accepts connections from the internet.' },
+  tls: { error: 'A secure (TLS) connection could not be set up.', hint: 'Use port 587 for STARTTLS, or port 465 for SSL.' },
+  connection: { error: 'Could not connect to that server and port.', hint: 'Check the SMTP host and port with your email provider.' },
+  temporary: { error: 'The server is temporarily refusing connections.', hint: 'Try again in a few minutes.' },
+  rejected: { error: 'The server refused the connection.', hint: 'Check the account\'s SMTP settings with your email provider.' }
+};
+const UNKNOWN_FAILURE = { error: 'That server did not respond like an SMTP mail server.', hint: 'Check the host and port with your email provider.' };
 
 // A known provider key, or null for a custom server. Invalid strings are not
 // an error — they just mean "custom" — so the UI is free to send anything.
@@ -51,14 +106,16 @@ function validateFrom(value) {
 }
 
 // nodemailer options from plain credentials. STARTTLS is required on non-465
-// ports so the password never crosses the wire in plaintext.
-function buildTransportConfig({ host, port, user, pass, secure }) {
+// ports so the password never crosses the wire in plaintext. `ip` is the
+// resolved, checked address to dial; TLS is still verified against `host`.
+function buildTransportConfig({ host, ip, port, user, pass, secure }) {
   const sec = typeof secure === 'boolean' ? secure : port === 465;
   return {
-    host,
+    host: ip || host,
     port,
     secure: sec,
     requireTLS: !sec,
+    ...(ip && ip !== host ? { tls: { servername: host } } : {}),
     auth: user ? { user, pass } : undefined,
     connectionTimeout: CONNECT_TIMEOUT_MS,
     greetingTimeout: CONNECT_TIMEOUT_MS,
@@ -102,7 +159,7 @@ async function upsertConfig(tenantId, body) {
   if (!encryptionConfigured()) {
     throw new SmtpConfigError('Secure storage is not configured on the server (ENCRYPTION_KEY is unset). Contact your administrator.', 503);
   }
-  const smtpHost = requiredString(body?.smtpHost, 'smtpHost');
+  const smtpHost = validateHost(body?.smtpHost);
   const smtpPort = validatePort(body?.smtpPort);
   const smtpUser = requiredString(body?.smtpUser, 'smtpUser');
   const smtpFrom = validateFrom(body?.smtpFrom);
@@ -134,6 +191,9 @@ async function testConfig(tenantId, body) {
   const { classifyMailError } = require('./mailer'); // lazy: avoids any load-order cycle
   let cfg;
   try {
+    const host = validateHost(body?.smtpHost);
+    const port = validatePort(body?.smtpPort);
+    const user = requiredString(body?.smtpUser, 'smtpUser');
     const rawPass = typeof body?.smtpPass === 'string' ? body.smtpPass : '';
     let pass = rawPass;
     if (!pass || pass === MASK) {
@@ -141,11 +201,9 @@ async function testConfig(tenantId, body) {
       pass = r?.smtpPass ? decrypt(r.smtpPass) : '';
     }
     if (!pass) throw new SmtpConfigError('Enter a password to test with');
+    const ip = await smtpTarget(host); // refuses a private answer BEFORE anything connects
     cfg = buildTransportConfig({
-      host: requiredString(body?.smtpHost, 'smtpHost'),
-      port: validatePort(body?.smtpPort),
-      user: requiredString(body?.smtpUser, 'smtpUser'),
-      pass,
+      host, ip, port, user, pass,
       secure: typeof body?.smtpSecure === 'boolean' ? body.smtpSecure : undefined
     });
   } catch (err) {
@@ -158,8 +216,8 @@ async function testConfig(tenantId, body) {
     await transport.verify();
     return { ok: true };
   } catch (err) {
-    const f = classifyMailError(err);
-    return { ok: false, reason: f.reason, error: f.detail, hint: f.hint };
+    const { reason } = classifyMailError(err);
+    return { ok: false, reason, ...(TEST_FAILURES[reason] || UNKNOWN_FAILURE) };
   } finally {
     transport.close();
   }
@@ -183,10 +241,22 @@ async function resolveTenantTransport(tenantId) {
     console.error(`[tenantSmtp] tenant ${tenantId}: could not decrypt SMTP password (has ENCRYPTION_KEY changed?) — using platform SMTP. ${err.message}`);
     return null;
   }
+  // The same rules as a test, at every send: a config saved before the rules
+  // existed, or a host that now resolves privately, is never dialled.
+  let host;
+  let ip;
+  try {
+    host = validateHost(r.smtpHost);
+    validatePort(r.smtpPort);
+    ip = await smtpTarget(host);
+  } catch (err) {
+    console.warn(`[tenantSmtp] tenant ${tenantId}: SMTP config refused (${err.message}) — using platform SMTP.`);
+    return null;
+  }
   return {
-    config: buildTransportConfig({ host: r.smtpHost, port: r.smtpPort, user: r.smtpUser, pass, secure: r.smtpPort === 465 }),
+    config: buildTransportConfig({ host, ip, port: r.smtpPort, user: r.smtpUser, pass, secure: r.smtpPort === 465 }),
     from: r.smtpFrom
   };
 }
 
-module.exports = { getMaskedConfig, upsertConfig, testConfig, resolveTenantTransport, SmtpConfigError, MASK };
+module.exports = { getMaskedConfig, upsertConfig, testConfig, resolveTenantTransport, SmtpConfigError, MASK, SMTP_PORTS };

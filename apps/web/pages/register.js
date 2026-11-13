@@ -79,7 +79,7 @@ export default function Register() {
   const [consent, setConsent] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [scanError, setScanError] = useState('');
-  const [crawl, setCrawl] = useState(null); // { crawled, skipped, baseHost, url }
+  const [crawl, setCrawl] = useState(null); // { crawled, skipped, baseHost, url, branding }
 
   const [launching, setLaunching] = useState(false);
   const [launchError, setLaunchError] = useState('');
@@ -127,7 +127,8 @@ export default function Register() {
       const data = await api.analyzeCompanyUrl(url, { authorized: consent });
       // A re-scan replaces the previous scan's pages but keeps uploads and written entries.
       setPages((prev) => [...prev.filter((p) => !p.url), ...withIds(data.pages)]);
-      setCrawl({ crawled: data.crawled, skipped: data.skipped, baseHost: data.baseHost, url });
+      // branding: the logo + colours read from the homepage, kept for /complete (Theme Studio).
+      setCrawl({ crawled: data.crawled, skipped: data.skipped, baseHost: data.baseHost, url, branding: data.branding || null });
     } catch (err) {
       setScanError(err.message);
     } finally {
@@ -161,6 +162,8 @@ export default function Register() {
         pages: trainable.map(toApiPage),
         // Required by the API whenever crawled pages are included; stored as the consent record.
         websiteConsent: hasCrawled ? { authorized: true, url: crawl?.url } : undefined,
+        // Seeds the Theme Studio's three widget designs; the API re-validates it.
+        branding: crawl?.branding || undefined,
         // Proof of the email OTP; the API answers 403 without it.
         emailVerificationToken: verification?.token
       });
