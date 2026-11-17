@@ -9,12 +9,19 @@ const crmSettings = require('../../src/services/crm/crmSettings');
 
 let prev;
 beforeEach(() => {
-  prev = { id: process.env.ZOHO_CLIENT_ID, secret: process.env.ZOHO_CLIENT_SECRET };
+  prev = { id: process.env.ZOHO_CLIENT_ID, secret: process.env.ZOHO_CLIENT_SECRET, rt: process.env.ZOHO_REFRESH_TOKEN };
   process.env.ZOHO_CLIENT_ID = 'zoho-client';
   process.env.ZOHO_CLIENT_SECRET = 'zoho-secret';
+  // The redirect flow and the Self Client flow are chosen by this variable, so
+  // every test must state which one it is exercising rather than inherit it.
+  // Prisma's client loads apps/api/.env (the path is baked into the generated
+  // client), so on any machine or server that has a real ZOHO_REFRESH_TOKEN
+  // there it would otherwise be set here and beginConnect would take the
+  // Self Client branch. The server-managed suite below sets it back on.
+  delete process.env.ZOHO_REFRESH_TOKEN;
 });
 afterEach(() => {
-  for (const [k, v] of [['ZOHO_CLIENT_ID', prev.id], ['ZOHO_CLIENT_SECRET', prev.secret]]) {
+  for (const [k, v] of [['ZOHO_CLIENT_ID', prev.id], ['ZOHO_CLIENT_SECRET', prev.secret], ['ZOHO_REFRESH_TOKEN', prev.rt]]) {
     if (v === undefined) delete process.env[k]; else process.env[k] = v;
   }
 });

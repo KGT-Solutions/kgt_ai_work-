@@ -16,9 +16,14 @@ let integration, logs, deleted;
 let server, base, envPrev;
 
 before(async () => {
-  envPrev = { id: process.env.ZOHO_CLIENT_ID, secret: process.env.ZOHO_CLIENT_SECRET };
+  envPrev = { id: process.env.ZOHO_CLIENT_ID, secret: process.env.ZOHO_CLIENT_SECRET, rt: process.env.ZOHO_REFRESH_TOKEN };
   process.env.ZOHO_CLIENT_ID = 'zoho-client';
   process.env.ZOHO_CLIENT_SECRET = 'zoho-secret';
+  // These cases are the browser OAuth flow. A server-wide refresh token makes
+  // beginConnect adopt it instead (the Self Client flow), which would reach
+  // the real Zoho to validate it — Prisma's client loads apps/api/.env, so on
+  // a machine or server that has one configured this must be cleared.
+  delete process.env.ZOHO_REFRESH_TOKEN;
 
   prisma.tenantCRMIntegration = {
     findUnique: async ({ where }) => (where.tenantId === TENANT_ID ? integration : null),
@@ -36,8 +41,9 @@ before(async () => {
 });
 after(() => {
   server.close();
-  if (envPrev.id === undefined) delete process.env.ZOHO_CLIENT_ID; else process.env.ZOHO_CLIENT_ID = envPrev.id;
-  if (envPrev.secret === undefined) delete process.env.ZOHO_CLIENT_SECRET; else process.env.ZOHO_CLIENT_SECRET = envPrev.secret;
+  for (const [k, v] of [['ZOHO_CLIENT_ID', envPrev.id], ['ZOHO_CLIENT_SECRET', envPrev.secret], ['ZOHO_REFRESH_TOKEN', envPrev.rt]]) {
+    if (v === undefined) delete process.env[k]; else process.env[k] = v;
+  }
 });
 
 beforeEach(() => { integration = null; logs = []; deleted = false; });
