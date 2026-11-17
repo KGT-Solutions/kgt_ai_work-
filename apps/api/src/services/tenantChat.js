@@ -11,6 +11,10 @@ const { trackLeadActivity } = require('./leads');
 const { recordTurn } = require('./chatSessions');
 const { notifyIfNeedsAttention } = require('./teamAlerts');
 const { extractStatedEmail } = require('../domains/handoffActions');
+const {
+  runImageGuardrailPipeline, isImagePipelineEnabled, parseImageDataUrl,
+  guardrailFallbackMessage, securityRefusalMessage
+} = require('./shared/imageGuardrailPipeline');
 
 // One chat turn for one tenant. Shared by every way a tenant's bots are
 // reached — the embed widget (API key), the client dashboard (client JWT)
@@ -69,16 +73,32 @@ class ChatRequestError extends Error {
 }
 
 /**
- * @param {{ tenant: object, body: object, sandbox?: boolean }} args  body: { query, botType? (or bot), sessionId?, externalUserId? }
+ * @param {{ tenant: object, body: object, sandbox?: boolean, imageDeps?: object }} args
+ *   body: { query, image?, botType? (or bot), sessionId?, externalUserId?, language? }
+ *   query and image are each optional on their own but one is required: the
+ *   widget allows sending a photo with no text. image is a base64 data URL
+ *   (png/jpeg/webp/gif) and is screened by the guardrail pipeline before any
+ *   retrieval or generation.
  *   sandbox: the dashboard's test chat (client or staff), not a website visitor
+ *   imageDeps: test-only injection for the guardrail's vision call; production never passes it
  * @returns {Promise<object>} the bot's result (without its confidence score) plus followUps
  *   (0-3 suggested next questions), sessionId and the botType that answered
  * @throws {ChatRequestError} for invalid input (400) or rate limiting (429)
  */
-async function runTenantChat({ tenant, body, sandbox = false }) {
+async function runTenantChat({ tenant, body, sandbox = false, imageDeps = undefined }) {
   const query = String(body?.query || '').trim();
-  if (!query) throw new ChatRequestError('query is required', 400);
+  // A photo on its own is a valid message — the widget says so ("either text
+  // or an image is required") and sends one with no query — so a turn is
+  // valid when it carries either. The image is a base64 data URL; its shape
+  // and size are checked here so a malformed one is a 400 rather than a
+  // polite "I can't read that" the caller can't act on.
+  const image = typeof body?.image === 'string' && body.image.trim() ? body.image.trim() : null;
+  if (!query && !image) throw new ChatRequestError('query or image is required', 400);
   if (query.length > MAX_QUERY_LEN) throw new ChatRequestError(`query must be ${MAX_QUERY_LEN} characters or fewer`, 400);
+  if (image) {
+    const shape = parseImageDataUrl(image);
+    if (!shape.ok) throw new ChatRequestError(shape.error, 400);
+  }
 
   // Same tenant, same knowledge base, different persona/gating per bot —
   // see domains/tenantProfile.js. Defaults to support.
@@ -107,6 +127,50 @@ async function runTenantChat({ tenant, body, sandbox = false }) {
     session = await prisma.chatSession.create({ data: { tenantId: tenant.id, externalUserId } });
   }
 
+  // What the transcript records for this turn: the visitor's own words, or a
+  // marker when they sent only a photo. Never the text a model read out of the
+  // image — the transcript is what the visitor said.
+  const userContent = query || '(image attached)';
+
+  // ── Image guardrail (services/shared/imageGuardrailPipeline.js) ──
+  // An attached photo goes through the 3-tier pipeline BEFORE any retrieval or
+  // generation. That ordering is the point: an unusable or irrelevant image is
+  // answered from here and never reaches the chat LLM, which is the token
+  // saving the pipeline exists for, and an injection signature in the image's
+  // metadata or in the text rendered inside it is a hard refusal. It runs after
+  // the session exists so a refusal still returns a sessionId and is recorded,
+  // and it never throws — a vision outage degrades to "treat as relevant".
+  let imageText = '';
+  let imageProductText = '';
+  if (image && isImagePipelineEnabled()) {
+    // imageDeps is a test seam, like fetchImpl elsewhere: it lets a unit test
+    // supply the vision classifier so nothing reaches a provider. Production
+    // callers (handleChat) never pass it.
+    const verdict = await runImageGuardrailPipeline({ dataUrl: image, userText: query, tenant, deps: imageDeps || {} });
+    if (verdict.outcome === 'rejected') {
+      // A security hit gets a deliberately generic refusal that never says what
+      // was detected; everything else gets the polite "send a relevant photo".
+      const answer = verdict.security ? securityRefusalMessage(language) : guardrailFallbackMessage(language);
+      return refuseImageTurn({ session, botType, language, userContent, answer });
+    }
+    imageText = String(verdict.text || '').trim();
+    imageProductText = String(verdict.productText || '').trim();
+  }
+
+  // A photo-only turn still needs a question to retrieve and answer against.
+  // The label/issue text the vision tier read IS that question here, so the bot
+  // answers about what it was actually sent. With no query and nothing read
+  // from the image (vision off or unavailable), there is nothing to answer, so
+  // ask for a description rather than guess.
+  const visionQuery = [imageProductText, imageText].filter(Boolean).join(' — ').slice(0, MAX_QUERY_LEN);
+  if (!query && !visionQuery) {
+    return refuseImageTurn({ session, botType, language, userContent, answer: guardrailFallbackMessage(language) });
+  }
+  const effectiveQuery = query || visionQuery;
+  // The engine and retrieval see what the photo showed, clearly labelled, so an
+  // answer can speak to it. The visitor's own text stays first and unmodified.
+  const engineQuery = query && visionQuery ? `${query}\n\n[Attached photo shows: ${visionQuery}]` : effectiveQuery;
+
   const recentTurns = await prisma.chatMessage.findMany({
     where: { sessionId: session.id },
     orderBy: { createdAt: 'desc' },
@@ -115,7 +179,7 @@ async function runTenantChat({ tenant, body, sandbox = false }) {
 
   const result = await getEngineAnswer({
     profile: BOT_PROFILE_FACTORIES[botType](tenant),
-    query,
+    query: engineQuery,
     ctx: {
       tenantId: tenant.id,
       sessionId: session.id, // tickets and an email left later are tied to this conversation
@@ -151,12 +215,13 @@ async function runTenantChat({ tenant, body, sandbox = false }) {
   // handoff), replace that rejection with a short catalog lead-in; the cards
   // carry the detail. Done before the message is stored so the transcript
   // matches what the visitor saw.
-  const wantsCatalog = isProductListingIntent(query);
+  const wantsCatalog = isProductListingIntent(effectiveQuery);
   const productKey = keys.productContext(tenant.id, session.id);
   let products = [];
   if (!reply.handoff && !reply.awaitingContact) {
     try {
-      products = await matchCatalogProducts(tenant.id, `${query}\n${reply.answer}`, { listIntent: wantsCatalog });
+      const matchText = [effectiveQuery, reply.answer, imageProductText].filter(Boolean).join('\n');
+      products = await matchCatalogProducts(tenant.id, matchText, { listIntent: wantsCatalog });
     } catch (err) {
       console.warn(`[tenantChat] product match failed for tenant ${tenant.id}: ${err.message}`);
     }
@@ -164,7 +229,7 @@ async function runTenantChat({ tenant, body, sandbox = false }) {
     // message refers back to ones we just showed ("link as well", "show
     // images of those"). Reattach the previous turn's cards so the follow-up
     // renders links/images instead of being rejected as off-topic.
-    if (!products.length && isProductFollowUp(query)) {
+    if (!products.length && isProductFollowUp(effectiveQuery)) {
       try {
         const prev = await store().get(productKey);
         if (Array.isArray(prev) && prev.length) products = prev;
@@ -179,7 +244,7 @@ async function runTenantChat({ tenant, body, sandbox = false }) {
 
   await prisma.chatMessage.createMany({
     data: [
-      { sessionId: session.id, role: 'user', content: query, botType },
+      { sessionId: session.id, role: 'user', content: userContent, botType },
       { sessionId: session.id, role: 'assistant', content: reply.answer, confidence: confidence ?? null, botType, answered: finalAnswered }
     ]
   });
@@ -190,11 +255,11 @@ async function runTenantChat({ tenant, body, sandbox = false }) {
   // The email the handoff action took, or one stated in a message that went
   // to the knowledge base ("my email is ana@x.com — what's the price for 40
   // seats?"): the question is answered and the lead saved either way.
-  const leadEmail = reply.contactCaptured ? contactEmail : extractStatedEmail(query);
+  const leadEmail = reply.contactCaptured ? contactEmail : extractStatedEmail(query);  // typed text only — never an address read off an image
   await trackLeadActivity({ tenant, botType, sessionId: session.id, contactEmail: leadEmail, alertTeam });
   // A handoff or an answer below 25% confidence: tell the team now (throttled; not awaited).
   // A query we answered from the catalog instead is not a miss, so don't alert on it.
-  if (alertTeam && !correctedScope) notifyIfNeedsAttention({ tenant, botType, sessionId: session.id, query, result });
+  if (alertTeam && !correctedScope) notifyIfNeedsAttention({ tenant, botType, sessionId: session.id, query: effectiveQuery, result });
 
   // No suggested questions while the bot is waiting for an email: the reply
   // just asked for one, and chips would pull the visitor away from answering.
@@ -206,7 +271,7 @@ async function runTenantChat({ tenant, body, sandbox = false }) {
     botType,
     faqs: faqRow?.[faqKey] || [],
     asked: askedRows.map((m) => m.content),
-    query,
+    query: effectiveQuery,
     answer: reply.answer,
     language
   });
@@ -223,6 +288,28 @@ async function runTenantChat({ tenant, body, sandbox = false }) {
   }
 
   return { ...reply, followUps, sessionId: session.id, botType, language, products };
+}
+
+/**
+ * Answer a turn from the image guardrail alone: the photo was unusable,
+ * irrelevant or hostile, so no retrieval, generation, catalog match, lead
+ * capture or team alert runs — that short-circuit is the whole point of a
+ * guardrail. The turn is still written to the transcript, so a conversation
+ * read later shows what the visitor sent and what they were told, and the
+ * sessionId still comes back so the widget keeps the same conversation.
+ * @returns {Promise<object>} the same response shape as a normal turn
+ */
+async function refuseImageTurn({ session, botType, language, userContent, answer }) {
+  await prisma.chatMessage.createMany({
+    data: [
+      { sessionId: session.id, role: 'user', content: userContent, botType },
+      // answered: false — the visitor's question was not answered, so this
+      // turn counts as a miss in the dashboard rather than a success.
+      { sessionId: session.id, role: 'assistant', content: answer, confidence: null, botType, answered: false }
+    ]
+  });
+  await recordTurn({ session, botType });
+  return { answer, followUps: [], sessionId: session.id, botType, language, products: [] };
 }
 
 // A short, persona-appropriate lead-in used when we answer a product/listing
