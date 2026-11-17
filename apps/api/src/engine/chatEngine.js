@@ -11,12 +11,13 @@
 
 const { loadKnowledgeBase } = require('./knowledgeLoader');
 const { retrieve } = require('./retriever');
+const { retrieveHybrid } = require('./hybridRetriever');
 const { translateQueryForRetrieval } = require('./queryTranslation');
 const { buildSystemPrompt, buildUserPrompt, parseCitedExcerpt, normalizeChatText } = require('./promptBuilder');
 const { tryActions } = require('./actionRegistry');
 const { computeConfidence } = require('./confidence');
 const { fileSupportTicket } = require('./ticketing');
-const { logUsage, logCacheHit } = require('./usageTracking');
+const { logUsage, logCacheHit, isTenantOverBudget } = require('./usageTracking');
 const { answerCache } = require('./answerCache');
 const { composeBridgeReply } = require('./bridgeReply');
 const {
@@ -74,12 +75,17 @@ async function getEngineAnswer({ profile, query, ctx = {} }) {
   // `query`, so the model answers the real question in the selected language.
   // A no-op for English/romanized queries and if translation is unavailable.
   const retrievalQuery = await translateQueryForRetrieval(query);
-  const ranked = retrieve(retrievalQuery, chunks, {
+  // Hybrid (lexical + pgvector RRF) retrieval. The translated query feeds both
+  // sides. retrieveHybrid returns the same shape as retrieve() and degrades to
+  // exactly retrieve()'s result when semantic search is off or unavailable, so
+  // everything below — the rawScore-based confidence gate included — is unchanged.
+  const ranked = await retrieveHybrid(retrievalQuery, chunks, {
     topK: profile.topK,
     minScore: profile.minScore,
     boostTags: profile.boostTags?.(ctx, retrievalQuery),
     chunkWeight: profile.chunkWeight ? (chunk) => profile.chunkWeight(chunk, ctx, retrievalQuery) : undefined,
-    relativeMinScore: profile.relativeMinScore
+    relativeMinScore: profile.relativeMinScore,
+    tenantId: ctx.tenantId
   });
 
   // Normalized 0-1 confidence, independent of the raw lexical score above —
@@ -129,6 +135,20 @@ async function getEngineAnswer({ profile, query, ctx = {} }) {
         await logCacheHit({ ctx, botType: profile.botType, model: cached.value.model, usage: cached.value.usage });
       }
     } else {
+      // Spend guardrail: a cache MISS means a real, billable model call is about
+      // to happen. If this tenant has reached its monthly token budget, skip it and
+      // hand off to a human — filing the question so it isn't lost, exactly like the
+      // provider-outage path below. Checked here (not before the cache) so a free
+      // cache hit is always served, even once a tenant is over budget.
+      if (profile.usageTracking && ctx.tenantId && (await isTenantOverBudget(ctx.tenantId))) {
+        console.warn(`[chatEngine] ${profile.id}: tenant ${ctx.tenantId} is over its monthly token budget — serving a handoff instead of calling the model`);
+        const result = profile.formatFallback(ctx, confidence);
+        result.handoff = true;
+        if (profile.ticketing) result.awaitingContact = true;
+        await profile.onResult?.(result, query, ctx);
+        if (profile.ticketing) await fileSupportTicket({ profile, query, confidence, ctx, kind: 'budget' });
+        return result;
+      }
       const answer = await generateAnswer({
         systemPrompt: buildSystemPrompt(profile, ctx),
         userPrompt: buildUserPrompt(profile, query, ranked, ctx)

@@ -66,8 +66,15 @@ async function seedOperator() {
   } else if (placeholder && production) {
     // Error already logged: keep the real password rather than downgrade it.
   } else {
-    await prisma.operator.update({ where: { id: existing.id }, data: { passwordHash: hashPassword(password) } });
-    console.log(`[seed] Operator ${email}: password updated to match HUB_ADMIN_PASSWORD.`);
+    // Stamp passwordChangedAt so the kill-switch in middleware/operatorAuth.js
+    // fires: any operator token minted before this rotation is refused on its
+    // next request. This is the ONLY place an operator password changes, so
+    // without this line the password-change revocation would never trigger.
+    await prisma.operator.update({
+      where: { id: existing.id },
+      data: { passwordHash: hashPassword(password), passwordChangedAt: new Date() }
+    });
+    console.log(`[seed] Operator ${email}: password updated to match HUB_ADMIN_PASSWORD (older sessions signed out).`);
   }
 
   // After an email change the old operator still exists; say so instead of

@@ -1,9 +1,15 @@
 const prisma = require('../lib/prisma');
+const { store } = require('../lib/sharedStore');
 
 // Pillar 2, tracking half only (no LiteLLM, no live Stripe calls — see the
 // chat's assessment). This is the table a Stripe metered-billing sync job
 // would read from later: one row per LLM call, per tenant, with real token
 // counts from the provider's own response.
+//
+// It also backs a lightweight SPEND GUARDRAIL: isTenantOverBudget() compares a
+// tenant's month-to-date token usage against its cap, so chatEngine can refuse to
+// call the model for a tenant that has blown its budget (preventing runaway LLM
+// bills from a misconfigured embed or an abusive loop).
 
 // Rough, approximate list prices in USD per 1K tokens — for an estimate
 // visible in the dashboard, not for actual invoicing. Update as pricing
@@ -76,4 +82,62 @@ async function logCacheHit({ ctx, botType, model, usage }) {
   });
 }
 
-module.exports = { logUsage, logCacheHit, estimateCostUsd };
+// ---------------------------------------------------------------------
+// Per-tenant monthly spend guardrail.
+// ---------------------------------------------------------------------
+
+// How long the over/under decision is cached in the shared store. Short, so the
+// cap re-checks regularly; a tenant can overshoot by at most one window's worth of
+// traffic, which is an acceptable trade for not aggregating UsageLog every turn.
+const BUDGET_CACHE_TTL_MS = 5 * 60 * 1000;
+
+// Platform-wide default cap applied when a tenant has no monthlyTokenBudget of its
+// own. 0 / unset means "no default cap" (guardrail off unless a tenant opts in).
+function defaultMonthlyTokenBudget() {
+  const n = Number(process.env.DEFAULT_MONTHLY_TOKEN_BUDGET);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+// First instant of the current calendar month, UTC — the window spend is summed over.
+function monthStartUtc(now = new Date()) {
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+}
+
+/**
+ * Whether this tenant has reached its monthly token cap. Cached in the shared
+ * store (so every replica agrees and it costs one DB aggregate per window). Fails
+ * OPEN — any error returns false, because a guardrail hiccup must never take a
+ * tenant's bots offline; the provider's own spend limits remain the backstop.
+ * @param {string} tenantId
+ * @returns {Promise<boolean>}
+ */
+async function isTenantOverBudget(tenantId) {
+  if (!tenantId) return false;
+  const monthKey = monthStartUtc().toISOString().slice(0, 7); // YYYY-MM
+  const cacheKey = `budget:over:${tenantId}:${monthKey}`;
+  try {
+    const cached = await store().get(cacheKey);
+    if (cached === true || cached === false) return cached;
+  } catch { /* cache unavailable: compute fresh */ }
+
+  let over = false;
+  try {
+    const tenant = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { monthlyTokenBudget: true } });
+    const budget = (tenant?.monthlyTokenBudget ?? 0) > 0 ? tenant.monthlyTokenBudget : defaultMonthlyTokenBudget();
+    if (budget > 0) {
+      const agg = await prisma.usageLog.aggregate({
+        where: { tenantId, createdAt: { gte: monthStartUtc() } },
+        _sum: { promptTokens: true, completionTokens: true }
+      });
+      const used = (agg._sum.promptTokens || 0) + (agg._sum.completionTokens || 0);
+      over = used >= budget;
+    }
+  } catch (err) {
+    console.error('[usageTracking] budget check failed (failing open):', err.message);
+    return false;
+  }
+  store().set(cacheKey, over, BUDGET_CACHE_TTL_MS).catch(() => {}); // best-effort
+  return over;
+}
+
+module.exports = { logUsage, logCacheHit, estimateCostUsd, isTenantOverBudget };

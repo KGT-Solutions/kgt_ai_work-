@@ -19,7 +19,8 @@ x-sandbox: &sandbox
 services:
   e2e-postgres:
     <<: *sandbox
-    image: postgres:16-alpine
+    # Ships the `vector` extension the hybrid-search migration enables.
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: kgt
       POSTGRES_PASSWORD: kgt

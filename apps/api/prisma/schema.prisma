@@ -18,6 +18,13 @@ model Operator {
   email        String   @unique
   name         String
   passwordHash String
+  // Revocation kill-switch, mirroring TenantUser: a token minted at or before
+  // passwordChangedAt is rejected on its next request (middleware/operatorAuth.js),
+  // and a deactivated operator is locked out immediately — so a stolen operator
+  // token no longer stays valid for its full 12h TTL after a password change or
+  // account flag.
+  passwordChangedAt DateTime?
+  active            Boolean  @default(true)
   createdAt    DateTime @default(now())
 }
 
@@ -47,6 +54,12 @@ model Tenant {
   // Where lead and low-confidence alerts go (services/teamAlerts.js). Null =
   // the signup email, then the tenant's dashboard users. Lower-cased.
   teamEmail         String?
+  // Soft monthly AI spend cap: the maximum LLM tokens (prompt + completion) this
+  // tenant may spend per calendar month before the bots stop calling the model and
+  // fall back to a human handoff (engine/usageTracking.isTenantOverBudget, enforced
+  // in engine/chatEngine.js). Null falls back to DEFAULT_MONTHLY_TOKEN_BUDGET; a
+  // value <= 0 (or an unset default) means no cap.
+  monthlyTokenBudget Int?
   // Pre-flight knowledge audit (services/botAuditor.js): the latest report,
   // its 0-100 score and level, and a hash of the documents it judged — a
   // different hash now means documents changed since and the report is stale.
@@ -68,6 +81,7 @@ model Tenant {
   starterFaqs  TenantFaq?
   smtpConfig   TenantSmtpConfig?
   products     ProductCatalog[]
+  chunks       DocumentChunk[]
 }
 
 // Structured product rows from a catalog CSV upload (services/catalogIngest.js).
@@ -268,9 +282,44 @@ model TenantDocument {
   createdAt  DateTime         @default(now())
   updatedAt  DateTime         @updatedAt
   products   ProductCatalog[]
+  chunks     DocumentChunk[]
 
   @@index([tenantId])
   @@index([tenantId, category])
+}
+
+// The semantic half of hybrid retrieval (src/engine/hybridRetriever.js). One
+// row per "## section" chunk of a TenantDocument — the SAME split the lexical
+// path derives in memory (domains/tenantProfile.documentChunks), so both sides
+// share one chunk identity (chunkKey = "<documentId>#<sectionIndex>") and RRF
+// can fuse them. TenantDocument.content stays the source of truth; these rows
+// are rebuilt on every document write by services/shared/chunkStore.syncTenantChunks.
+//
+// `embedding` is a pgvector column (vector(1536), OpenAI text-embedding-3-small),
+// declared Unsupported because Prisma has no native vector type — it is read and
+// written only through $queryRaw/$executeRaw, never the typed client, and is
+// NULL when embeddings are unavailable (no key / API down), in which case the
+// row simply doesn't participate in vector search and lexical retrieval still works.
+model DocumentChunk {
+  id             String                       @id @default(uuid())
+  tenant         Tenant                       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantId       String
+  document       TenantDocument               @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  documentId     String
+  chunkKey       String                       // "<documentId>#<sectionIndex>" — stable across re-syncs
+  title          String
+  content        String
+  category       DocumentCategory             @default(CORE_OVERVIEW)
+  scope          String                       // resolved bot scope for this chunk (both | support | sales)
+  embedding      Unsupported("vector(1536)")?
+  embeddingModel String?                      // which model produced `embedding`; null until embedded
+  contentHash    String                       // detects unchanged text so re-sync skips re-embedding
+  createdAt      DateTime                     @default(now())
+  updatedAt      DateTime                     @updatedAt
+
+  @@unique([tenantId, chunkKey])
+  @@index([tenantId])
+  @@index([documentId])
 }
 
 // One conversation with one visitor. botType, lastMessageAt and messageCount

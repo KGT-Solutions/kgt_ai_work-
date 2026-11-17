@@ -17,6 +17,9 @@ if (typeof globalThis.File === 'undefined') {
 }
 
 const dns = require('dns').promises;
+const http = require('http');
+const https = require('https');
+const zlib = require('zlib');
 const { URL } = require('url');
 const cheerio = require('cheerio');
 
@@ -70,7 +73,12 @@ const USER_AGENT = 'Mozilla/5.0 (compatible; KGTAIHubBot/1.0)';
 const REQUEST_HEADERS = {
   'user-agent': USER_AGENT,
   accept: 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.5',
-  'accept-language': 'en-US,en;q=0.9'
+  'accept-language': 'en-US,en;q=0.9',
+  // Ask for uncompressed responses. node:http (unlike fetch/undici) does NOT
+  // auto-decompress, so without this a server that gzips anyway would hand us
+  // compressed bytes that cheerio parses as garbage (silent content loss). We
+  // still decode defensively below for servers that compress regardless.
+  'accept-encoding': 'identity'
 };
 
 // Same-domain links whose href/anchor text mention these are crawled before
@@ -220,8 +228,16 @@ function isPrivateIPv6(ip) {
 // CRAWLER_ALLOW_PRIVATE_HOSTS=true lifts this guard so the E2E suite can scan
 // its fixture website on a private Docker network. It turns the crawler into
 // an SSRF tool, so production refuses to start with it (utils/assertProdSafety.js).
+// Resolves the hostname, rejects it if ANY address is private/internal, and
+// RETURNS the validated addresses so the caller can pin one to the actual
+// connection (see pinnedGet / fetchSafe). Returning the exact IPs that were
+// checked — rather than letting the HTTP client resolve the name a second time —
+// is what closes the DNS-rebinding TOCTOU window.
+// In CRAWLER_ALLOW_PRIVATE_HOSTS mode (dev/test only; production refuses to boot
+// with it, see utils/assertProdSafety.js) it returns null, meaning "don't pin —
+// resolve normally", so local test servers behave exactly as before.
 async function assertPublicHost(hostname) {
-  if (String(process.env.CRAWLER_ALLOW_PRIVATE_HOSTS || '').toLowerCase() === 'true') return;
+  if (String(process.env.CRAWLER_ALLOW_PRIVATE_HOSTS || '').toLowerCase() === 'true') return null;
   let addresses;
   try {
     addresses = await dns.lookup(hostname, { all: true });
@@ -234,6 +250,84 @@ async function assertPublicHost(hostname) {
       throw new CrawlerError(`"${hostname}" resolves to a non-public address — refusing to crawl it`, 400);
     }
   }
+  return addresses;
+}
+
+// A single GET that CONNECTS to a pre-validated IP, defeating DNS rebinding. The
+// pinned address is injected via a custom `lookup` so the TCP/TLS socket goes to
+// the IP assertPublicHost already checked, while the Host header and TLS SNI stay
+// the real hostname (from the URL) — so virtual hosts and certificate validation
+// still work. Redirects are NOT followed here; fetchSafe re-validates each hop.
+// Returns a minimal fetch-like shape: { status, ok, headers.get(), text() }.
+// `addresses` null (allow-private mode) falls back to normal DNS resolution.
+const MAX_HTML_BYTES = 10 * 1024 * 1024;
+
+function pinnedGet(urlObj, addresses, { timeoutMs }) {
+  return new Promise((resolve, reject) => {
+    const lib = urlObj.protocol === 'https:' ? https : http;
+    const pinned = addresses && addresses.length ? addresses[0] : null;
+    // net/tls lookup callback contract: (hostname, options, cb) ->
+    // cb(err, address, family), or cb(err, [{address, family}]) when options.all.
+    const lookup = pinned
+      ? (hostname, options, cb) => (options && options.all
+          ? cb(null, [{ address: pinned.address, family: pinned.family }])
+          : cb(null, pinned.address, pinned.family))
+      : undefined;
+
+    const req = lib.request(urlObj, { method: 'GET', headers: REQUEST_HEADERS, lookup }, (res) => {
+      const status = res.statusCode;
+      const ok = status >= 200 && status < 300;
+      const headers = { get: (name) => res.headers[String(name).toLowerCase()] ?? null };
+      const contentType = res.headers['content-type'] || '';
+      // Only buffer a body when the caller will actually use it (an OK HTML page);
+      // for redirects, errors and non-HTML we just drain the socket.
+      if (!(ok && contentType.includes('html'))) {
+        res.resume();
+        return resolve({ status, ok, headers, text: async () => '' });
+      }
+      // Defensive decompression: we request identity, but some servers compress
+      // regardless. node:http never auto-decodes, so decode by Content-Encoding or
+      // the body would be unreadable bytes. The size cap is enforced on the
+      // DECOMPRESSED stream, so a compression bomb is still bounded.
+      const encoding = String(res.headers['content-encoding'] || '').toLowerCase();
+      let body = res;
+      if (encoding === 'gzip' || encoding === 'x-gzip') body = res.pipe(zlib.createGunzip());
+      else if (encoding === 'deflate') body = res.pipe(zlib.createInflate());
+      else if (encoding === 'br') body = res.pipe(zlib.createBrotliDecompress());
+
+      const chunks = [];
+      let size = 0;
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        resolve({ status, ok, headers, text: async () => Buffer.concat(chunks).toString('utf8') });
+      };
+      body.on('data', (c) => {
+        if (done) return;
+        if (size + c.length > MAX_HTML_BYTES) {
+          chunks.push(c.subarray(0, Math.max(0, MAX_HTML_BYTES - size)));
+          size = MAX_HTML_BYTES;
+          res.destroy();
+          finish();
+        } else {
+          chunks.push(c);
+          size += c.length;
+        }
+      });
+      body.on('end', finish);
+      body.on('close', finish);
+      // A decode error (corrupt/mislabelled compression) or a socket error rejects
+      // the fetch, so crawlSite treats this one page as unreachable and moves on.
+      body.on('error', (err) => { if (!done) { done = true; reject(err); } });
+      if (body !== res) res.on('error', (err) => { if (!done) { done = true; reject(err); } });
+    });
+
+    let timedOut = false;
+    req.setTimeout(timeoutMs, () => { timedOut = true; req.destroy(); });
+    req.on('error', (err) => { err.timedOut = timedOut; reject(err); });
+    req.end();
+  });
 }
 
 function assertHttpUrl(urlString) {
@@ -257,23 +351,23 @@ async function fetchSafe(urlString, { timeoutMs = PER_REQUEST_TIMEOUT_MS } = {})
   let current = assertHttpUrl(urlString);
 
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    await assertPublicHost(current.hostname);
+    // Validate the host AND capture the exact IPs it resolved to, then connect to
+    // one of those pinned IPs below — so a short-TTL record cannot swap to a
+    // private address between this check and the fetch (DNS rebinding). Each
+    // redirect hop re-validates and re-pins its own host.
+    const addresses = await assertPublicHost(current.hostname);
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
     let res;
     try {
-      res = await fetch(current.toString(), { redirect: 'manual', signal: controller.signal, headers: REQUEST_HEADERS });
+      res = await pinnedGet(current, addresses, { timeoutMs });
     } catch (err) {
-      const timedOut = controller.signal.aborted;
+      const timedOut = !!err.timedOut;
       const failure = new CrawlerError(
         timedOut ? `${current.hostname} did not respond within ${timeoutMs / 1000} seconds` : `Could not reach ${current.hostname}: ${err.message}`,
         502
       );
       failure.kind = timedOut ? 'timeout' : 'unreachable'; // read by describeStartFailure
       throw failure;
-    } finally {
-      clearTimeout(timer);
     }
 
     if ([301, 302, 303, 307, 308].includes(res.status)) {

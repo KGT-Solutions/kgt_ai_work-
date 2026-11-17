@@ -44,6 +44,22 @@ async function invalidateTenantKnowledge(tenantId) {
   return answerCache.invalidateTenant(tenantId);
 }
 
+// Keeps the semantic index (DocumentChunk rows + embeddings) in step with a
+// tenant's documents, in the background, reusing the chunks loadTenantKnowledge
+// just built. Deliberately on the READ path, not the write (invalidate) path:
+//   - it reuses a read that already happened (no extra tenantDocument query),
+//   - it keeps the embeddings call out of every document-save response, and
+//   - it runs only when knowledge was actually (re)loaded, not on cache hits.
+// The vector index is a ranking aid over the lexical source of truth, so brief
+// staleness between an edit and the next load only affects ordering, never
+// grounding (chatEngine's gate is lexical). Required lazily to avoid a load-time
+// cycle, and fully best-effort — a sync failure never affects the reply.
+function syncTenantChunksInBackground(tenantId, chunks) {
+  require('../services/shared/chunkStore')
+    .syncTenantChunks(tenantId, chunks)
+    .catch((err) => console.warn(`[tenantProfile] chunk sync failed for tenant ${tenantId}: ${err.message}`));
+}
+
 async function loadTenantKnowledge(tenantId) {
   // The generation is this tenant's knowledge version, held in
   // lib/sharedStore.js so every instance sees the same number
@@ -65,6 +81,10 @@ async function loadTenantKnowledge(tenantId) {
   // invalidation.
   if (await answerCache.generation(tenantId) === generation) {
     chunkCacheByTenant.set(tenantId, { generation, chunks });
+    // Same coherence guard as the cache write above: only sync chunks a
+    // concurrent edit did not overtake, so stale content never reaches the
+    // vector index.
+    syncTenantChunksInBackground(tenantId, chunks);
   }
   return chunks;
 }
@@ -82,9 +102,14 @@ async function loadTenantKnowledge(tenantId) {
  * @param {{ id?: string, title: string, content: string, category?: string, botScope?: string }} doc
  */
 function documentChunks(doc) {
-  return parseIntoChunks(doc.title, doc.content).map((chunk) => ({
+  return parseIntoChunks(doc.title, doc.content).map((chunk, i) => ({
     ...chunk,
     documentId: doc.id,
+    // One stable identity shared by the lexical (in-memory) and semantic
+    // (DocumentChunk row) halves of hybrid retrieval, so RRF can fuse them
+    // (services/shared/chunkStore.js, engine/hybridRetriever.js). Derived from
+    // the document id + section index, so it survives a title edit.
+    chunkKey: `${doc.id}#${i}`,
     category: doc.category || DEFAULT_CATEGORY,
     scope: classifyChunk({ ...chunk, title: `${doc.title} — ${chunk.title}` }, doc.botScope)
   }));

@@ -385,6 +385,13 @@ router.post('/complete', async (req, res) => {
   console.log(`[register] account created for ${maskAddress(email)} (tenant ${created.tenant.slug})`);
   // No invalidateTenantKnowledge call needed — this tenant's knowledge
   // cache has never been populated, so there's nothing stale to clear.
+  // Warm the knowledge cache, which also kicks off the background build of the
+  // semantic index (DocumentChunk rows + embeddings) for the pages just created,
+  // off the response path — so a slow/unreachable embedding provider never
+  // delays or fails signup (hybridRetriever falls back to lexical until it lands).
+  require('../domains/tenantProfile')
+    .loadTenantKnowledge(created.tenant.id)
+    .catch((err) => console.warn(`[register] tenant ${created.tenant.id}: initial knowledge warm failed: ${err.message}`));
   // Starter questions are written in the background, usually before the
   // new client reaches the Test Bots page.
   scheduleFaqGeneration(created.tenant.id);
