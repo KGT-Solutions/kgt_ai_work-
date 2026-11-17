@@ -79,4 +79,19 @@ describe('embeddings', () => {
   test('toSqlVector renders a pgvector literal', () => {
     assert.equal(embeddings.toSqlVector([0.1, 0.2, 0.3]), '[0.1,0.2,0.3]');
   });
+
+  test('an oversized input is truncated to the char cap before sending (no 400 on huge sections)', async () => {
+    let sentInput;
+    mock.method(global, 'fetch', async (url, opts) => { sentInput = JSON.parse(opts.body).input; return okResponse([vec(0.1)]); });
+    const [v] = await embeddings.embedTexts(['x'.repeat(50000)]);
+    assert.ok(Array.isArray(v), 'still returns a vector for the (truncated) input');
+    assert.equal(sentInput[0].length, 32000, 'input is capped at MAX_EMBED_CHARS before the API call');
+  });
+
+  test('a short input is sent unchanged', async () => {
+    let sentInput;
+    mock.method(global, 'fetch', async (url, opts) => { sentInput = JSON.parse(opts.body).input; return okResponse([vec(0.1)]); });
+    await embeddings.embedTexts(['hello world']);
+    assert.equal(sentInput[0], 'hello world');
+  });
 });

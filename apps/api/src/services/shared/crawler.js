@@ -17,11 +17,13 @@ if (typeof globalThis.File === 'undefined') {
 }
 
 const dns = require('dns').promises;
-const http = require('http');
-const https = require('https');
-const zlib = require('zlib');
 const { URL } = require('url');
 const cheerio = require('cheerio');
+// undici's Agent lets us pin the fetch connection to a pre-validated IP (below).
+// Required AFTER the File polyfill above — undici references the global File
+// class, which Node only globalizes from v20. cheerio has already pulled undici
+// in by here, so this require is cheap.
+const { Agent } = require('undici');
 
 const envInt = (name, def) => {
   const v = parseInt(process.env[name], 10);
@@ -73,12 +75,7 @@ const USER_AGENT = 'Mozilla/5.0 (compatible; KGTAIHubBot/1.0)';
 const REQUEST_HEADERS = {
   'user-agent': USER_AGENT,
   accept: 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.5',
-  'accept-language': 'en-US,en;q=0.9',
-  // Ask for uncompressed responses. node:http (unlike fetch/undici) does NOT
-  // auto-decompress, so without this a server that gzips anyway would hand us
-  // compressed bytes that cheerio parses as garbage (silent content loss). We
-  // still decode defensively below for servers that compress regardless.
-  'accept-encoding': 'identity'
+  'accept-language': 'en-US,en;q=0.9'
 };
 
 // Same-domain links whose href/anchor text mention these are crawled before
@@ -253,81 +250,70 @@ async function assertPublicHost(hostname) {
   return addresses;
 }
 
-// A single GET that CONNECTS to a pre-validated IP, defeating DNS rebinding. The
-// pinned address is injected via a custom `lookup` so the TCP/TLS socket goes to
-// the IP assertPublicHost already checked, while the Host header and TLS SNI stay
-// the real hostname (from the URL) — so virtual hosts and certificate validation
-// still work. Redirects are NOT followed here; fetchSafe re-validates each hop.
-// Returns a minimal fetch-like shape: { status, ok, headers.get(), text() }.
-// `addresses` null (allow-private mode) falls back to normal DNS resolution.
+// A single GET that CONNECTS to a pre-validated IP, defeating DNS rebinding. We
+// keep using fetch (so its automatic gzip/deflate/br decompression still applies,
+// and the suite's fetch stubs still drive it) but PIN the connection with an
+// undici dispatcher whose custom `lookup` returns the exact IP assertPublicHost
+// verified. The Host header and TLS SNI stay the real hostname (undici derives
+// them from the URL), so virtual hosts and certificate validation still work.
+// Redirects are NOT followed here; fetchSafe re-validates and re-pins each hop.
+// `addresses` null (allow-private dev mode) falls back to normal DNS resolution.
+// Returns a fetch-like shape { status, ok, headers.get(), text() } with the body
+// already read, so the caller can still consume it after the dispatcher closes.
 const MAX_HTML_BYTES = 10 * 1024 * 1024;
 
-function pinnedGet(urlObj, addresses, { timeoutMs }) {
-  return new Promise((resolve, reject) => {
-    const lib = urlObj.protocol === 'https:' ? https : http;
-    const pinned = addresses && addresses.length ? addresses[0] : null;
-    // net/tls lookup callback contract: (hostname, options, cb) ->
-    // cb(err, address, family), or cb(err, [{address, family}]) when options.all.
-    const lookup = pinned
-      ? (hostname, options, cb) => (options && options.all
-          ? cb(null, [{ address: pinned.address, family: pinned.family }])
-          : cb(null, pinned.address, pinned.family))
-      : undefined;
-
-    const req = lib.request(urlObj, { method: 'GET', headers: REQUEST_HEADERS, lookup }, (res) => {
-      const status = res.statusCode;
-      const ok = status >= 200 && status < 300;
-      const headers = { get: (name) => res.headers[String(name).toLowerCase()] ?? null };
-      const contentType = res.headers['content-type'] || '';
-      // Only buffer a body when the caller will actually use it (an OK HTML page);
-      // for redirects, errors and non-HTML we just drain the socket.
-      if (!(ok && contentType.includes('html'))) {
-        res.resume();
-        return resolve({ status, ok, headers, text: async () => '' });
-      }
-      // Defensive decompression: we request identity, but some servers compress
-      // regardless. node:http never auto-decodes, so decode by Content-Encoding or
-      // the body would be unreadable bytes. The size cap is enforced on the
-      // DECOMPRESSED stream, so a compression bomb is still bounded.
-      const encoding = String(res.headers['content-encoding'] || '').toLowerCase();
-      let body = res;
-      if (encoding === 'gzip' || encoding === 'x-gzip') body = res.pipe(zlib.createGunzip());
-      else if (encoding === 'deflate') body = res.pipe(zlib.createInflate());
-      else if (encoding === 'br') body = res.pipe(zlib.createBrotliDecompress());
-
-      const chunks = [];
-      let size = 0;
-      let done = false;
-      const finish = () => {
-        if (done) return;
-        done = true;
-        resolve({ status, ok, headers, text: async () => Buffer.concat(chunks).toString('utf8') });
-      };
-      body.on('data', (c) => {
-        if (done) return;
-        if (size + c.length > MAX_HTML_BYTES) {
-          chunks.push(c.subarray(0, Math.max(0, MAX_HTML_BYTES - size)));
-          size = MAX_HTML_BYTES;
-          res.destroy();
-          finish();
-        } else {
-          chunks.push(c);
-          size += c.length;
+async function pinnedGet(urlObj, addresses, { timeoutMs }) {
+  const pinned = addresses && addresses.length ? addresses[0] : null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  // One short-lived dispatcher per request, pinned to this hop's verified IP.
+  const dispatcher = pinned
+    ? new Agent({
+        connect: {
+          // undici requests all:true and expects an array; support both forms.
+          lookup: (hostname, options, cb) => (options && options.all
+            ? cb(null, [{ address: pinned.address, family: pinned.family }])
+            : cb(null, pinned.address, pinned.family))
         }
-      });
-      body.on('end', finish);
-      body.on('close', finish);
-      // A decode error (corrupt/mislabelled compression) or a socket error rejects
-      // the fetch, so crawlSite treats this one page as unreachable and moves on.
-      body.on('error', (err) => { if (!done) { done = true; reject(err); } });
-      if (body !== res) res.on('error', (err) => { if (!done) { done = true; reject(err); } });
+      })
+    : null;
+
+  try {
+    const res = await fetch(urlObj.toString(), {
+      method: 'GET',
+      redirect: 'manual',
+      signal: controller.signal,
+      headers: REQUEST_HEADERS,
+      ...(dispatcher ? { dispatcher } : {})
     });
 
-    let timedOut = false;
-    req.setTimeout(timeoutMs, () => { timedOut = true; req.destroy(); });
-    req.on('error', (err) => { err.timedOut = timedOut; reject(err); });
-    req.end();
-  });
+    const status = res.status;
+    const ok = res.ok;
+    const headers = { get: (name) => res.headers.get(name) };
+    const contentType = res.headers.get('content-type') || '';
+
+    // Only read the body for an OK HTML page; drain the rest so the socket frees.
+    // Read it HERE, before the dispatcher closes in `finally`, so the caller can
+    // still call text() afterwards.
+    if (!(ok && contentType.includes('html'))) {
+      try { await res.body?.cancel?.(); } catch { /* already consumed/closed */ }
+      return { status, ok, headers, text: async () => '' };
+    }
+    const declared = Number(res.headers.get('content-length'));
+    if (Number.isFinite(declared) && declared > MAX_HTML_BYTES) {
+      try { await res.body?.cancel?.(); } catch { /* ignore */ }
+      return { status, ok, headers, text: async () => '' }; // oversized: skip like a non-HTML page
+    }
+    const full = await res.text(); // fetch auto-decompresses gzip/deflate/br
+    const html = full.length > MAX_HTML_BYTES ? full.slice(0, MAX_HTML_BYTES) : full;
+    return { status, ok, headers, text: async () => html };
+  } catch (err) {
+    err.timedOut = controller.signal.aborted;
+    throw err;
+  } finally {
+    clearTimeout(timer);
+    if (dispatcher) dispatcher.close().catch(() => {});
+  }
 }
 
 function assertHttpUrl(urlString) {
