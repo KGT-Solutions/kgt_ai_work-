@@ -53,6 +53,52 @@
     background-size: 200% 100%;
     @apply animate-shimmer rounded-md;
   }
+
+  /* ─────────────────────────────────────────────────────────────────────
+     Orb Console design system — opt-in scope. See ./07_Orb_Console_Design_System.md
+     Nothing below affects a page until it opts in with `.orb-theme`. The dark
+     theme above is untouched. Build new UI with `components/orb/*` inside a
+     `.orb-theme` wrapper.
+     ───────────────────────────────────────────────────────────────────── */
+
+  /* The light surface + base typography (§2, §3). Wrap a page/section in this. */
+  .orb-theme {
+    @apply bg-orb-base font-orb-sans text-orb-ink antialiased;
+    color-scheme: light;
+    font-size: 13px; /* §3.1 base size */
+  }
+
+  /* Console text styles (§3.2). Apply one; never set font/size/weight by hand. */
+  .orb-display       { @apply font-orb-sans font-medium;    font-size: 40px; line-height: 44px; letter-spacing: -0.03em; }
+  .orb-figure        { @apply font-orb-sans font-semibold;  font-size: 28px; line-height: 34px; letter-spacing: -0.02em; }
+  .orb-page-title    { @apply font-orb-display font-bold;   font-size: 26px; line-height: 32px; letter-spacing: -0.01em; }
+  .orb-figure-sm     { @apply font-orb-sans font-semibold;  font-size: 20px; line-height: 28px; letter-spacing: -0.01em; }
+  .orb-card-title    { @apply font-orb-sans font-semibold;  font-size: 16px; line-height: 24px; letter-spacing: -0.01em; }
+  .orb-heading       { @apply font-orb-sans font-semibold;  font-size: 13px; line-height: 20px; letter-spacing: -0.006em; }
+  .orb-body-strong   { @apply font-orb-sans font-medium;    font-size: 13px; line-height: 20px; letter-spacing: -0.006em; }
+  .orb-body          { @apply font-orb-sans font-normal;    font-size: 13px; line-height: 20px; letter-spacing: -0.006em; }
+  .orb-small-strong  { @apply font-orb-sans font-semibold;  font-size: 12px; line-height: 16px; letter-spacing: -0.006em; }
+  .orb-small-medium  { @apply font-orb-sans font-medium;    font-size: 12px; line-height: 16px; letter-spacing: -0.006em; }
+  .orb-small         { @apply font-orb-sans font-normal;    font-size: 12px; line-height: 16px; letter-spacing: -0.006em; }
+  .orb-micro         { @apply font-orb-sans font-medium;    font-size: 11px; line-height: 16px; }
+  .orb-code          { @apply font-orb-mono font-normal;    font-size: 12px; line-height: 20px; }
+
+  /* Thin scrollbar in design-system greys (§2): light-grey thumb, darkening to
+     chip-stroke on hover; transparent track. Cross-browser. */
+  .orb-scrollbar { scrollbar-width: thin; scrollbar-color: #dedede transparent; }
+  .orb-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
+  .orb-scrollbar::-webkit-scrollbar-track { background: transparent; }
+  .orb-scrollbar::-webkit-scrollbar-thumb { background-color: #dedede; border-radius: 9999px; }
+  .orb-scrollbar:hover { scrollbar-color: #909090 transparent; }
+  .orb-scrollbar::-webkit-scrollbar-thumb:hover { background-color: #909090; }
+
+  /* Widget text styles (§3.3) — the chat visitors see; larger than the console. */
+  .orb-widget-title    { @apply font-orb-sans font-semibold; font-size: 20px; line-height: 28px; }
+  .orb-widget-message  { @apply font-orb-sans font-normal;   font-size: 18px; line-height: 26px; }
+  .orb-widget-button   { @apply font-orb-sans font-medium;   font-size: 16px; line-height: 24px; }
+  .orb-widget-body     { @apply font-orb-sans font-normal;   font-size: 15px; line-height: 22px; }
+  .orb-widget-label    { @apply font-orb-sans font-medium;   font-size: 14px; line-height: 20px; }
+  .orb-widget-small    { @apply font-orb-sans font-normal;   font-size: 13px; line-height: 18px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
