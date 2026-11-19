@@ -225,6 +225,11 @@ model TenantApiKey {
   createdAt  DateTime  @default(now())
   lastUsedAt DateTime? // updated at most every few minutes, not on every request
   revokedAt  DateTime? // non-null = rejected; kept for the audit trail rather than deleted
+  // Widget install telemetry: set when the embed widget pings on page load
+  // (POST /api/v1/tenant-chat/:slug/ping). Null = never loaded. Throttled like
+  // lastUsedAt. widgetUrl is the page it last loaded on (origin + path only).
+  widgetSeenAt DateTime?
+  widgetUrl    String?
 
   @@index([tenantId])
 }

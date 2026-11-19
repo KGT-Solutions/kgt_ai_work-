@@ -603,6 +603,24 @@ router.post('/api-keys', async (req, res) => {
   res.status(201).json({ id: row.id, keyPrefix: row.keyPrefix, label: row.label, createdAt: row.createdAt, apiKey: key });
 });
 
+// Has the embed widget actually loaded on the customer's site yet? The widget
+// pings POST /api/v1/tenant-chat/:slug/ping on load, stamping widgetSeenAt on the
+// key it used. We report the most recently seen live key so the dashboard can
+// flip from "waiting" to "widget detected" without the owner sending a test chat.
+router.get('/install-status', async (req, res) => {
+  const seen = await prisma.tenantApiKey.findFirst({
+    where: { tenantId: req.tenant.id, revokedAt: null, widgetSeenAt: { not: null } },
+    orderBy: { widgetSeenAt: 'desc' },
+    select: { keyPrefix: true, widgetSeenAt: true, widgetUrl: true }
+  });
+  res.json({
+    installed: !!seen,
+    seenAt: seen?.widgetSeenAt || null,
+    url: seen?.widgetUrl || null,
+    keyPrefix: seen?.keyPrefix || null
+  });
+});
+
 router.delete('/api-keys/:keyId', async (req, res) => {
   const key = await prisma.tenantApiKey.findFirst({ where: { id: req.params.keyId, tenantId: req.tenant.id } });
   if (!key) return res.status(404).json({ error: 'API key not found' });

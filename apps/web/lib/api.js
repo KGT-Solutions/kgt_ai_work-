@@ -167,6 +167,9 @@ function workspace(base, auth) {
     updateProduct: (id, patch) => r(`/catalog/products/${enc(id)}`, { method: 'PATCH', body: patch }),
     deleteProduct: (id) => r(`/catalog/products/${enc(id)}`, { method: 'DELETE' }),
     listApiKeys: () => r('/api-keys'),
+    // Has the embed widget loaded on the customer's site yet?
+    // { installed, seenAt, url, keyPrefix }.
+    getInstallStatus: () => r('/install-status'),
     createApiKey: (label) => r('/api-keys', { method: 'POST', body: { label } }),
     revokeApiKey: (keyId, { force = false } = {}) => r(`/api-keys/${enc(keyId)}${force ? '?force=true' : ''}`, { method: 'DELETE' }),
     chat: (payload) => r('/chat', { method: 'POST', body: payload }),

@@ -1,8 +1,53 @@
 import { useEffect, useState } from 'react';
-import { Badge, Button, Card, CardHeader, EmptyState, Input, SecretField, Skeleton } from '../ui';
+import { Badge, Button, Card, CardHeader, EmptyState, Input, SecretField, Skeleton, Spinner } from '../ui';
 import { useToast } from '../ui/toast';
-import { IconAlert, IconCode, IconKey, IconLock } from '../ui/icons';
+import { IconAlert, IconCheck, IconCode, IconKey, IconLock } from '../ui/icons';
 import EmbedSnippets from './EmbedSnippets';
+
+// Has the widget actually loaded on the customer's site? Polls /install-status
+// every 30s until it has (the widget pings on page load), then stops. Renders
+// nothing until the first poll answers, so it never flickers "not installed"
+// before we know.
+const INSTALL_POLL_MS = 30_000;
+
+function InstallStatus({ ws }) {
+  const [status, setStatus] = useState(null);
+
+  useEffect(() => {
+    let active = true;
+    let timer;
+    const poll = async () => {
+      try {
+        const s = await ws.getInstallStatus();
+        if (!active) return;
+        setStatus(s);
+        if (s.installed) return; // detected — stop polling
+      } catch { /* transient — keep polling */ }
+      if (active) timer = setTimeout(poll, INSTALL_POLL_MS);
+    };
+    poll();
+    return () => { active = false; clearTimeout(timer); };
+  }, [ws]);
+
+  if (!status) return null;
+  if (status.installed) {
+    return (
+      <div className="flex items-start gap-2 rounded-lg border border-emerald-400/25 bg-emerald-400/[0.07] px-3 py-2.5 text-[12.5px] text-emerald-100">
+        <IconCheck className="mt-0.5 h-4 w-4 shrink-0" />
+        <span>
+          Widget detected{status.url ? <> on <span className="font-medium">{status.url}</span></> : ''}
+          {status.seenAt ? <span className="text-emerald-200/70"> · {new Date(status.seenAt).toLocaleString()}</span> : ''}
+        </span>
+      </div>
+    );
+  }
+  return (
+    <div className="flex items-center gap-2 rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2.5 text-[12.5px] text-fg-3">
+      <Spinner className="h-4 w-4 shrink-0" />
+      Waiting for the widget&apos;s first load — paste a snippet on your site, then open the page.
+    </div>
+  );
+}
 
 // Credential vault. Keys are stored only as SHA-256 hashes on the server, so a
 // key's full value exists in exactly one place: this browser tab, right after
@@ -64,6 +109,7 @@ export default function KeyVault({ ws, tenant, freshKey }) {
           <div className="space-y-4 p-5">
             <SecretField value={issued.apiKey} label="API key" />
             <EmbedSnippets slug={tenant.slug} apiKey={issued.apiKey} />
+            <InstallStatus ws={ws} />
           </div>
         </Card>
       )}
@@ -72,8 +118,9 @@ export default function KeyVault({ ws, tenant, freshKey }) {
         <Card>
           <CardHeader icon={<IconCode className="h-4 w-4" />} title="Embed your bots"
             description="Two widgets, one per bot. Each is locked to its bot, so visitors get the right persona and knowledge on every page." />
-          <div className="p-5">
+          <div className="space-y-4 p-5">
             <EmbedSnippets slug={tenant.slug} />
+            <InstallStatus ws={ws} />
           </div>
         </Card>
       )}

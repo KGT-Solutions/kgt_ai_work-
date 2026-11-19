@@ -10,6 +10,8 @@ const crypto = require('crypto');
 
 const KEY_PREFIX_LENGTH = 9; // "tk_" + 6 hex chars — enough to tell keys apart, useless for guessing
 const LAST_USED_WRITE_INTERVAL_MS = 5 * 60 * 1000;
+const WIDGET_SEEN_WRITE_INTERVAL_MS = 5 * 60 * 1000;
+const MAX_WIDGET_URL_LEN = 300;
 
 function makeApiKey() {
   return `tk_${crypto.randomBytes(24).toString('hex')}`;
@@ -49,4 +51,30 @@ function shouldTouchLastUsed(row, now = Date.now()) {
   return !row.lastUsedAt || now - new Date(row.lastUsedAt).getTime() > LAST_USED_WRITE_INTERVAL_MS;
 }
 
-module.exports = { makeApiKey, hashApiKey, keyPrefix, issueApiKey, findValidApiKey, shouldTouchLastUsed, KEY_PREFIX_LENGTH };
+// Same throttle for widget-install telemetry (POST /ping): the widget pings on
+// every page load, but one row write every few minutes is all the dashboard's
+// "is it installed?" check needs — so many concurrent visitors don't all write
+// the same key row. The first ping (widgetSeenAt still null) always writes.
+function shouldTouchWidgetSeen(row, now = Date.now()) {
+  return !row.widgetSeenAt || now - new Date(row.widgetSeenAt).getTime() > WIDGET_SEEN_WRITE_INTERVAL_MS;
+}
+
+// The page a widget pinged from, reduced to origin + path and length-capped.
+// The query string and hash are dropped on purpose — they can carry tokens or
+// PII, and all the dashboard shows is which page the widget loaded on. Returns
+// null for anything that isn't a valid http(s) URL, so junk is simply not stored.
+function sanitizeWidgetUrl(raw) {
+  if (!raw || typeof raw !== 'string') return null;
+  try {
+    const u = new URL(raw.trim());
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    return `${u.origin}${u.pathname}`.slice(0, MAX_WIDGET_URL_LEN);
+  } catch {
+    return null;
+  }
+}
+
+module.exports = {
+  makeApiKey, hashApiKey, keyPrefix, issueApiKey, findValidApiKey,
+  shouldTouchLastUsed, shouldTouchWidgetSeen, sanitizeWidgetUrl, KEY_PREFIX_LENGTH
+};

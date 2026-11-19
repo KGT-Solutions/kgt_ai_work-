@@ -178,16 +178,19 @@ or raise phantom tickets. Covered by `test/unit/sandboxIsolation.test.js`.
 | **SHA-256 key hashing** at rest | `keyHash` = SHA-256; plaintext shown once | ✅ Match (strong) |
 | Key prefix for identification | `keyPrefix` = `tk_` + 6 hex | ✅ Match |
 | Dual code snippets (per bot) | `KeyVault.js` renders two per-bot install snippets + show-once warning | ✅ Match |
-| Widget **ping telemetry** (`/ping`) | Not present | ⚠️ **Gap (G1, optional)** |
-| **Install-status polling** (30s, has the widget loaded?) | Not present — no `widgetSeenAt` column | ⚠️ **Gap (G2, optional)** — requires schema addition |
+| Widget **ping telemetry** (`/ping`) | `POST /api/v1/tenant-chat/:slug/ping` (same slug + `X-Tenant-Api-Key` auth as `/chat`); widget pings on load; stamps `widgetSeenAt`/`widgetUrl`, throttled | ✅ **Resolved (was G1)** |
+| **Install-status polling** (30s, has the widget loaded?) | `GET /install-status` + `KeyVault.js` 30s poll → "widget detected"; `widgetSeenAt`/`widgetUrl` added to `TenantApiKey` | ✅ **Resolved (was G2)** |
 
 **Analysis.** Key management is textbook: the plaintext key is shown exactly once, only a
-SHA-256 hash is stored, and a short prefix allows identification without exposing the
-secret. The two missing pieces (**Step 7 G1/G2**) are telemetry niceties — a `/ping`
-endpoint the widget calls on load, and a dashboard poll that flips the UI to "widget
-detected." Both are genuinely useful but **require a schema change** (`widgetSeenAt` /
-`widgetUrl` on `TenantApiKey`), so they sit at low priority and are the one place the
-single-phase model's lack of a `status` lifecycle is felt.
+SHA-256 hash is stored, and a short prefix allows identification without exposing the secret.
+**Step 7 G1/G2 are now resolved.** A migration adds `widgetSeenAt`/`widgetUrl` to
+`TenantApiKey`; the embed widget fires a best-effort `POST .../ping` on load (open CORS, same
+key auth as `/chat`), which stamps the key — throttled like `lastUsedAt` so heavy traffic
+can't hammer one row, with the page reduced to origin + path so no query-string tokens leak,
+and per-IP rate-limited. The dashboard's `GET /install-status` reports the most-recently-seen
+live key, and `KeyVault.js` polls it every 30s (stopping once detected) to flip the embed card
+to "widget detected." Covered by `test/integration/widgetTelemetry.test.js` and
+`test/unit/tenantApiKey.test.js`. This is the one item that touches the schema.
 
 ---
 
@@ -299,13 +302,16 @@ extracted into a shared `SignupWelcome` component rendered on the bots page (and
 as a fallback); it consumes the one-time sessionStorage handoff on first load, so the key
 still surfaces exactly once. Verified with `next build`.
 
+**Step 7 G1 + G2 — Widget Telemetry** *(the one schema migration)*
+Migration adds `widgetSeenAt`/`widgetUrl` to `TenantApiKey`. The widget fires a best-effort
+`POST /api/v1/tenant-chat/:slug/ping` on load (open CORS, same key auth as `/chat`), stamping
+the key — throttled, per-IP rate-limited, URL reduced to origin + path. `GET /install-status`
+plus a 30s `KeyVault.js` poll flips the embed card to "widget detected." Tests:
+`widgetTelemetry.test.js`, `tenantApiKey.test.js`.
+
 ### 🔭 Remaining
 
-**Step 7 G1 + G2 — Widget Telemetry** *(Low, optional, **requires schema change**)*
-Add `widgetSeenAt` (and optionally `widgetUrl`) to `TenantApiKey`. Expose a lightweight
-`POST /ping` the widget calls on load, and a dashboard `install-status` poll (~30s) that flips
-the UI to "widget detected." The one item that touches the schema and leans toward the spec's
-lifecycle model.
+Nothing. All nine steps conform to spec or have their gaps resolved on `aakarsh/improvement`.
 
 ---
 
@@ -318,11 +324,12 @@ lifecycle model.
 | 3 | **Step 2 G1** — slug vs. email `P2002` misattribution | 🟠 Medium (correctness) | No | ✅ Resolved |
 | 4 | **Step 9 G2** — no auto readiness re-check on knowledge change | 🟠 Medium (feature) | No | ✅ Resolved |
 | 5 | **Step 3 G1** — "check your categories" advisory missing | 🟡 Low (UX) | No | ✅ Resolved |
-| 6 | **Step 7 G1+G2** — widget ping telemetry + install-status polling | 🟢 Low (optional) | **Yes** | 🔭 Open |
+| 6 | **Step 7 G1+G2** — widget ping telemetry + install-status polling | 🟢 Low (optional) | **Yes** | ✅ Resolved |
 | 7 | **Step 5 G1** — redirect to `/dashboard/bots` | 🟢 Low (polish) | No | ✅ Resolved |
 
 **Everything not listed above conformed to spec** — notably all of Step 1 (OTP security),
 Step 4 (scoring + dismissible requirements), Step 8 (live chat auth + rate limiting), and
 the confidence-gating core of Step 9. The single-phase architecture is sound; the resolved
-items complete the feedback loops, fix two real bugs and add the UX polish **on top of it**,
-not against it. Only the optional, schema-touching widget telemetry (Step 7) remains.
+items complete the feedback loops, fix two real bugs, add the UX polish and the widget
+telemetry **on top of it**, not against it. Every finding in this audit is now resolved — the
+only schema change was the single `TenantApiKey.widgetSeenAt`/`widgetUrl` migration for Step 7.

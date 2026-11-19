@@ -1,8 +1,14 @@
 const express = require('express');
 const prisma = require('../lib/prisma');
-const { findValidApiKey, shouldTouchLastUsed } = require('../utils/tenantApiKeys');
+const { findValidApiKey, shouldTouchLastUsed, shouldTouchWidgetSeen, sanitizeWidgetUrl } = require('../utils/tenantApiKeys');
 const { handleChat } = require('../services/tenantChat');
 const { endSession } = require('../services/chatSessions');
+const { createIpRateLimiter } = require('../utils/ipRateLimit');
+
+// The widget pings once per page load; this only bounds the key lookup per
+// address (the row write is throttled separately). Generous, because an office
+// or campus behind one NAT can have many legitimate visitors at once.
+const isPingRateLimited = createIpRateLimiter({ name: 'widget-ping', max: 60, windowMs: 10 * 60 * 1000 });
 
 // Public chat endpoint used by the embed widget and customers' own apps:
 //   POST /api/v1/tenant-chat/:slug/chat   header X-Tenant-Api-Key: tk_...
@@ -31,6 +37,7 @@ router.use('/:slug', async (req, res, next) => {
     }
 
     req.tenant = tenant;
+    req.apiKey = key; // the validated key row, so /ping can stamp install telemetry on it
     next();
   } catch (err) {
     next(err);
@@ -38,6 +45,26 @@ router.use('/:slug', async (req, res, next) => {
 });
 
 router.post('/:slug/chat', handleChat);
+
+// The widget pings this once when it loads on a customer's page, so the
+// dashboard can show "widget detected" without waiting for a first chat. Auth is
+// the same slug + X-Tenant-Api-Key as every route here. Best-effort and always
+// 204 for an authenticated caller: a telemetry write must never surface an error
+// to the embed. body { url?: the page it loaded on }; the Referer is the
+// fallback. The row write is throttled (shouldTouchWidgetSeen) so heavy traffic
+// doesn't hammer one key row.
+router.post('/:slug/ping', async (req, res) => {
+  if (await isPingRateLimited(req.ip)) return res.status(429).json({ error: 'Too many requests' });
+  if (shouldTouchWidgetSeen(req.apiKey)) {
+    const widgetUrl = sanitizeWidgetUrl(req.body?.url) || sanitizeWidgetUrl(req.headers.referer);
+    // Keep a previously-recorded page if this ping carried no usable URL.
+    const data = widgetUrl ? { widgetSeenAt: new Date(), widgetUrl } : { widgetSeenAt: new Date() };
+    prisma.tenantApiKey
+      .update({ where: { id: req.apiKey.id }, data })
+      .catch(() => {}); // never let a telemetry write break the widget
+  }
+  res.status(204).end();
+});
 
 // The widget reports its page closing: body { sessionId }. The conversation
 // is summarized now instead of after the idle delay (services/chatSessions.js).

@@ -615,11 +615,27 @@
     }
   });
 
+  // Tell the API the widget loaded, so the dashboard can show "widget detected"
+  // without waiting for a first chat. Best-effort: fire once, never block the UI,
+  // and swallow every error. Only origin + path is sent (no query/hash), so a
+  // page's tokens or PII never leave the site.
+  function pingInstall() {
+    try {
+      fetch(apiBase + '/api/v1/tenant-chat/' + encodeURIComponent(tenantSlug) + '/ping', {
+        method: 'POST',
+        keepalive: true,
+        headers: { 'Content-Type': 'application/json', 'x-tenant-api-key': apiKey },
+        body: JSON.stringify({ url: window.location.origin + window.location.pathname })
+      }).catch(function () {});
+    } catch (e) { /* fetch/keepalive unsupported — the first chat still records use */ }
+  }
+
   function mount() {
     document.body.appendChild(panel);
     document.body.appendChild(launcher);
     applyStaticStrings();
     renderTabs();
+    pingInstall();
   }
 
   if (document.body) {
