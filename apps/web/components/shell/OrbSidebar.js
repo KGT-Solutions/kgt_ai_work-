@@ -22,25 +22,25 @@ const NAV = [
     label: 'Build',
     items: [
       { key: 'knowledge', label: 'Knowledge', icon: 'knowledge', pill: '1 outdated', href: '/knowledge' },
-      { key: 'actions', label: 'Actions', icon: 'actions' },
-      { key: 'testorb', label: 'Test Orb', icon: 'testorb' }
+      { key: 'actions', label: 'Actions', icon: 'actions', href: '/actions' },
+      { key: 'testorb', label: 'Test Orb', icon: 'testorb', href: '/testorb' }
     ]
   },
-  { label: 'Install', items: [{ key: 'install', label: 'Install', icon: 'install' }] },
+  { label: 'Install', items: [{ key: 'install', label: 'Install', icon: 'install', href: '/install' }] },
   {
     label: 'Results',
     items: [
-      { key: 'conversations', label: 'Conversations', icon: 'conversations' },
-      { key: 'tickets', label: 'Tickets', icon: 'tickets', pill: '27' },
-      { key: 'leads', label: 'Leads & bookings', icon: 'leads' },
-      { key: 'usage', label: 'Usage', icon: 'usage' }
+      { key: 'conversations', label: 'Conversations', icon: 'conversations', href: '/conversations' },
+      { key: 'tickets', label: 'Tickets', icon: 'tickets', pill: '27', href: '/tickets' },
+      { key: 'leads', label: 'Leads & bookings', icon: 'leads', href: '/leads' },
+      { key: 'usage', label: 'Usage', icon: 'usage', href: '/usage' }
     ]
   },
   {
     label: 'Settings',
     items: [
       { key: 'team', label: 'Team', icon: 'team' },
-      { key: 'email', label: 'Email', icon: 'email' },
+      { key: 'email', label: 'Email', icon: 'email', href: '/email' },
       { key: 'billing', label: 'Plan & billing', icon: 'billing' }
     ]
   }
