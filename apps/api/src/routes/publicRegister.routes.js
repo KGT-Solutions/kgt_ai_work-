@@ -423,7 +423,7 @@ router.post('/complete', async (req, res) => {
     pagesTrained: pages.length,
     readiness, // { score, level } when the reviewed audit was kept; null while a fresh one runs
     botPreference: botPreference.value,
-    // Signed straight in: the wizard lands the new client on /dashboard.
+    // Signed straight in: the wizard lands the new client on /dashboard/bots.
     token: signClientToken(created.user)
   });
 });

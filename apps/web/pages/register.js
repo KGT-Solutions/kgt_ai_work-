@@ -29,7 +29,7 @@ import TrainingReadinessStep from '../components/signup/TrainingReadinessStep';
 //                         score is advice, not a gate
 //   6. Review & launch  — creates the isolated tenant, its first (hashed) API key and
 //                         the login in one request, then lands the company, signed
-//                         in, on /dashboard.
+//                         in, on /dashboard/bots (where the one-time API key shows).
 
 // Business category drives the tailored knowledge prompts and a tone hint for
 // the bots (mirrors apps/api/src/services/shared/businessCategory.js). `asksFor`
@@ -171,7 +171,9 @@ export default function Register() {
         // say "trained on N of M pages".
         pagesDiscovered: data.pagesDiscovered, pagesTrained: data.pagesTrained
       });
-      router.push('/dashboard');
+      // Land on Test Bots: the first thing to do with a fresh workspace is try the
+      // bots. SignupWelcome there surfaces the one-time API key + embed snippets.
+      router.push('/dashboard/bots');
     } catch (err) {
       setLaunching(false);
       if (err.data?.code === 'EMAIL_NOT_VERIFIED') {

@@ -89,15 +89,16 @@ message on a random-suffix clash is gone. Covered by `test/unit/registerSlugConf
 | Manual / written entries | Supported as document entries | ✅ Match |
 | Draft documents on the server (draft → active) | **No `status` column**; documents live in client state until `/complete`, then created `active` | ✅ By design (single-phase) |
 | Per-document bot scope | `botScope` on `TenantDocument` | ✅ Match |
-| "Check your categories" advisory when all entries share one category | Not present | ⚠️ **Gap (G1, minor UX)** |
+| "Check your categories" advisory when all entries share one category | `KnowledgeUploadStep.js`: a dismissible amber banner when >1 entry and all share one category | ✅ **Resolved (was G1)** |
 
 **Analysis.** Ingestion captures a strong, legally-useful consent record (statement
 *version*, IP, UA, timestamp) — better than the spec's minimum. The absence of
 server-side draft documents is the single-phase model working as intended: there is no
-draft table to reconcile because nothing is persisted until finalize. The only shortfall
-is a **UX advisory (Step 3 G1)**: when every knowledge entry is filed under one category,
-the wizard should show a yellow "your knowledge looks one-dimensional — spread it across
-categories for better coverage" banner. Low priority, cosmetic.
+draft table to reconcile because nothing is persisted until finalize. **Step 3 G1 is now
+resolved**: when more than one entry is present and they all share a single category, the
+wizard's "Your knowledge" card shows a dismissible amber advisory ("All your knowledge is
+filed under X — add a few entries under the other types so both bots have what they need").
+Pure client-side; advice, never a gate.
 
 ---
 
@@ -134,14 +135,17 @@ instantly client-side and the backend runs the identical formula on persist. Cov
 | Dismissed requirements persisted at launch | `/complete` accepts `ignoredRequirements`, applies `recomputeReadiness` before `saveTenantReadiness` | ✅ Match |
 | Finalize rate-limit | `isCompleteRateLimited`: **3 / hour** | ✅ Match |
 | Background jobs kick off on completion | `scheduleTenantAudit` invoked at finalize | ✅ Match |
-| Post-completion routing | `router.push('/dashboard')` | ⚠️ **Gap (G1, minor)** — spec prefers `/dashboard/bots`, mind the API-key banner |
+| Post-completion routing | `router.push('/dashboard/bots')`; the show-once key + embed snippets render there via `SignupWelcome` | ✅ **Resolved (was G1)** |
 
 **Analysis.** Finalization is the heart of the single-phase design and it is correct: the
 tenant, its first API key, all documents, the consent record, and the owner user are
 created in **one transaction**, with `claimVerification` reconciled inside it — so either a
 fully-formed workspace exists or nothing does. There is no window for a partially-created
-tenant. The only nit (**Step 5 G1**) is the landing route; functionally fine, a small
-polish.
+tenant. **Step 5 G1 is resolved**: finalize now lands the new client on `/dashboard/bots`
+(the natural first action is to try the bots), and the show-once API key + embed snippets
+are shown there by a shared `SignupWelcome` component — it consumes the one-time
+sessionStorage handoff on whichever dashboard page loads first (also mounted on
+`/dashboard` as a fallback), so the key still surfaces exactly once despite the new route.
 
 ---
 
@@ -284,15 +288,18 @@ Tenant-scoped, defaults to the `FAQ` category, enforces `roomForDocuments`, and 
 already-answered ticket. `TicketsList.js` adds a per-open-ticket "Add the answer" inline form
 wired to `ws.answerTicket`. Test: `ticketAnswer.test.js`.
 
+**Step 3 G1 — "Check Your Categories" Advisory** *(no migration)*
+`KnowledgeUploadStep.js` shows a dismissible amber advisory in the "Your knowledge" card when
+there is more than one entry and all share a single category, naming the missing categories to
+add. Pure client-side; advice, never a gate.
+
+**Step 5 G1 — Post-Completion Redirect** *(no migration)*
+Finalize now redirects to `/dashboard/bots`. The show-once API key + embed snippets were
+extracted into a shared `SignupWelcome` component rendered on the bots page (and `/dashboard`
+as a fallback); it consumes the one-time sessionStorage handoff on first load, so the key
+still surfaces exactly once. Verified with `next build`.
+
 ### 🔭 Remaining
-
-**Step 3 G1 — "Check Your Categories" Advisory** *(Low, UX, no migration)*
-When all knowledge entries share a single category, render a yellow advisory banner in the
-knowledge step prompting the user to diversify. Pure client-side.
-
-**Step 5 G1 — Post-Completion Redirect** *(Low, polish, no migration)*
-Change the finalize redirect from `/dashboard` to `/dashboard/bots`, carrying the show-once
-API-key banner to the new landing page.
 
 **Step 7 G1 + G2 — Widget Telemetry** *(Low, optional, **requires schema change**)*
 Add `widgetSeenAt` (and optionally `widgetUrl`) to `TenantApiKey`. Expose a lightweight
@@ -310,12 +317,12 @@ lifecycle model.
 | 2 | **Step 9 G1** — "Add the answer" ticket→FAQ loop missing | 🟠 Medium (feature) | No | ✅ Resolved |
 | 3 | **Step 2 G1** — slug vs. email `P2002` misattribution | 🟠 Medium (correctness) | No | ✅ Resolved |
 | 4 | **Step 9 G2** — no auto readiness re-check on knowledge change | 🟠 Medium (feature) | No | ✅ Resolved |
-| 5 | **Step 3 G1** — "check your categories" advisory missing | 🟡 Low (UX) | No | 🔭 Open |
+| 5 | **Step 3 G1** — "check your categories" advisory missing | 🟡 Low (UX) | No | ✅ Resolved |
 | 6 | **Step 7 G1+G2** — widget ping telemetry + install-status polling | 🟢 Low (optional) | **Yes** | 🔭 Open |
-| 7 | **Step 5 G1** — redirect to `/dashboard/bots` | 🟢 Low (polish) | No | 🔭 Open |
+| 7 | **Step 5 G1** — redirect to `/dashboard/bots` | 🟢 Low (polish) | No | ✅ Resolved |
 
 **Everything not listed above conformed to spec** — notably all of Step 1 (OTP security),
 Step 4 (scoring + dismissible requirements), Step 8 (live chat auth + rate limiting), and
 the confidence-gating core of Step 9. The single-phase architecture is sound; the resolved
-items complete the feedback loops and fix two real bugs **on top of it**, not against it. Only
-UX polish (Step 3, Step 5) and the optional widget telemetry (Step 7) remain.
+items complete the feedback loops, fix two real bugs and add the UX polish **on top of it**,
+not against it. Only the optional, schema-touching widget telemetry (Step 7) remains.
