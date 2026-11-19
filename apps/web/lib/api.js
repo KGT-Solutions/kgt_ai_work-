@@ -179,6 +179,10 @@ function workspace(base, auth) {
     getFaqs: () => r('/faqs'),
     regenerateFaqs: () => r('/faqs/regenerate', { method: 'POST' }),
     listTickets: () => r('/tickets'),
+    // "Add the answer": publish an answer to an unanswered ticket as a knowledge
+    // document and mark the ticket resolved. { answer, category?='FAQ', botScope? }
+    // → { ticket: { id, status: 'answered' }, document }.
+    answerTicket: (id, payload) => r(`/tickets/${enc(id)}/answer`, { method: 'POST', body: payload }),
     // Visitors who left an email, with transcript and AI summary: { leads, counts, filters }.
     // botType: 'all' | 'sales' | 'support'; status: 'all' | 'NEW' | 'CONTACTED' — filtered by the API.
     listLeads: ({ botType = 'all', status = 'all' } = {}) => r(`/leads?botType=${enc(botType)}&status=${enc(status)}`),
