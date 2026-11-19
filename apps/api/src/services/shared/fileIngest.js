@@ -29,6 +29,11 @@ const MAX_FILE_BYTES = 10 * 1024 * 1024;           // one document, uploaded or 
 const MAX_ZIP_TOTAL_BYTES = 60 * 1024 * 1024;      // everything inflated from one zip
 const MAX_ZIP_FILES = 40;                          // documents read from one zip
 const MAX_ZIP_ENTRIES = 1000;                      // entries looked at, including skipped ones
+// A .docx is itself a zip of XML parts, inflated in full by mammoth (JSZip)
+// with no limit of its own: a 96 KB file that expanded to 40 MB of XML took
+// 49 s of CPU, and the 10 MB upload cap allowed gigabytes. Every part is
+// inflated under this budget first (assertDocxInflates).
+const MAX_DOCX_INFLATED_BYTES = 25 * 1024 * 1024;
 const DOC_EXTENSIONS = ['.pdf', '.docx', '.txt', '.md', '.markdown'];
 const ACCEPTED_EXTENSIONS = [...DOC_EXTENSIONS, '.zip'];
 
@@ -74,12 +79,66 @@ function sectionsFromMarkdown(text, title) {
   return sections;
 }
 
+const DOCX_UNREADABLE = 'That Word file could not be read — it may be damaged, or an older .doc file. Save it as .docx or PDF and try again.';
+
+/**
+ * Inflate every part of a .docx under a byte budget, BEFORE mammoth sees it,
+ * so a zip bomb costs at most `maxBytes` of inflation instead of gigabytes.
+ * Declared sizes are checked first (no inflation at all for an honest bomb),
+ * then the bytes actually inflated are counted — yauzl's validateEntrySizes
+ * makes a part that inflates past its declared size an error, so a lying
+ * header can't slip through — and each stream is destroyed the moment the
+ * budget is passed. Inflated data is discarded, never buffered.
+ * @throws {FileIngestError} 413 over the budget, 422 unreadable
+ */
+async function assertDocxInflates(buffer, maxBytes = MAX_DOCX_INFLATED_BYTES) {
+  const tooBig = () => new FileIngestError(
+    `That Word file expands to more than ${maxBytes / (1024 * 1024)}MB of content. Split it into smaller files, or upload it as a PDF.`, 413
+  );
+  let zip;
+  try {
+    zip = await openZip(buffer);
+  } catch {
+    throw new FileIngestError(DOCX_UNREADABLE, 422);
+  }
+  let used = 0;
+  let entries = 0;
+  try {
+    await new Promise((resolve, reject) => {
+      zip.on('error', reject);
+      zip.on('end', resolve);
+      zip.on('entry', (entry) => {
+        entries += 1;
+        if (entries > MAX_ZIP_ENTRIES) return reject(new FileIngestError('That Word file has too many internal parts to be a real document.', 413));
+        if (entry.fileName.endsWith('/')) return zip.readEntry(); // a folder: nothing to inflate
+        if (used + entry.uncompressedSize > maxBytes) return reject(tooBig());
+        return zip.openReadStream(entry, (err, stream) => {
+          if (err) return reject(err);
+          stream.on('data', (chunk) => {
+            used += chunk.length;
+            if (used > maxBytes) stream.destroy(tooBig());
+          });
+          stream.on('error', reject);
+          stream.on('end', () => zip.readEntry());
+        });
+      });
+      zip.readEntry();
+    });
+  } catch (err) {
+    if (err instanceof FileIngestError) throw err;
+    throw new FileIngestError(DOCX_UNREADABLE, 422);
+  } finally {
+    zip.close();
+  }
+}
+
 async function docxSections(buffer, title) {
+  await assertDocxInflates(buffer);
   let html;
   try {
     ({ value: html } = await mammoth.convertToHtml({ buffer }));
   } catch {
-    throw new FileIngestError('That Word file could not be read — it may be damaged, or an older .doc file. Save it as .docx or PDF and try again.', 422);
+    throw new FileIngestError(DOCX_UNREADABLE, 422);
   }
   const $ = cheerio.load(html || '');
   const sections = [];
@@ -274,6 +333,6 @@ async function ingestUpload(buffer, filename) {
 }
 
 module.exports = {
-  ingestUpload, ingestDocument, sectionsFromMarkdown, FileIngestError,
-  ACCEPTED_EXTENSIONS, MAX_UPLOAD_BYTES, MAX_FILE_BYTES, MAX_ZIP_FILES, MAX_ZIP_TOTAL_BYTES
+  ingestUpload, ingestDocument, sectionsFromMarkdown, assertDocxInflates, FileIngestError,
+  ACCEPTED_EXTENSIONS, MAX_UPLOAD_BYTES, MAX_FILE_BYTES, MAX_ZIP_FILES, MAX_ZIP_TOTAL_BYTES, MAX_DOCX_INFLATED_BYTES
 };

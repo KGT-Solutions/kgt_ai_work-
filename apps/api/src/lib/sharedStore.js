@@ -67,7 +67,10 @@ const keys = {
   // Short-term memory of the product cards shown in a chat session's last
   // product turn, so a follow-up like "link as well" can carry them forward
   // (services/tenantChat.js). Scoped by tenant + session; expires on its own.
-  productContext: (tenantId, sessionId) => `pc:${tenantId}:${sessionId}`
+  productContext: (tenantId, sessionId) => `pc:${tenantId}:${sessionId}`,
+  // Bumped by every Theme Studio write, so each replica's cached widget theme
+  // (services/branding.js publicTheme) is dropped on the next request.
+  brandingGeneration: (tenantId) => `bg:${tenantId}`
 };
 
 /**

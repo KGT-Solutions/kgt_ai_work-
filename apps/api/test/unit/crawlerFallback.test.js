@@ -17,10 +17,11 @@ const SHELL = '<html><head><title>App</title></head><body><div id="root"></div><
 const rendered = (title, extra = '') =>
   `<html><head><title>${title}</title></head><body><main><h1>${title}</h1><p>${LONG_P}</p>${extra}</main></body></html>`;
 
+// A real fetch Response: fetchSafe reads the body as a byte-capped stream.
 function htmlResponse(body, { status = 200, contentType = 'text/html', location } = {}) {
-  const headers = new Map([['content-type', contentType]]);
-  if (location) headers.set('location', location);
-  return { ok: status >= 200 && status < 300, status, headers: { get: (k) => headers.get(k.toLowerCase()) || null }, text: async () => body };
+  const headers = { 'content-type': contentType };
+  if (location) headers.location = location;
+  return new Response(body, { status, headers });
 }
 
 function makeRenderer(routes) {

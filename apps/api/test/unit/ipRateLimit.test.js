@@ -60,6 +60,29 @@ describe('createIpRateLimiter', () => {
     assert.throws(() => createIpRateLimiter({ max: 1, windowMs: 60000 }), /requires a unique `name`/);
   });
 
+  // Review #2: an IPv6 client typically holds a whole /64 (2^64 addresses) and
+  // could rotate through it so no single address ever hit the limit.
+  test('IPv6 addresses in the same /64 share one bucket', async () => {
+    const isLimited = createIpRateLimiter({ name: 't6', max: 2, windowMs: 60000 });
+    assert.equal(await isLimited('2001:db8:aa:bb::1'), false);
+    assert.equal(await isLimited('2001:db8:aa:bb:dead:beef:0:2'), false);
+    assert.equal(await isLimited('2001:db8:aa:bb:ffff::3'), true, 'a third address in the /64 is the third hit');
+    assert.equal(await isLimited('2001:db8:aa:cc::1'), false, 'the next /64 has its own budget');
+  });
+
+  test('an IPv4-mapped IPv6 address counts as its IPv4 address', async () => {
+    const isLimited = createIpRateLimiter({ name: 't7', max: 1, windowMs: 60000 });
+    assert.equal(await isLimited('203.0.113.9'), false);
+    assert.equal(await isLimited('::ffff:203.0.113.9'), true);
+  });
+
+  test('non-IP subjects (an email) are unchanged', async () => {
+    const isLimited = createIpRateLimiter({ name: 't8', max: 1, windowMs: 60000 });
+    assert.equal(await isLimited('ana@acme.com'), false);
+    assert.equal(await isLimited('bob@acme.com'), false);
+    assert.equal(await isLimited('ana@acme.com'), true);
+  });
+
   test('hits older than the window stop counting', async () => {
     const isLimited = createIpRateLimiter({ name: 't4', max: 2, windowMs: 40 });
     assert.equal(await isLimited('7.7.7.7'), false);

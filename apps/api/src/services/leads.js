@@ -3,6 +3,7 @@ const { sendMail, isProduction, maskAddress } = require('./mailer');
 const { generateAnswer, isLlmConfigured, formatAttempts } = require('../engine/llmClient');
 const { logUsage } = require('../engine/usageTracking');
 const { notifyLeadCaptured } = require('./teamAlerts');
+const { syncLeadToCrm } = require('./crm/zohoSync');
 
 // Leads: a visitor who left an email in a bot conversation
 // (domains/handoffActions.js sets contactCaptured; services/tenantChat.js
@@ -390,8 +391,23 @@ async function alertTeamWithSummary({ tenant, lead, summarized }) {
  */
 async function captureLead({ tenant, botType, sessionId, email, alertTeam = true }) {
   const where = { tenantId: tenant.id, botType, sessionId, email };
-  const existing = await prisma.lead.findFirst({ where });
-  const lead = existing || await prisma.lead.create({ data: where });
+  // Find-or-create without a race: the unique index on these four fields
+  // (schema.prisma Lead) decides, not the find. Two simultaneous captures used
+  // to both find nothing and both insert — two leads, two team alerts, two CRM
+  // syncs. Now the loser's create fails with P2002 and it adopts the winner's
+  // row as `existing`, so everything below runs once.
+  let existing = await prisma.lead.findFirst({ where });
+  let lead = existing;
+  if (!lead) {
+    try {
+      lead = await prisma.lead.create({ data: where });
+    } catch (err) {
+      if (err?.code !== 'P2002') throw err;
+      existing = await prisma.lead.findFirst({ where });
+      if (!existing) throw err; // the winning row is gone too: surface the conflict
+      lead = existing;
+    }
+  }
 
   if (!existing || confirmationCooldownMs() === 0) {
     // Started right away, but not awaited: the chat reply shouldn't wait on an
@@ -406,6 +422,15 @@ async function captureLead({ tenant, botType, sessionId, email, alertTeam = true
   timers.delete(lead.id);
   const summarized = runSummary(lead.id);
   if (!existing && alertTeam) alertTeamWithSummary({ tenant, lead, summarized });
+  // Mirror a new lead into the tenant's CRM (Zoho), once the summary is ready
+  // so the CRM note carries it. Fire-and-forget and self-contained: it never
+  // blocks or breaks the chat reply, and no-ops unless a CRM is connected
+  // (services/crm/zohoSync.js). A repeat visitor is de-duplicated inside Zoho.
+  if (!existing) {
+    Promise.resolve(summarized)
+      .then((sum) => syncLeadToCrm({ tenant, lead, summary: sum?.chatSummary || null }))
+      .catch((err) => console.warn(`[leads] CRM sync dispatch failed (lead ${lead.id}): ${err.message}`));
+  }
   return lead;
 }
 

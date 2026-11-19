@@ -3,7 +3,13 @@ const assert = require('node:assert/strict');
 const { assertProdSafety, jwtSecretProblem, ProdSafetyError, MIN_SECRET_LENGTH } = require('../../src/utils/assertProdSafety');
 
 const REAL_SECRET = '9f2c4e7a1b8d3f6e0a5c2b9d7e4f1a3c'; // the shape `openssl rand -hex 16` prints
-const SAFE = { DEPLOY_ENV: 'production', JWT_SECRET: REAL_SECRET, CORS_ORIGINS: 'https://hub.example.com' };
+const REAL_ENC_KEY = '3a7d1f9c5e2b8406d7c1a9f4e6b2083d'; // a distinct real secret for ENCRYPTION_KEY
+// A fully valid production config: every gate below starts from this and breaks
+// exactly one thing, so a failure is unambiguous.
+const SAFE = {
+  DEPLOY_ENV: 'production', JWT_SECRET: REAL_SECRET, CORS_ORIGINS: 'https://hub.example.com',
+  ENCRYPTION_KEY: REAL_ENC_KEY, SHARED_STORE: 'redis', REDIS_URL: 'redis://redis:6379'
+};
 
 describe('assertProdSafety — fail loudly on insecure config, but only when DEPLOY_ENV=production', () => {
   test('throws if DEV_BYPASS_AUTH is enabled when DEPLOY_ENV=production', () => {
@@ -30,12 +36,35 @@ describe('assertProdSafety — fail loudly on insecure config, but only when DEP
     assert.throws(() => assertProdSafety({ ...SAFE, CORS_ORIGINS: '  ' }), /CORS_ORIGINS must list/);
   });
 
+  test('throws if ENCRYPTION_KEY is missing, placeholder or too weak when DEPLOY_ENV=production', () => {
+    assert.throws(() => assertProdSafety({ ...SAFE, ENCRYPTION_KEY: undefined }), /ENCRYPTION_KEY must be set.*because it is not set/);
+    assert.throws(() => assertProdSafety({ ...SAFE, ENCRYPTION_KEY: 'change-me' }), /ENCRYPTION_KEY must be set/);
+    assert.throws(() => assertProdSafety({ ...SAFE, ENCRYPTION_KEY: 'short1!' }), /ENCRYPTION_KEY must be set/);
+  });
+
+  test('never prints the ENCRYPTION_KEY it rejected', () => {
+    const weak = 'tiny-key-9';
+    assert.throws(() => assertProdSafety({ ...SAFE, ENCRYPTION_KEY: weak }), (e) => !e.message.includes(weak));
+  });
+
+  test('requires SHARED_STORE=redis (with REDIS_URL) in production unless a single replica is declared', () => {
+    // The default/in-process store is rejected when more than one replica runs.
+    assert.throws(() => assertProdSafety({ ...SAFE, SHARED_STORE: 'memory' }), /SHARED_STORE must be "redis"/);
+    assert.throws(() => assertProdSafety({ ...SAFE, SHARED_STORE: undefined }), /SHARED_STORE must be "redis"/);
+    // redis selected but no connection string is its own distinct problem.
+    assert.throws(() => assertProdSafety({ ...SAFE, REDIS_URL: undefined }), /SHARED_STORE=redis requires REDIS_URL/);
+    // A deliberate single-container deployment may opt out of Redis entirely.
+    assert.doesNotThrow(() => assertProdSafety({ ...SAFE, SHARED_STORE: 'memory', REDIS_URL: undefined, API_REPLICAS: '1' }));
+  });
+
   test('reports every problem in one error, with a fix for each and the env-file reload hint', () => {
     let err;
     try { assertProdSafety({ DEPLOY_ENV: 'production', JWT_SECRET: 'dev-secret-change-me', DEV_BYPASS_AUTH: 'true' }); } catch (e) { err = e; }
     assert.ok(err instanceof ProdSafetyError);
-    assert.deepEqual(err.problems.map((p) => p.key), ['DEV_BYPASS_AUTH', 'JWT_SECRET', 'CORS_ORIGINS']);
-    assert.match(err.message, /3 configuration problems/);
+    // Everything missing at once: bypass on, placeholder JWT, no ENCRYPTION_KEY,
+    // no CORS_ORIGINS, and the default (memory) shared store with >1 replica.
+    assert.deepEqual(err.problems.map((p) => p.key), ['DEV_BYPASS_AUTH', 'JWT_SECRET', 'ENCRYPTION_KEY', 'CORS_ORIGINS', 'SHARED_STORE']);
+    assert.match(err.message, /5 configuration problems/);
     assert.match(err.message, /openssl rand -hex 32/);
     assert.match(err.message, /docker compose --env-file \.env\.docker up -d api/);
   });

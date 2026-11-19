@@ -90,13 +90,30 @@ export default function BotSandbox({ ws, tenant }) {
   // question is typed in (apps/api/src/engine/language.js).
   const [lang, setLang] = useState('en');
   const inputRef = useRef(null);
+  const fileRef = useRef(null);
+  // Photo attachment staged for the next message (base64 data URL) + any error.
+  const [image, setImage] = useState(null);
+  const [imgError, setImgError] = useState('');
+  // Voice: '' | 'listening' | 'transcribing', plus the recorder/stream refs.
+  const [voiceStatus, setVoiceStatus] = useState('');
+  const recorderRef = useRef(null);
+  const chunksRef = useRef([]);
+  const streamRef = useRef(null);
+  // Resolved after mount (never during SSR) to avoid a hydration mismatch.
+  const [voiceSupported, setVoiceSupported] = useState(false);
+  useEffect(() => { setVoiceSupported(!!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder)); }, []);
   const { faqs, generating, regenerate } = useStarterFaqs(ws);
 
-  const ask = async (bot, query) => {
-    setThreads((t) => ({ ...t, [bot]: [...t[bot], { role: 'user', text: query }] }));
+  const ask = async (bot, query, img) => {
+    setThreads((t) => ({ ...t, [bot]: [...t[bot], { role: 'user', text: query, image: img || null }] }));
     setPending((p) => ({ ...p, [bot]: true }));
     try {
-      const data = await ws.chat({ query, botType: bot, sessionId: sessions[bot], language: lang });
+      // query only when non-empty (an image can stand in for it); image as the
+      // base64 data URL the backend guardrail + chat pipeline expect.
+      const payload = { botType: bot, sessionId: sessions[bot], language: lang };
+      if (query) payload.query = query;
+      if (img) payload.image = img;
+      const data = await ws.chat(payload);
       setSessions((s) => ({ ...s, [bot]: data.sessionId }));
       setThreads((t) => ({ ...t, [bot]: [...t[bot], { role: 'bot', text: data.answer, meta: data }] }));
     } catch (err) {
@@ -108,11 +125,69 @@ export default function BotSandbox({ ws, tenant }) {
 
   const send = (text) => {
     const query = String(text ?? input).trim();
-    if (!query) return;
+    const img = image;
+    if (!query && !img) return; // an image on its own is a valid message
     setInput('');
+    setImage(null);
+    setImgError('');
     const bots = target === 'both' ? ['support', 'sales'] : [target];
-    bots.forEach((b) => ask(b, query));
+    bots.forEach((b) => ask(b, query, img));
     inputRef.current?.focus();
+  };
+
+  // ── Photo attachment: validate (type + size) and read into a data URL.
+  const handleFile = (file) => {
+    if (!file) return;
+    if (!['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(file.type)) { setImgError('Please choose a PNG, JPEG, WebP or GIF image.'); return; }
+    if (file.size > 5 * 1024 * 1024) { setImgError('That image is too large (max 5MB).'); return; }
+    const reader = new FileReader();
+    reader.onload = () => { setImage(String(reader.result || '')); setImgError(''); };
+    reader.onerror = () => setImgError('Could not read that image.');
+    reader.readAsDataURL(file);
+  };
+
+  // ── Voice: record via MediaRecorder, transcribe via ws.transcribe (Groq
+  // Whisper), then populate the input (editable) and switch the UI to the
+  // spoken language so the bot replies in it.
+  const stopTracks = () => { if (streamRef.current) { streamRef.current.getTracks().forEach((t) => t.stop()); streamRef.current = null; } };
+  const onRecordingStop = async () => {
+    const type = (recorderRef.current && recorderRef.current.mimeType) || 'audio/webm';
+    stopTracks();
+    const blob = new Blob(chunksRef.current, { type });
+    chunksRef.current = []; recorderRef.current = null;
+    if (!blob.size) { setVoiceStatus(''); return; }
+    setVoiceStatus('transcribing');
+    try {
+      const ext = type.includes('ogg') ? 'ogg' : type.includes('mp4') ? 'mp4' : 'webm';
+      const data = await ws.transcribe(blob, `voice.${ext}`);
+      if (data && (data.language === 'en' || data.language === 'hi')) setLang(data.language);
+      setInput((prev) => (prev ? `${prev} ${data?.text || ''}`.trim() : (data?.text || '')));
+      inputRef.current?.focus();
+    } catch (err) {
+      setImgError(err.message || 'Could not transcribe that. Please try again.');
+    } finally {
+      setVoiceStatus('');
+    }
+  };
+  const startRecording = async () => {
+    if (voiceStatus) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream; chunksRef.current = [];
+      const rec = new MediaRecorder(stream);
+      rec.addEventListener('dataavailable', (e) => { if (e.data && e.data.size) chunksRef.current.push(e.data); });
+      rec.addEventListener('stop', onRecordingStop);
+      recorderRef.current = rec; rec.start();
+      setVoiceStatus('listening');
+    } catch {
+      stopTracks();
+      setImgError('Microphone access was blocked.');
+    }
+  };
+  const stopRecording = () => {
+    const rec = recorderRef.current;
+    if (!rec || voiceStatus !== 'listening') return;
+    try { rec.stop(); } catch { stopTracks(); setVoiceStatus(''); }
   };
 
   const busy = (target === 'both' ? pending.support || pending.sales : pending[target]);
@@ -152,17 +227,54 @@ export default function BotSandbox({ ws, tenant }) {
         })}
       </div>
 
-      <Card className={cx('p-3', view !== 'chat' && 'hidden')}>
+      <Card className={cx('p-3', view !== 'chat' && 'hidden')}
+        onDragOver={(e) => { e.preventDefault(); }}
+        onDrop={(e) => { e.preventDefault(); handleFile(e.dataTransfer.files?.[0]); }}>
+        {/* Staged photo preview, recording/transcribing status, or an error. */}
+        {(image || imgError || voiceStatus) && (
+          <div className="mb-2 flex items-center gap-3 rounded-lg border border-white/10 bg-panel-2/60 px-3 py-2">
+            {image ? (
+              <>
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={image} alt="" className="h-10 w-10 shrink-0 rounded-md object-cover" />
+                <span className="min-w-0 flex-1 truncate text-xs text-fg-2">Image attached</span>
+                <button type="button" onClick={() => { setImage(null); setImgError(''); }} aria-label="Remove image"
+                  className="shrink-0 rounded-md px-2 py-1 text-xs text-fg-3 transition hover:text-fg">× Remove</button>
+              </>
+            ) : voiceStatus ? (
+              <span className="flex min-w-0 flex-1 items-center gap-2 text-xs text-fg-2">
+                <span className={cx('h-2 w-2 rounded-full', voiceStatus === 'listening' ? 'animate-pulse bg-rose-400' : 'bg-brand-400')} />
+                {voiceStatus === 'listening' ? 'Listening… tap the mic to stop' : 'Transcribing…'}
+              </span>
+            ) : (
+              <span className="min-w-0 flex-1 text-xs text-rose-300">{imgError}</span>
+            )}
+          </div>
+        )}
         <form onSubmit={(e) => { e.preventDefault(); send(); }} className="flex flex-col gap-3 sm:flex-row sm:items-center">
           {!single && (
             <Segmented label="Send to" value={target} onChange={setTarget}
               options={[{ value: 'both', label: 'Both' }, { value: 'support', label: 'Support' }, { value: 'sales', label: 'Sales' }]} />
           )}
-          <input ref={inputRef} value={input} onChange={(e) => setInput(e.target.value)} aria-label="Message"
-            placeholder={target === 'both' ? 'Ask both bots the same question…' : `Ask the ${target === 'support' ? 'Support' : 'Sales'} Bot…`}
-            className="h-10 min-w-0 flex-1 rounded-lg border border-white/10 bg-panel-2/80 px-3.5 text-sm text-fg placeholder:text-fg-3 focus:border-brand-400/60 focus:outline-none focus:ring-4 focus:ring-brand-400/10" />
+          <div className="flex min-w-0 flex-1 items-center gap-2">
+            <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/webp,image/gif" className="hidden"
+              onChange={(e) => { handleFile(e.target.files?.[0]); e.target.value = ''; }} />
+            <button type="button" onClick={() => fileRef.current?.click()} disabled={!!voiceStatus} aria-label="Attach image" title="Attach image"
+              className="flex h-10 shrink-0 items-center rounded-lg border border-white/10 bg-panel-2/80 px-2.5 text-base transition hover:border-brand-400/60 disabled:opacity-40">📎</button>
+            {voiceSupported && (
+              <button type="button" onClick={() => (voiceStatus === 'listening' ? stopRecording() : startRecording())}
+                disabled={voiceStatus === 'transcribing'} aria-label="Voice input" title="Voice input"
+                aria-pressed={voiceStatus === 'listening'}
+                className={cx('flex h-10 shrink-0 items-center rounded-lg border px-2.5 text-base transition disabled:opacity-40',
+                  voiceStatus === 'listening' ? 'animate-pulse border-rose-400/60 bg-rose-500/15' : 'border-white/10 bg-panel-2/80 hover:border-brand-400/60')}>
+                {voiceStatus === 'listening' ? '⏹' : '🎤'}</button>
+            )}
+            <input ref={inputRef} value={input} onChange={(e) => setInput(e.target.value)} aria-label="Message"
+              placeholder={voiceStatus === 'listening' ? 'Listening…' : voiceStatus === 'transcribing' ? 'Transcribing…' : target === 'both' ? 'Ask both bots the same question…' : `Ask the ${target === 'support' ? 'Support' : 'Sales'} Bot…`}
+              className="h-10 min-w-0 flex-1 rounded-lg border border-white/10 bg-panel-2/80 px-3.5 text-sm text-fg placeholder:text-fg-3 focus:border-brand-400/60 focus:outline-none focus:ring-4 focus:ring-brand-400/10" />
+          </div>
           <div className="flex gap-2">
-            <Button type="submit" variant="primary" disabled={!input.trim() || busy}><IconSend className="h-4 w-4" />Send</Button>
+            <Button type="submit" variant="primary" disabled={(!input.trim() && !image) || busy || !!voiceStatus}><IconSend className="h-4 w-4" />Send</Button>
             <Button onClick={reset} variant="ghost" disabled={!threads.support.length && !threads.sales.length}>Clear</Button>
           </div>
         </form>
@@ -230,7 +342,13 @@ function BotPane({ bot, tenant, thread, pending, starters, tailored, generating,
         )}
         {thread.map((m, i) => (
           m.role === 'user' ? (
-            <div key={i} className="ml-auto max-w-[85%] rounded-2xl rounded-br-md bg-white/[0.08] px-3.5 py-2 text-sm text-fg">{m.text}</div>
+            <div key={i} className="ml-auto max-w-[85%] rounded-2xl rounded-br-md bg-white/[0.08] px-3.5 py-2 text-sm text-fg">
+              {m.image && (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={m.image} alt="" className="mb-1.5 max-h-40 max-w-full rounded-lg" />
+              )}
+              {m.text}
+            </div>
           ) : (
             <div key={i} className="max-w-[92%]">
               <div className={cx('rounded-2xl rounded-bl-md border px-3.5 py-2.5 text-sm leading-relaxed',

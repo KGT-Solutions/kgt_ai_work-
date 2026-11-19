@@ -33,6 +33,9 @@
 const fs = require('fs');
 const http = require('http');
 const net = require('net');
+// Re-checks each address as the proxy dials it, so a host that passed
+// checkHost can't be re-resolved to an internal IP in between (DNS rebinding).
+const { publicOnlyLookup } = require('./netGuard');
 
 const LAUNCH_ARGS = [
   '--no-sandbox',
@@ -187,7 +190,7 @@ function startEgressProxy(hostAllowed) {
     const headers = { ...req.headers };
     for (const h of HOP_BY_HOP) delete headers[h];
     const upstream = http.request(
-      { host: target.hostname, port: target.port || 80, method: req.method, path: `${target.pathname}${target.search}`, headers },
+      { host: target.hostname, port: target.port || 80, method: req.method, path: `${target.pathname}${target.search}`, headers, lookup: publicOnlyLookup },
       (up) => {
         res.writeHead(up.statusCode, up.headers);
         up.pipe(res);
@@ -208,7 +211,7 @@ function startEgressProxy(hostAllowed) {
       clientSocket.end('HTTP/1.1 403 Forbidden\r\n\r\n');
       return;
     }
-    const upstream = net.connect(target.port, target.host, () => {
+    const upstream = net.connect({ port: target.port, host: target.host, lookup: publicOnlyLookup }, () => {
       clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
       if (head && head.length) upstream.write(head);
       upstream.pipe(clientSocket);

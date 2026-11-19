@@ -84,11 +84,13 @@ describe('POST /tenant-chat/:slug/ping', () => {
     assert.equal(keys[0].widgetSeenAt, null);
   });
 
-  test('an unknown tenant slug is a 404', async () => {
+  test('an unknown tenant slug is rejected with the same 401 as a bad key (no slug probing)', async () => {
     const res = await fetch(`${base}/tenant-chat/nope/ping`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-tenant-api-key': PLAINTEXT }, body: '{}'
     });
-    assert.equal(res.status, 404);
+    // The chat middleware answers unknown-slug, inactive-tenant and bad-key
+    // identically (401), so the response never reveals which slugs exist.
+    assert.equal(res.status, 401);
   });
 
   test('the write is throttled: a recent widgetSeenAt is not overwritten', async () => {

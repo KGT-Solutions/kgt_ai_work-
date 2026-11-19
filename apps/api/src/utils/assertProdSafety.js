@@ -59,6 +59,20 @@ function jwtSecretProblem(raw) {
   return null;
 }
 
+/**
+ * Why an ENCRYPTION_KEY is unusable in production, or null if it's fine. The
+ * acceptance rules are the same as a JWT secret (set, unpadded, not a known
+ * placeholder, long and varied enough). ENCRYPTION_KEY is the master secret for
+ * the AES-256-GCM encryption of Zoho CRM refresh tokens and SMTP passwords at
+ * rest (utils/encryption.js); a missing or weak one otherwise surfaces only as a
+ * decrypt failure on the first secret read, so it must stop boot instead.
+ * @param {string|undefined} raw
+ * @returns {string|null}
+ */
+function encryptionKeyProblem(raw) {
+  return jwtSecretProblem(raw);
+}
+
 class ProdSafetyError extends Error {
   constructor(problems) {
     super(
@@ -93,6 +107,16 @@ function assertProdSafety(env = process.env) {
       message: `JWT_SECRET must be set to a real secret when DEPLOY_ENV=production — rejected because ${secretProblem}`,
       fix: `set JWT_SECRET to a random value of ${MIN_SECRET_LENGTH}+ characters, e.g. the output of: openssl rand -hex 32 ` +
         '(changing it signs every user out once)'
+    });
+  }
+  const encProblem = encryptionKeyProblem(env.ENCRYPTION_KEY);
+  if (encProblem) {
+    problems.push({
+      key: 'ENCRYPTION_KEY',
+      message: 'ENCRYPTION_KEY must be set to a real secret when DEPLOY_ENV=production — it encrypts Zoho CRM ' +
+        `tokens and SMTP passwords at rest — rejected because ${encProblem}`,
+      fix: `set ENCRYPTION_KEY to a random value of ${MIN_SECRET_LENGTH}+ characters, e.g. the output of: openssl rand -hex 32 ` +
+        '(rotating it makes existing encrypted secrets unreadable — re-save them after a change)'
     });
   }
   // Without it the dashboard APIs only accept localhost origins, so the
@@ -130,7 +154,28 @@ function assertProdSafety(env = process.env) {
     });
   }
 
+  // Multi-replica correctness: in production the shared state (rate limits,
+  // cache invalidation, background-job locks) must live in Redis, or several
+  // API replicas silently disagree with each other (lib/sharedStore.js). A
+  // deliberate single-container deployment opts out with API_REPLICAS=1.
+  const sharedStore = String(env.SHARED_STORE || '').trim().toLowerCase();
+  const singleReplica = String(env.API_REPLICAS || '').trim() === '1';
+  if (sharedStore !== 'redis' && !singleReplica) {
+    problems.push({
+      key: 'SHARED_STORE',
+      message: 'SHARED_STORE must be "redis" when DEPLOY_ENV=production — with more than one API replica, in-process ' +
+        'rate limits, cache invalidation and background-job locks do not agree across replicas',
+      fix: 'set SHARED_STORE=redis and REDIS_URL (e.g. redis://redis:6379); for a deliberate single container set API_REPLICAS=1'
+    });
+  } else if (sharedStore === 'redis' && !String(env.REDIS_URL || '').trim()) {
+    problems.push({
+      key: 'REDIS_URL',
+      message: 'SHARED_STORE=redis requires REDIS_URL when DEPLOY_ENV=production',
+      fix: 'set REDIS_URL, e.g. redis://redis:6379'
+    });
+  }
+
   if (problems.length) throw new ProdSafetyError(problems);
 }
 
-module.exports = { assertProdSafety, jwtSecretProblem, ProdSafetyError, MIN_SECRET_LENGTH };
+module.exports = { assertProdSafety, jwtSecretProblem, encryptionKeyProblem, ProdSafetyError, MIN_SECRET_LENGTH };
