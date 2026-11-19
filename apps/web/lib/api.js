@@ -207,6 +207,9 @@ function workspace(base, auth) {
     // Readiness audit: run now (saved), or read the saved one: { report, stale, running }
     runReadinessAudit: () => r('/preflight-audit', { method: 'POST' }),
     getReadiness: () => r('/readiness'),
+    // Mark gap items "Optional / Not applicable" (keys like "sales:pricing") and
+    // recompute the saved report's scores — no AI call. Returns the updated report.
+    setIgnoredRequirements: (ignoredRequirements) => r('/readiness/ignored', { method: 'PATCH', body: { ignoredRequirements } }),
     // How the documents split between the bots: { totals, documents: [{ id, title, botScope, sections, counts }] }
     getKnowledgeDistribution: () => r('/knowledge/distribution'),
     // Which bots the company deploys: 'support' | 'sales' | 'both'

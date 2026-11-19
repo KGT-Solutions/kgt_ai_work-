@@ -1,15 +1,16 @@
 import { useRef, useState } from 'react';
 import { Button, Card, Spinner, cx } from '../ui';
-import { IconAlert, IconArrowLeft, IconArrowRight, IconBolt, IconCheck, IconShield, IconUpload } from '../ui/icons';
+import { IconAlert, IconArrowLeft, IconArrowRight, IconBolt, IconCheck, IconChevronDown, IconShield, IconUpload } from '../ui/icons';
 import { api } from '../../lib/api';
 import { scoreTone } from '../workspace/BotReadinessPanel';
 
 // Signup wizard: the training screen shown automatically after the Knowledge
 // step (the parent runs the audit as the visitor arrives). At a glance:
 //   - one big, colour-coded training % per deployed bot (red / amber / green);
-//   - "Path to 100% training": plain-English requirements per bot, each with
-//     an Upload button. An upload is parsed (POST /register/analyze-file),
-//     added to the knowledge, and the check re-runs, so the % updates here.
+//   - "Path to 100% training": plain-English requirements per bot. Each explains
+//     why it matters (what it is / why / how the bot uses it), has an Upload
+//     button (parsed → added → the check re-runs), and an "Optional / Not
+//     applicable" dismiss that drops it from the score instantly (lib/readiness.js).
 // The visitor continues once the check has finished (or failed — an outage
 // never blocks signup); a low score is advice, not a gate.
 
@@ -47,8 +48,48 @@ function ScoreCard({ bot, data, checking }) {
   );
 }
 
-// One requirement with its own upload button.
-function Requirement({ bot, text, onUpload, busy, result }) {
+// An enriched, dismissible requirement: the ask, a "why this matters" disclosure
+// (what it is / why / how the bot uses it), an Upload button, and a dismiss.
+function RequirementItem({ item, botName, busy, result, onUpload, onDismiss }) {
+  const [open, setOpen] = useState(false);
+  const inputRef = useRef(null);
+  return (
+    <li className="rounded-xl border border-white/[0.07] bg-white/[0.02]">
+      <div className="flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <p className="text-[13.5px] leading-relaxed text-fg">
+            <span className="font-medium">To raise your {botName}:</span> {item.text.replace(/\.$/, '')}.
+          </p>
+          <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open}
+            className="mt-1 inline-flex items-center gap-1 text-xs font-medium text-brand-300 hover:text-brand-200">
+            <IconChevronDown className={cx('h-3.5 w-3.5 transition', open && 'rotate-180')} />Why this matters
+          </button>
+          {result && <p className={cx('mt-1 text-xs', result.ok ? 'text-emerald-300' : 'text-rose-300')}>{result.text}</p>}
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <input ref={inputRef} type="file" multiple accept={ACCEPT} className="hidden" onChange={(e) => { onUpload(e.target.files); e.target.value = ''; }} />
+          <Button size="sm" onClick={() => inputRef.current?.click()} loading={busy}>
+            {!busy && <IconUpload className="h-4 w-4" />}Upload
+          </Button>
+          <button type="button" onClick={onDismiss}
+            className="rounded-lg border border-white/10 px-2.5 py-1.5 text-xs font-medium text-fg-3 transition hover:bg-white/[0.04] hover:text-fg-2">
+            Not applicable
+          </button>
+        </div>
+      </div>
+      {open && (
+        <dl className="grid gap-2 border-t border-white/[0.06] px-4 py-3 text-[12.5px] sm:grid-cols-3">
+          <div><dt className="font-medium text-fg-2">What it is</dt><dd className="mt-0.5 text-fg-3">{item.description}</dd></div>
+          <div><dt className="font-medium text-fg-2">Why it matters</dt><dd className="mt-0.5 text-fg-3">{item.importance}</dd></div>
+          <div><dt className="font-medium text-fg-2">How your bot uses it</dt><dd className="mt-0.5 text-fg-3">{item.botUtility}</dd></div>
+        </dl>
+      )}
+    </li>
+  );
+}
+
+// Legacy fallback: a report with no requirementItems (saved before this feature).
+function LegacyRequirement({ bot, text, onUpload, busy, result }) {
   const inputRef = useRef(null);
   const meta = BOTS[bot];
   return (
@@ -67,12 +108,13 @@ function Requirement({ bot, text, onUpload, busy, result }) {
   );
 }
 
-export default function TrainingReadinessStep({ audit, botsDeployed, onAddPages, onRecheck, onBack, onNext }) {
+export default function TrainingReadinessStep({ audit, botsDeployed, ignored, onToggleIgnored, onAddPages, onRecheck, onBack, onNext }) {
   const [uploading, setUploading] = useState(null); // requirement key
   const [results, setResults] = useState({});
   const report = audit.report;
   const checking = audit.loading;
   const bots = botsDeployed.filter((b) => report?.bots?.[b]);
+  const ignoredSet = ignored instanceof Set ? ignored : new Set(ignored || []);
 
   const upload = async (key, files) => {
     const list = Array.from(files || []);
@@ -98,13 +140,19 @@ export default function TrainingReadinessStep({ audit, botsDeployed, onAddPages,
     setResults((r) => ({ ...r, [key]: { ok: added > 0, text: added ? `${notes.join(' · ')} — re-checking your training…` : notes.join(' · ') } }));
   };
 
-  // Plain-English requirements; if the model gave none but the bot isn't at
-  // 100%, its gaps stand in.
-  const path = bots.flatMap((bot) => {
+  // Enriched items (current reports) vs. the legacy string list (old reports).
+  const allItems = bots.flatMap((bot) => (report?.bots?.[bot]?.requirementItems || []).map((it) => ({ ...it, bot })));
+  const hasItems = allItems.length > 0;
+  const active = allItems.filter((it) => !ignoredSet.has(it.key));
+  const dismissed = allItems.filter((it) => ignoredSet.has(it.key));
+
+  // Legacy fallback path (no requirementItems on the report).
+  const legacyPath = hasItems ? [] : bots.flatMap((bot) => {
     const b = report.bots[bot];
     const items = b.requirements.length ? b.requirements : b.score < 100 ? b.criticalGaps.map((g) => `add content covering this: ${g}`) : [];
     return items.map((text, i) => ({ key: `${bot}:${i}:${text}`, bot, text }));
   });
+  const nothingLeft = hasItems ? active.length === 0 : legacyPath.length === 0;
 
   return (
     <div className="mx-auto max-w-3xl space-y-5">
@@ -145,13 +193,45 @@ export default function TrainingReadinessStep({ audit, botsDeployed, onAddPages,
             <div className="border-b border-white/[0.06] px-5 py-4">
               <h3 className="text-sm font-semibold text-fg">Path to 100% training</h3>
               <p className="mt-0.5 text-[13px] text-fg-3">
-                {path.length ? 'Add these and your training goes up. Upload right here — we re-check automatically.' : 'Nothing is missing. Your bots are fully trained.'}
+                {nothingLeft
+                  ? 'Nothing is missing. Your bots are fully trained.'
+                  : 'Add these to raise your training. Upload right here (we re-check automatically), or mark anything that doesn’t apply to your business as Optional.'}
               </p>
             </div>
-            {path.length > 0 ? (
+
+            {hasItems ? (
+              <>
+                {active.length > 0 ? (
+                  <ul className="space-y-2 p-4">
+                    {active.map((item) => (
+                      <RequirementItem key={item.key} item={item} botName={BOTS[item.bot].name}
+                        busy={uploading === item.key} result={results[item.key]}
+                        onUpload={(files) => upload(item.key, files)} onDismiss={() => onToggleIgnored(item.key)} />
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="flex items-center gap-2 p-5 text-sm text-emerald-200"><IconCheck className="h-4 w-4" />
+                    Every remaining item is handled or dismissed — your bots are ready.
+                  </p>
+                )}
+                {dismissed.length > 0 && (
+                  <div className="border-t border-white/[0.06] p-4">
+                    <p className="mb-2 text-[11px] font-medium uppercase tracking-[0.1em] text-fg-3">Dismissed as not applicable ({dismissed.length})</p>
+                    <ul className="space-y-1.5">
+                      {dismissed.map((it) => (
+                        <li key={it.key} className="flex items-center justify-between gap-3 rounded-lg border border-dashed border-white/10 px-3 py-2">
+                          <span className="truncate text-[13px] text-fg-3 line-through">{it.text}</span>
+                          <button type="button" onClick={() => onToggleIgnored(it.key)} className="shrink-0 text-xs font-medium text-brand-300 hover:text-brand-200">Undo</button>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </>
+            ) : legacyPath.length > 0 ? (
               <ul className="space-y-2 p-4">
-                {path.map((item) => (
-                  <Requirement key={item.key} bot={item.bot} text={item.text} busy={uploading === item.key}
+                {legacyPath.map((item) => (
+                  <LegacyRequirement key={item.key} bot={item.bot} text={item.text} busy={uploading === item.key}
                     result={results[item.key]} onUpload={(files) => upload(item.key, files)} />
                 ))}
               </ul>

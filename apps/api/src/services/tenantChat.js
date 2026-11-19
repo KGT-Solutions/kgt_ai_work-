@@ -11,6 +11,7 @@ const { trackLeadActivity } = require('./leads');
 const { recordTurn } = require('./chatSessions');
 const { notifyIfNeedsAttention } = require('./teamAlerts');
 const { extractStatedEmail } = require('../domains/handoffActions');
+const { randomUUID } = require('crypto');
 
 // One chat turn for one tenant. Shared by every way a tenant's bots are
 // reached — the embed widget (API key), the client dashboard (client JWT)
@@ -99,15 +100,28 @@ async function runTenantChat({ tenant, body, sandbox = false }) {
 
   // A sessionId from another tenant simply isn't found, and a new session starts.
   const sessionId = typeof body?.sessionId === 'string' ? body.sessionId : null;
-  let session = sessionId
-    ? await prisma.chatSession.findFirst({ where: { id: sessionId, tenantId: tenant.id } })
-    : null;
-  if (!session) {
-    const externalUserId = typeof body?.externalUserId === 'string' ? body.externalUserId.slice(0, 200) : null;
-    session = await prisma.chatSession.create({ data: { tenantId: tenant.id, externalUserId } });
+  // The dashboard's test chat (sandbox) must leave no trace: it never creates a
+  // chat_sessions row and never writes chat_messages, so an owner trying their
+  // own bots can't inflate analytics, pollute real transcripts, or raise live
+  // tickets (the ticket guard is in engine/ticketing.js, keyed on ctx.sandbox).
+  // The full engine still runs for a faithful test — only the writes are
+  // skipped. A synthetic, unpersisted session id keeps the product-context
+  // carryover (a TTL cache, not the DB) consistent within a single test.
+  let session;
+  if (sandbox) {
+    session = { id: sessionId || `sandbox-${randomUUID()}` };
+  } else {
+    session = sessionId
+      ? await prisma.chatSession.findFirst({ where: { id: sessionId, tenantId: tenant.id } })
+      : null;
+    if (!session) {
+      const externalUserId = typeof body?.externalUserId === 'string' ? body.externalUserId.slice(0, 200) : null;
+      session = await prisma.chatSession.create({ data: { tenantId: tenant.id, externalUserId } });
+    }
   }
 
-  const recentTurns = await prisma.chatMessage.findMany({
+  // A sandbox session has no persisted messages, so there is no history to read.
+  const recentTurns = sandbox ? [] : await prisma.chatMessage.findMany({
     where: { sessionId: session.id },
     orderBy: { createdAt: 'desc' },
     take: 6
@@ -119,6 +133,7 @@ async function runTenantChat({ tenant, body, sandbox = false }) {
     ctx: {
       tenantId: tenant.id,
       sessionId: session.id, // tickets and an email left later are tied to this conversation
+      sandbox, // a dashboard test chat: engine/ticketing.js skips filing real tickets
       recentTurns: recentTurns.reverse().map((m) => ({ role: m.role, content: m.content })),
       language // pins the reply language (engine/promptBuilder.js)
     }
@@ -127,7 +142,8 @@ async function runTenantChat({ tenant, body, sandbox = false }) {
   // Earlier questions in this conversation (so chips don't repeat them) and
   // this bot's FAQs, read before this turn's messages are written.
   const [askedRows, faqRow] = await Promise.all([
-    prisma.chatMessage.findMany({
+    // No persisted messages in a sandbox session — skip the (always empty) read.
+    sandbox ? Promise.resolve([]) : prisma.chatMessage.findMany({
       where: { sessionId: session.id, role: 'user' }, orderBy: { createdAt: 'desc' }, take: 50, select: { content: true }
     }),
     prisma.tenantFaq.findUnique({
@@ -177,21 +193,25 @@ async function runTenantChat({ tenant, body, sandbox = false }) {
   if (correctedScope) reply.answer = catalogLeadIn(botType, language);
   const finalAnswered = !!answered || correctedScope;
 
-  await prisma.chatMessage.createMany({
-    data: [
-      { sessionId: session.id, role: 'user', content: query, botType },
-      { sessionId: session.id, role: 'assistant', content: reply.answer, confidence: confidence ?? null, botType, answered: finalAnswered }
-    ]
-  });
-  // After the messages are written, so the lead's transcript and the alert include this turn.
-  await recordTurn({ session, botType });
+  // Sandbox test chats persist nothing: no messages, no session bookkeeping,
+  // no lead, no alert — see the sandbox note above.
+  if (!sandbox) {
+    await prisma.chatMessage.createMany({
+      data: [
+        { sessionId: session.id, role: 'user', content: query, botType },
+        { sessionId: session.id, role: 'assistant', content: reply.answer, confidence: confidence ?? null, botType, answered: finalAnswered }
+      ]
+    });
+    // After the messages are written, so the lead's transcript and the alert include this turn.
+    await recordTurn({ session, botType });
+  }
   // Team alerts are for real visitors, not the team testing its own bots.
   const alertTeam = !sandbox;
   // The email the handoff action took, or one stated in a message that went
   // to the knowledge base ("my email is ana@x.com — what's the price for 40
   // seats?"): the question is answered and the lead saved either way.
   const leadEmail = reply.contactCaptured ? contactEmail : extractStatedEmail(query);
-  await trackLeadActivity({ tenant, botType, sessionId: session.id, contactEmail: leadEmail, alertTeam });
+  if (!sandbox) await trackLeadActivity({ tenant, botType, sessionId: session.id, contactEmail: leadEmail, alertTeam });
   // A handoff or an answer below 25% confidence: tell the team now (throttled; not awaited).
   // A query we answered from the catalog instead is not a miss, so don't alert on it.
   if (alertTeam && !correctedScope) notifyIfNeedsAttention({ tenant, botType, sessionId: session.id, query, result });

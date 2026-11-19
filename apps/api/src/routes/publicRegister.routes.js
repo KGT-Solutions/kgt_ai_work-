@@ -19,8 +19,16 @@ const { ingestUpload, FileIngestError, MAX_UPLOAD_BYTES } = require('../services
 
 class UnverifiedEmail extends Error {}
 const {
-  auditKnowledge, rememberWizardAudit, takeWizardAudit, saveTenantReadiness, scheduleTenantAudit, contentHash
+  auditKnowledge, recomputeReadiness, rememberWizardAudit, takeWizardAudit, saveTenantReadiness, scheduleTenantAudit, contentHash
 } = require('../services/botAuditor');
+
+// Gap items the visitor marked "Optional / Not applicable" in the wizard, kept
+// in the saved report so the launched dashboard opens with the boosted scores.
+// Soft-sanitised: a list of short strings, deduped, capped — never a hard error.
+function parseIgnoredRequirements(value) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map((v) => String(v || '').trim()).filter((v) => v && v.length <= 100))].slice(0, 50);
+}
 
 // Public self-serve registration wizard backend (apps/admin-web/pages/register.js).
 // Deliberately unauthenticated — that's the entire point of self-serve — so
@@ -117,6 +125,17 @@ function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || ''));
 }
 
+// Which unique index a Prisma P2002 violated, normalized to field-ish strings.
+// Postgres/Prisma may report either an array of field names (e.g. ['slug']) or a
+// constraint name (e.g. 'Tenant_slug_key') — both are matched by the /slug/i and
+// /email/i tests at the /complete catch. Empty when Prisma gave us nothing to go on.
+function violatedTargets(e) {
+  const t = e?.meta?.target;
+  if (Array.isArray(t)) return t.map(String);
+  if (typeof t === 'string') return [t];
+  return [];
+}
+
 // Priority of a reviewed page when the wizard sends more than the cap. Genuine
 // content directories (/products/, /collections/, /pages/, /blogs/) rank
 // highest, then pages whose URL/title reads like real content, then everything
@@ -177,6 +196,21 @@ function normalizePages(rawPages) {
   return { ok: true, pages, discovered };
 }
 
+// A crawl-only knowledge set — every page came from the website scan, nothing was
+// uploaded — trains the Sales Bot well (products, pricing, pitch) but starves the
+// Support Bot (manuals, FAQs, hours, returns), which drags a "both" readiness down
+// to the Support Bot's low floor. When the caller did NOT explicitly choose a
+// preference, default such signups to the Sales Bot so onboarding reflects the
+// product catalog; Support stays a one-click toggle in the dashboard afterwards.
+// An explicit choice (including "both") is always respected.
+// @param {*} rawValue req.body.botPreference as sent; @param {string} parsedValue its validated value;
+// @param {Array<{sourceUrl?: string|null}>} pages the normalized pages.
+function inferBotPreference(rawValue, parsedValue, pages) {
+  const explicit = rawValue !== undefined && rawValue !== null && String(rawValue).trim() !== '';
+  if (!explicit && pages.length > 0 && pages.every((p) => p.sourceUrl)) return 'sales';
+  return parsedValue;
+}
+
 // Pre-flight readiness audit of the pages in the wizard, before anything is
 // created (services/botAuditor.js). One LLM call per request on an
 // unauthenticated route, so it's rate-limited per IP; the report is kept
@@ -191,12 +225,17 @@ router.post('/preflight-audit', async (req, res) => {
 
   const company = {
     name: String(req.body?.companyName || '').trim().slice(0, 120) || 'this company',
-    industryLabel: String(req.body?.industryLabel || '').trim().slice(0, 120) || 'business'
+    industryLabel: String(req.body?.industryLabel || '').trim().slice(0, 120) || 'business',
+    // Soft input on this unauthenticated route: an unknown value simply yields no
+    // category steering (parseBusinessCategory → null), never a 400.
+    businessCategory: parseBusinessCategory(req.body?.businessCategory).value || null
   };
   // botPreference: which bots will be deployed (the wizard's "Choose your AI workforce" step).
   const botPreference = parseBotPreference(req.body?.botPreference);
   if (!botPreference.ok) return res.status(400).json({ error: botPreference.error });
-  const report = await auditKnowledge({ company, documents: normalized.pages, botPreference: botPreference.value });
+  // Pure crawl with no explicit choice → audit as the Sales Bot (see inferBotPreference).
+  const effectiveBotPreference = inferBotPreference(req.body?.botPreference, botPreference.value, normalized.pages);
+  const report = await auditKnowledge({ company, documents: normalized.pages, botPreference: effectiveBotPreference });
   await rememberWizardAudit(report);
   res.json(report);
 });
@@ -325,6 +364,7 @@ router.post('/complete', async (req, res) => {
   if (!botPreference.ok) return refuse(400, { error: botPreference.error });
   const businessCategory = parseBusinessCategory(req.body?.businessCategory); // ecommerce | saas | ... | null
   if (!businessCategory.ok) return refuse(400, { error: businessCategory.error });
+  const ignoredRequirements = parseIgnoredRequirements(req.body?.ignoredRequirements);
 
   if (!companyName) return refuse(400, { error: 'companyName is required' });
   if (!isValidEmail(email)) return refuse(400, { error: 'A valid business email is required' });
@@ -342,6 +382,12 @@ router.post('/complete', async (req, res) => {
   const { pages } = normalized;
   if (!pages.length) return refuse(400, { error: 'None of the submitted pages had both a title and content' });
 
+  // A pure website crawl with no explicit choice is provisioned as a Sales Bot
+  // (see inferBotPreference), so the tenant launches on its strong catalog score
+  // rather than the Support Bot's empty one. Matches what /preflight-audit scored,
+  // so the reviewed wizard report is reused below rather than re-run.
+  const effectiveBotPreference = inferBotPreference(req.body?.botPreference, botPreference.value, pages);
+
   // Crawled content (pages carrying a sourceUrl) can only be saved alongside
   // the crawl authorization, which is recorded as a TenantConsent row.
   const consent = req.body?.websiteConsent;
@@ -352,35 +398,55 @@ router.post('/complete', async (req, res) => {
 
   // Tenant, its first API key, documents, crawl consent and the client's
   // login are created together or not at all.
+  //
+  // makeSlug appends a random suffix, so a slug clash is our own rare collision,
+  // NOT a duplicate account — regenerate it and retry a few times rather than
+  // mislabeling it "an account already exists". An email/signupEmail unique
+  // violation IS a duplicate account and maps to ACCOUNT_EXISTS. P2002.meta.target
+  // tells the two apart (violatedTargets); the slug is re-rolled on each attempt
+  // because makeSlug runs fresh inside the transaction below.
+  const MAX_SLUG_RETRIES = 3;
   let created;
-  try {
-    created = await prisma.$transaction(async (tx) => {
-      // The email must have been verified by OTP (POST /api/v1/public/auth/verify-otp).
-      // Claimed here, inside the transaction: consumed only if the account is
-      // created, and one verification creates one account.
-      if (!(await claimVerification(tx, email, req.body?.emailVerificationToken))) throw new UnverifiedEmail();
-      const tenant = await tx.tenant.create({
-        data: { name: companyName, slug: makeSlug(companyName), industryLabel, signupEmail: email, botPreference: botPreference.value, businessCategory: businessCategory.value }
-      });
-      const { key } = await issueApiKey(tx, tenant.id, 'Website widget');
-      await tx.tenantDocument.createMany({ data: pages.map((p) => ({ tenantId: tenant.id, ...p })) });
-      if (consentHost) {
-        await tx.tenantConsent.create({
-          data: { tenantId: tenant.id, ...crawlConsentRecord({ url: String(consent.url), email, req }) }
+  for (let attempt = 0; attempt <= MAX_SLUG_RETRIES && !created; attempt++) {
+    try {
+      created = await prisma.$transaction(async (tx) => {
+        // The email must have been verified by OTP (POST /api/v1/public/auth/verify-otp).
+        // Claimed here, inside the transaction: consumed only if the account is
+        // created, and one verification creates one account.
+        if (!(await claimVerification(tx, email, req.body?.emailVerificationToken))) throw new UnverifiedEmail();
+        const tenant = await tx.tenant.create({
+          data: { name: companyName, slug: makeSlug(companyName), industryLabel, signupEmail: email, botPreference: effectiveBotPreference, businessCategory: businessCategory.value }
         });
-      }
-      const user = await tx.tenantUser.create({
-        data: { tenantId: tenant.id, email, name: contactName, passwordHash: hashPassword(password), lastLoginAt: new Date() }
+        const { key } = await issueApiKey(tx, tenant.id, 'Website widget');
+        await tx.tenantDocument.createMany({ data: pages.map((p) => ({ tenantId: tenant.id, ...p })) });
+        if (consentHost) {
+          await tx.tenantConsent.create({
+            data: { tenantId: tenant.id, ...crawlConsentRecord({ url: String(consent.url), email, req }) }
+          });
+        }
+        const user = await tx.tenantUser.create({
+          data: { tenantId: tenant.id, email, name: contactName, passwordHash: hashPassword(password), lastLoginAt: new Date() }
+        });
+        return { tenant, apiKey: key, user };
       });
-      return { tenant, apiKey: key, user };
-    });
-  } catch (e) {
-    if (e instanceof UnverifiedEmail) {
-      return refuse(403, { error: 'Verify your email address first — request a code and enter it in the wizard.', code: 'EMAIL_NOT_VERIFIED' });
+    } catch (e) {
+      if (e instanceof UnverifiedEmail) {
+        return refuse(403, { error: 'Verify your email address first — request a code and enter it in the wizard.', code: 'EMAIL_NOT_VERIFIED' });
+      }
+      if (e.code === 'P2002') {
+        const targets = violatedTargets(e);
+        const slugOnly = targets.length > 0 && targets.every((t) => /slug/i.test(t));
+        // Our random slug clashed: re-roll and retry (astronomically unlikely to loop).
+        if (slugOnly && attempt < MAX_SLUG_RETRIES) continue;
+        if (slugOnly) {
+          return refuse(503, { error: 'Could not allocate a unique workspace address. Please try again.' });
+        }
+        // An email/signupEmail duplicate (or a same-email race) — or an unknown
+        // unique index, which we conservatively treat as an existing account.
+        return refuse(409, { error: ACCOUNT_EXISTS });
+      }
+      throw e;
     }
-    // Two signups racing on the same email: the unique index wins.
-    if (e.code === 'P2002') return refuse(409, { error: ACCOUNT_EXISTS });
-    throw e;
   }
   console.log(`[register] account created for ${maskAddress(email)} (tenant ${created.tenant.slug})`);
   // No invalidateTenantKnowledge call needed — this tenant's knowledge
@@ -398,7 +464,10 @@ router.post('/complete', async (req, res) => {
   // The readiness report the visitor reviewed in the wizard, if it was for
   // exactly these pages; otherwise (skipped, edited after, or a restart in
   // between) a fresh audit runs in the background.
-  const reviewed = await takeWizardAudit(contentHash(pages, botPreference.value));
+  const reviewedRaw = await takeWizardAudit(contentHash(pages, effectiveBotPreference));
+  // Apply the visitor's dismissals so the saved report (and the dashboard) opens
+  // with the boosted scores; recompute is pure, so no second audit is paid for.
+  const reviewed = reviewedRaw && ignoredRequirements.length ? recomputeReadiness(reviewedRaw, ignoredRequirements) : reviewedRaw;
   let readiness = null;
   if (reviewed) {
     readiness = { score: reviewed.readinessScore, level: reviewed.readinessLevel };
@@ -431,6 +500,8 @@ router.post('/complete', async (req, res) => {
 // Exposed for unit tests only — attaching to the router object does not change
 // the Express mount (app.use still receives the router).
 router.normalizePages = normalizePages;
+router.inferBotPreference = inferBotPreference;
+router.violatedTargets = violatedTargets;
 router.MAX_PAGES_ON_COMPLETE = MAX_PAGES_ON_COMPLETE;
 
 module.exports = router;

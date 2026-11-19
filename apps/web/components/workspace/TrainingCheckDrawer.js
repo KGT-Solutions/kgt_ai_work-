@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Button, Spinner, cx } from '../ui';
 import { IconAlert, IconChevronDown, IconSpark } from '../ui/icons';
 import BotReadinessPanel, { scoreTone } from './BotReadinessPanel';
+import { applyIgnoredRequirements } from '../../lib/readiness';
 
 // On-demand training check, embedded where knowledge is managed (the signup
 // wizard's Knowledge step, the dashboard Documents page and Overview).
@@ -53,10 +54,24 @@ export function WorkspaceTrainingCheck({ ws, refreshKey = 0, title }) {
     }
   };
 
-  return <TrainingCheckDrawer report={state.report} stale={state.stale} loading={busy || state.running} error={error} onRun={run} title={title} />;
+  // Dismiss / restore a gap item: recompute instantly (optimistic), then persist
+  // and reconcile with the server's recomputed report. No AI call.
+  const toggleIgnored = async (key) => {
+    const set = new Set(state.report?.ignoredRequirements || []);
+    if (set.has(key)) set.delete(key); else set.add(key);
+    setState((s) => ({ ...s, report: applyIgnoredRequirements(s.report, set) }));
+    try {
+      const report = await ws.setIgnoredRequirements([...set]);
+      setState((s) => ({ ...s, report }));
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
+  return <TrainingCheckDrawer report={state.report} stale={state.stale} loading={busy || state.running} error={error} onRun={run} onToggleIgnored={toggleIgnored} title={title} />;
 }
 
-export default function TrainingCheckDrawer({ report, loading, error, stale, onRun, onOpen, defaultOpen = false, title = 'Bot training' }) {
+export default function TrainingCheckDrawer({ report, loading, error, stale, onRun, onToggleIgnored, onOpen, defaultOpen = false, title = 'Bot training' }) {
   const [open, setOpen] = useState(defaultOpen);
   // A check that just started or finished opens the drawer.
   useEffect(() => { if (loading) setOpen(true); }, [loading]);
@@ -118,7 +133,7 @@ export default function TrainingCheckDrawer({ report, loading, error, stale, onR
                 <IconAlert className="mt-0.5 h-4 w-4 shrink-0" />{error}
               </p>
             ) : (
-              <BotReadinessPanel title="Training readiness" report={report} loading={loading} error={error} stale={stale} onRun={run} />
+              <BotReadinessPanel title="Training readiness" report={report} loading={loading} error={error} stale={stale} onRun={run} onToggleIgnored={onToggleIgnored} />
             )}
             <div className="mt-2 flex justify-end">
               <button type="button" onClick={() => setOpen(false)} className="text-xs font-medium text-fg-3 hover:text-fg-2">Close</button>

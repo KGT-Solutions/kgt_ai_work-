@@ -399,6 +399,132 @@ function cleanText(str) {
   return String(str || '').replace(/\s+/g, ' ').trim();
 }
 
+// ---------------------------------------------------------------------
+// Schema.org JSON-LD extraction. Modern storefronts, SaaS sites, clinics and
+// service businesses put their authoritative facts — product prices, FAQ
+// answers, opening hours, contact details — in <script type="application/ld+json">
+// blocks, which STRIP_SELECTORS removes. We parse them FIRST (before the strip in
+// extractPage) and fold the useful schemas into Markdown so that data lands in
+// TenantDocument and is chunked, retrieved and audited like any other content.
+// Everything here is defensive: malformed JSON, unexpected shapes and missing
+// fields are skipped, never thrown.
+// ---------------------------------------------------------------------
+
+const STRUCTURED_CAP = 16000;      // keep structured data from dominating a page / blowing MAX_CONTENT_LEN
+const STRUCTURED_ITEM_LIMIT = 300; // max product/service rows pulled from one page's JSON-LD
+
+const ldTypes = (node) => [].concat(node['@type'] || []).map((t) => String(t).toLowerCase());
+
+// A JSON-LD value -> plain text. Handles strings/numbers, arrays, and the common
+// object wrappers ({name}, {@value}, {text}); strips any HTML inside answer text.
+function ldText(value) {
+  if (value == null) return '';
+  if (typeof value === 'string' || typeof value === 'number') return cleanText(String(value).replace(/<[^>]+>/g, ' '));
+  if (Array.isArray(value)) return value.map(ldText).filter(Boolean).join(', ');
+  if (typeof value === 'object') return cleanText(String(value.name ?? value['@value'] ?? value.text ?? '').replace(/<[^>]+>/g, ' '));
+  return '';
+}
+
+function ldPrice(node) {
+  for (const offer of [].concat(node.offers || [])) {
+    if (!offer || typeof offer !== 'object') continue;
+    const price = offer.price ?? offer.lowPrice ?? offer.highPrice;
+    if (price != null && String(price).trim() !== '') return `${offer.priceCurrency || node.priceCurrency || ''} ${price}`.trim();
+  }
+  return '';
+}
+
+function ldHours(node) {
+  const raw = node.openingHours ?? node.openingHoursSpecification;
+  if (!raw) return '';
+  return [].concat(raw).map((s) => {
+    if (typeof s === 'string') return s;
+    if (s && typeof s === 'object') {
+      const day = [].concat(s.dayOfWeek || []).map(ldText).filter(Boolean).join(', ');
+      const span = s.opens && s.closes ? `${s.opens}-${s.closes}` : '';
+      return [day, span].filter(Boolean).join(' ');
+    }
+    return '';
+  }).filter(Boolean).join('; ');
+}
+
+// Flattens every JSON-LD node in the document (including @graph and arrays).
+function jsonLdNodes($) {
+  const out = [];
+  $('script[type="application/ld+json"]').each((_, el) => {
+    const raw = ($(el).text() || '').trim();
+    if (!raw) return;
+    let data;
+    try { data = JSON.parse(raw); } catch { return; } // malformed block: ignore
+    const visit = (node) => {
+      if (!node || typeof node !== 'object') return;
+      if (Array.isArray(node)) { node.forEach(visit); return; }
+      if (Array.isArray(node['@graph'])) node['@graph'].forEach(visit);
+      if (node['@type']) out.push(node);
+    };
+    visit(data);
+  });
+  return out;
+}
+
+function pushQuestion(faqs, question, answerSource) {
+  const q = ldText(question);
+  if (!q) return;
+  const answer = ldText(answerSource?.text ?? answerSource);
+  faqs.push(answer ? `**Q: ${q}**\n${answer}` : `**Q: ${q}**`);
+}
+
+/** Useful Schema.org facts from a page's JSON-LD, as Markdown `## ` sections (or ''). */
+function structuredMarkdown($) {
+  const nodes = jsonLdNodes($);
+  if (!nodes.length) return '';
+  const products = []; const apps = []; const services = []; const faqs = []; const orgs = [];
+
+  for (const node of nodes) {
+    const types = ldTypes(node);
+    const is = (t) => types.includes(t);
+    if (is('product')) {
+      const name = ldText(node.name);
+      if (name) {
+        const bits = [name, ldPrice(node) && `— ${ldPrice(node)}`, ldText(node.brand) && `(brand: ${ldText(node.brand)})`, ldText(node.sku) && `[SKU ${ldText(node.sku)}]`].filter(Boolean).join(' ');
+        const desc = ldText(node.description);
+        products.push(desc ? `${bits}: ${desc}` : bits);
+      }
+    } else if (is('faqpage') || is('qapage')) {
+      for (const q of [].concat(node.mainEntity || [])) pushQuestion(faqs, q?.name, q?.acceptedAnswer);
+    } else if (is('question')) {
+      pushQuestion(faqs, node.name, node.acceptedAnswer);
+    } else if (is('softwareapplication')) {
+      const name = ldText(node.name);
+      if (name) {
+        const bits = [name, ldPrice(node) && `— ${ldPrice(node)}`, ldText(node.applicationCategory) && `(${ldText(node.applicationCategory)})`, ldText(node.operatingSystem) && `[${ldText(node.operatingSystem)}]`].filter(Boolean).join(' ');
+        const desc = ldText(node.description);
+        apps.push(desc ? `${bits}: ${desc}` : bits);
+      }
+    } else if (is('service')) {
+      const name = ldText(node.name);
+      if (name) { const bits = [name, ldPrice(node) && `— ${ldPrice(node)}`].filter(Boolean).join(' '); const desc = ldText(node.description); services.push(desc ? `${bits}: ${desc}` : bits); }
+    } else if (is('organization') || is('localbusiness') || is('store') || types.some((t) => t.includes('business'))) {
+      const parts = [];
+      for (const [field, value] of [['Name', ldText(node.name)], ['Phone', ldText(node.telephone)], ['Email', ldText(node.email)], ['Address', ldText(node.address)], ['Hours', ldHours(node)]]) {
+        if (value) parts.push(`${field}: ${value}`);
+      }
+      const desc = ldText(node.description); if (desc) parts.push(desc);
+      if (parts.length) orgs.push(parts.join('\n'));
+    }
+  }
+
+  const sections = [];
+  if (orgs.length) sections.push(`## Company details\n${orgs.slice(0, 10).join('\n\n')}`);
+  if (products.length) sections.push(`## Products\n${products.slice(0, STRUCTURED_ITEM_LIMIT).map((p) => `- ${p}`).join('\n')}`);
+  if (apps.length) sections.push(`## Product and plan details\n${apps.slice(0, STRUCTURED_ITEM_LIMIT).map((p) => `- ${p}`).join('\n')}`);
+  if (services.length) sections.push(`## Services\n${services.slice(0, STRUCTURED_ITEM_LIMIT).map((s) => `- ${s}`).join('\n')}`);
+  if (faqs.length) sections.push(`## Frequently asked questions\n${faqs.slice(0, 100).join('\n\n')}`);
+
+  const md = sections.join('\n\n');
+  return md.length > STRUCTURED_CAP ? md.slice(0, STRUCTURED_CAP) : md;
+}
+
 /**
  * @param {string} html
  * @param {URL} pageUrl
@@ -418,6 +544,10 @@ function extractPage(html, pageUrl) {
     const text = cleanText($(el).text());
     if (href) links.push({ href, text });
   });
+
+  // Parse Schema.org JSON-LD BEFORE the strip removes <script> tags — this is the
+  // only place that authoritative product/FAQ/business data lives on many sites.
+  const structured = structuredMarkdown($);
 
   $(STRIP_SELECTORS).remove();
   $('*')
@@ -457,6 +587,11 @@ function extractPage(html, pageUrl) {
   // Default: the entire stripped <body>. No word-count gate here — a short
   // product/spec page is still real content and must not be dropped.
   if (!markdown) markdown = sectionsToMarkdown($, $('body'));
+
+  // Fold in the JSON-LD facts as their own `## ` sections, so parseIntoChunks
+  // makes them independently retrievable (and classifyChunk scopes them: FAQ ->
+  // support, product/price -> sales). Appended, so visible page prose leads.
+  if (structured) markdown = markdown ? `${markdown}\n\n${structured}` : structured;
 
   const wordCount = countWords(markdown);
   // Link density = discovered links per content word. A thin index/listing page

@@ -245,6 +245,20 @@ function EntryRow({ page, onChange }) {
       </button>
       {open && (
         <div className="space-y-2 border-t border-white/[0.06] p-3">
+          {/* What was ingested, at a glance: category · source · size. */}
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-fg-3">
+            <span>{categoryLabel(page.category)}</span>
+            <span aria-hidden="true">·</span>
+            {page.url ? (
+              <a href={page.url} target="_blank" rel="noopener noreferrer" className="inline-flex max-w-full items-center gap-1 truncate text-brand-300 hover:text-brand-200 hover:underline">
+                <IconGlobe className="h-3 w-3 shrink-0" /><span className="truncate">{page.url}</span>
+              </a>
+            ) : (
+              <span className="truncate">{page.sourceFile || 'Written by you'}</span>
+            )}
+            <span aria-hidden="true">·</span>
+            <span>{(page.content || '').length.toLocaleString()} characters</span>
+          </div>
           <Input value={page.title} onChange={(e) => onChange({ title: e.target.value })} placeholder="Title, e.g. Shipping & returns" aria-label="Entry title" />
           <Textarea value={page.content} onChange={(e) => onChange({ content: e.target.value })} className="font-mono text-[12.5px]" aria-label="Entry content"
             placeholder={'## A question or topic\nThe answer, in plain words.\n\n## Another topic\n…'} />
