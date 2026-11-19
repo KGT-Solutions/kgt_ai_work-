@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Badge, Button, Card, Checkbox, Input, Select, Spinner, Textarea, cx } from '../ui';
 import { IconAlert, IconArrowLeft, IconArrowRight, IconCheck, IconChevronDown, IconDocs, IconGlobe, IconPencil, IconUpload, IconX } from '../ui/icons';
 import { api } from '../../lib/api';
-import { DOC_CATEGORIES, categoryLabel } from '../../lib/documentCategories';
+import { DOC_CATEGORIES, DEFAULT_CATEGORY, categoryLabel } from '../../lib/documentCategories';
 import { BOT_SCOPES, DEFAULT_BOT_SCOPE } from '../../lib/botScopes';
 
 // Signup wizard: the knowledge the bots train on, in one compact card.
@@ -33,8 +33,12 @@ export default function KnowledgeUploadStep({
   // Advisory only: when every entry is filed under one category, the knowledge is
   // one-dimensional and the readiness audit will score low on the missing pillars.
   // Nudge the user to spread it — never a gate, and dismissed per session.
-  const categoryIds = new Set(live.map((p) => p.category).filter(Boolean));
-  const oneDimensional = live.length > 1 && categoryIds.size === 1;
+  // Based on entries that actually have content (a blank "Write an entry" row or a
+  // half-filled page must not trigger or distort the advice); an entry with no
+  // category counts as the default one, matching what the backend would store.
+  const filled = live.filter((p) => p.title?.trim() && p.content?.trim());
+  const categoryIds = new Set(filled.map((p) => p.category || DEFAULT_CATEGORY));
+  const oneDimensional = filled.length > 1 && categoryIds.size === 1;
   const soleCategory = oneDimensional ? [...categoryIds][0] : null;
   const otherCategoryLabels = oneDimensional
     ? DOC_CATEGORIES.filter((c) => c.id !== soleCategory).map((c) => c.short).join(' or ')

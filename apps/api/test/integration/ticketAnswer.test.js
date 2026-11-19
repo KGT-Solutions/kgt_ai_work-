@@ -39,7 +39,15 @@ before(async () => {
       }
     },
     supportTicket: {
-      update: async ({ where, data }) => Object.assign(tickets.find((t) => t.id === where.id), data)
+      // Atomic claim: flips to answered only if still open. The read + write are
+      // synchronous within one call, so a concurrent caller sees the flipped status
+      // and gets count 0 — exactly what the row lock does in Postgres.
+      updateMany: async ({ where, data }) => {
+        const t = tickets.find((x) => x.id === where.id && x.tenantId === where.tenantId && x.status === where.status);
+        if (!t) return { count: 0 };
+        Object.assign(t, data);
+        return { count: 1 };
+      }
     }
   });
 
@@ -123,6 +131,18 @@ describe('POST /tickets/:id/answer', () => {
     const res = await answer('done-1', { answer: 'again' });
     assert.equal(res.status, 409);
     assert.equal(docs.length, 0);
+  });
+
+  test('concurrent double-submit answers the ticket exactly once — no duplicate document', async () => {
+    const [a, b] = await Promise.all([
+      answer('open-1', { answer: 'first attempt' }),
+      answer('open-1', { answer: 'second attempt' })
+    ]);
+    // Exactly one wins (201) and the other is refused (409) — never two 201s.
+    assert.deepEqual([a.status, b.status].sort(), [201, 409]);
+    assert.equal(docs.length, 1, 'only one FAQ document is created from one ticket');
+    assert.equal(tickets.find((t) => t.id === 'open-1').status, 'answered');
+    assert.equal(auditMock.mock.callCount(), 1, 'the re-audit is scheduled once, by the winner');
   });
 
   test('a missing ticket is a 404', async () => {

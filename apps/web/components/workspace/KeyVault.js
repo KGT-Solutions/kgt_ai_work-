@@ -10,9 +10,11 @@ import EmbedSnippets from './EmbedSnippets';
 // before we know.
 const INSTALL_POLL_MS = 30_000;
 
-function InstallStatus({ ws }) {
+function InstallStatus({ ws, refreshKey }) {
   const [status, setStatus] = useState(null);
 
+  // refreshKey changes when a key is issued or revoked: re-run so polling resumes
+  // and the status re-checks, instead of staying frozen on a now-stale "detected".
   useEffect(() => {
     let active = true;
     let timer;
@@ -27,7 +29,7 @@ function InstallStatus({ ws }) {
     };
     poll();
     return () => { active = false; clearTimeout(timer); };
-  }, [ws]);
+  }, [ws, refreshKey]);
 
   if (!status) return null;
   if (status.installed) {
@@ -99,6 +101,8 @@ export default function KeyVault({ ws, tenant, freshKey }) {
   };
 
   const live = (keys || []).filter((k) => !k.revokedAt);
+  // Changes whenever a key is issued or revoked, so InstallStatus re-checks.
+  const keySignature = (keys || []).map((k) => `${k.id}:${k.revokedAt ? 'r' : 'a'}`).join(',');
 
   return (
     <div className="space-y-6">
@@ -109,7 +113,7 @@ export default function KeyVault({ ws, tenant, freshKey }) {
           <div className="space-y-4 p-5">
             <SecretField value={issued.apiKey} label="API key" />
             <EmbedSnippets slug={tenant.slug} apiKey={issued.apiKey} />
-            <InstallStatus ws={ws} />
+            <InstallStatus ws={ws} refreshKey={keySignature} />
           </div>
         </Card>
       )}
@@ -120,7 +124,7 @@ export default function KeyVault({ ws, tenant, freshKey }) {
             description="Two widgets, one per bot. Each is locked to its bot, so visitors get the right persona and knowledge on every page." />
           <div className="space-y-4 p-5">
             <EmbedSnippets slug={tenant.slug} />
-            <InstallStatus ws={ws} />
+            <InstallStatus ws={ws} refreshKey={keySignature} />
           </div>
         </Card>
       )}

@@ -384,21 +384,45 @@ async function auditTenant(tenantId) {
 // The claim expires on its own, so an instance that dies mid-audit does not
 // block the next attempt for ever.
 const AUDIT_LOCK_MS = 10 * 60 * 1000;
-const running = new Set();
-function scheduleTenantAudit(tenantId) {
-  if (running.has(tenantId)) return;
+// A knowledge change triggers a background re-audit, but each one is a paid LLM
+// call, so a user editing documents one after another shouldn't bill an audit per
+// edit. Within the cooldown a fresh schedule is skipped — the content-hash
+// staleness flag (tenantReadiness) still shows "check again" as a backstop.
+const AUDIT_COOLDOWN_MS = Number(process.env.AUDIT_COOLDOWN_MS ?? 60 * 1000);
+const running = new Set();      // an audit is in flight for this tenant (this process)
+const dirty = new Set();        // a change arrived mid-audit → run one trailing pass
+const lastAuditAt = new Map();  // tenantId -> ms of the last completed audit, for the cooldown
+
+// Runs the audit itself, unconditionally (cooldown is checked by the caller).
+// Calls auditTenant through module.exports so tests can mock it.
+function runAudit(tenantId) {
   running.add(tenantId);
   (async () => {
     try {
       if (!await store().claimOnce(keys.jobLock('audit', tenantId), AUDIT_LOCK_MS)) return;
-      await auditTenant(tenantId);
+      await module.exports.auditTenant(tenantId);
     } catch (err) {
       console.warn(`[botAuditor] tenant ${tenantId}: background audit failed: ${err.message}`);
     } finally {
+      lastAuditAt.set(tenantId, Date.now());
       running.delete(tenantId);
       await store().del(keys.jobLock('audit', tenantId)).catch(() => {});
+      // A knowledge change landed while this audit ran: run once more so the saved
+      // report reflects it (a real change, so it bypasses the cooldown). Bounded to
+      // a single trailing pass — a further change during it re-sets the flag.
+      if (dirty.delete(tenantId)) runAudit(tenantId);
     }
   })();
+}
+
+function scheduleTenantAudit(tenantId) {
+  // Already auditing: remember the change so a single trailing pass runs after it
+  // (no missed wakeup), and don't start a second concurrent audit.
+  if (running.has(tenantId)) { dirty.add(tenantId); return; }
+  // Cooldown: skip a fresh audit that lands too soon after the last one.
+  const last = lastAuditAt.get(tenantId);
+  if (last && Date.now() - last < AUDIT_COOLDOWN_MS) return;
+  runAudit(tenantId);
 }
 const isTenantAuditRunning = (tenantId) => running.has(tenantId);
 

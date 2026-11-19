@@ -8,6 +8,10 @@ const express = require('express');
 // documents). Prisma is an in-memory store; the LLM is a mock.
 
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret-for-readiness-routes';
+// These tests reuse one tenant across cases and assert that each edit auto-re-audits;
+// the production per-tenant audit cooldown would skip the second schedule, so disable
+// it here. (The cooldown itself is covered by test/unit/botAuditorSchedule.test.js.)
+process.env.AUDIT_COOLDOWN_MS = '0';
 // Every request here comes from 127.0.0.1: lift the per-IP limits above what the tests use.
 process.env.PREFLIGHT_AUDIT_RATE_LIMIT_MAX = '100';
 process.env.SIGNUP_RATE_LIMIT_MAX = '100';

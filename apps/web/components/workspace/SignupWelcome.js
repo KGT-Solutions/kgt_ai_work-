@@ -14,9 +14,12 @@ export default function SignupWelcome({ tenant }) {
   const [welcome, setWelcome] = useState(null);
 
   useEffect(() => {
+    // Don't consume the one-time handoff until the tenant is known — takeSignupHandoff
+    // removes it, so reading it before tenant.slug is set would discard the key for good.
+    if (!tenant?.slug) return;
     const handoff = takeSignupHandoff();
     if (handoff && handoff.slug === tenant.slug) setWelcome(handoff);
-  }, [tenant.slug]);
+  }, [tenant?.slug]);
 
   if (!welcome) return null;
   return (
