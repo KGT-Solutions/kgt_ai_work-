@@ -70,6 +70,14 @@ cp .env.docker.example .env.docker
 docker compose --env-file .env.docker up -d --build
 ```
 
+> **Hybrid search.** Retrieval is lexical **+** semantic (pgvector): the Postgres
+> service uses `pgvector/pgvector:pg16`, and setting `OPENAI_API_KEY` enables
+> per-chunk embeddings (`text-embedding-3-small`). Without it — or with
+> `HYBRID_SEARCH_ENABLED=false` — retrieval degrades cleanly to lexical only.
+> Backfill embeddings for pre-existing tenants with
+> `docker exec kgt-ai-hub-api npm run embeddings:backfill`. See
+> [DOCUMENTATION.md §2.4](DOCUMENTATION.md).
+
 | Service | URL |
 |---|---|
 | Signup wizard | http://localhost:3100/register |

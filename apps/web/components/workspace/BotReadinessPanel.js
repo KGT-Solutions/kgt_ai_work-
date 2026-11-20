@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Badge, Button, Card, Checkbox, Skeleton, Spinner, cx } from '../ui';
-import { IconAlert, IconBolt, IconCheck, IconShield, IconSpark } from '../ui/icons';
+import { IconAlert, IconBolt, IconCheck, IconChevronDown, IconShield, IconSpark } from '../ui/icons';
 
 // The pre-flight readiness report (API: services/botAuditor.js) — used by the
 // signup wizard before launch and by the workspace Overview afterwards.
@@ -83,9 +83,42 @@ const BOT_META = {
   sales: { name: 'Sales Bot', icon: IconBolt, accent: 'text-green-300', trainedOn: 'pricing tiers, product features, pitch and sales material' }
 };
 
+// An enriched "what to add" item: the ask, a "why this matters" disclosure, and
+// (when dismissals are allowed) an Optional/Undo toggle that recomputes the score.
+function GapItem({ item, dismissed, onToggle }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <li className={cx('rounded-lg border px-3 py-2 transition', dismissed ? 'border-dashed border-white/10 opacity-60' : 'border-white/[0.07] bg-white/[0.02]')}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className={cx('text-[13px] text-fg-2', dismissed && 'line-through')}>{item.text}</p>
+          {!dismissed && (
+            <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open}
+              className="mt-0.5 inline-flex items-center gap-1 text-[11px] font-medium text-brand-300 hover:text-brand-200">
+              <IconChevronDown className={cx('h-3 w-3 transition', open && 'rotate-180')} />Why this matters
+            </button>
+          )}
+        </div>
+        {onToggle && (
+          <button type="button" onClick={onToggle} className="shrink-0 text-[11px] font-medium text-fg-3 hover:text-fg-2">
+            {dismissed ? 'Undo' : 'Not applicable'}
+          </button>
+        )}
+      </div>
+      {open && !dismissed && (
+        <dl className="mt-2 space-y-1 border-t border-white/[0.06] pt-2 text-[11.5px]">
+          <div><dt className="font-medium text-fg-2">What it is</dt><dd className="text-fg-3">{item.description}</dd></div>
+          <div><dt className="font-medium text-fg-2">Why it matters</dt><dd className="text-fg-3">{item.importance}</dd></div>
+          <div><dt className="font-medium text-fg-2">How your bot uses it</dt><dd className="text-fg-3">{item.botUtility}</dd></div>
+        </dl>
+      )}
+    </li>
+  );
+}
+
 // One tab per deployed bot: its own training %, the pillars it's trained on,
 // what's missing (a checklist) and what to add.
-function PerBotReport({ report, loading, onRun, stale, footer, title }) {
+function PerBotReport({ report, loading, onRun, stale, footer, title, onToggleIgnored }) {
   const bots = Object.keys(report.bots).filter((b) => BOT_META[b]);
   const [active, setActive] = useState(bots[0]);
   const [checked, setChecked] = useState({});
@@ -95,6 +128,11 @@ function PerBotReport({ report, loading, onRun, stale, footer, title }) {
   const tone = scoreTone(bot.score);
   const overall = scoreTone(report.readinessScore);
   const handled = bot.criticalGaps.filter((_, i) => checked[`${active}:${i}`]).length;
+  // Enriched, dismissible gap items (current reports) vs. legacy string list.
+  const gapItems = bot.requirementItems || [];
+  const ignoredSet = new Set(report.ignoredRequirements || []);
+  const activeGaps = gapItems.filter((i) => !ignoredSet.has(i.key));
+  const dismissedGaps = gapItems.filter((i) => ignoredSet.has(i.key));
 
   // Arrow keys move between tabs, like a native tablist.
   const onKeyDown = (e) => {
@@ -215,7 +253,23 @@ function PerBotReport({ report, loading, onRun, stale, footer, title }) {
           </section>
           <section>
             <h4 className="mb-3 text-[11px] font-medium uppercase tracking-[0.1em] text-fg-3">Add to fully train it</h4>
-            {bot.requirements.length === 0 ? (
+            {gapItems.length > 0 ? (
+              activeGaps.length === 0 && dismissedGaps.length === 0 ? (
+                <p className="text-[13px] text-fg-3">Nothing essential — keep your documents up to date.</p>
+              ) : (
+                <ul className="space-y-2">
+                  {activeGaps.map((it) => (
+                    <GapItem key={it.key} item={it} dismissed={false} onToggle={onToggleIgnored ? () => onToggleIgnored(it.key) : null} />
+                  ))}
+                  {dismissedGaps.length > 0 && (
+                    <li className="pt-1 text-[11px] font-medium uppercase tracking-[0.1em] text-fg-3">Dismissed as not applicable</li>
+                  )}
+                  {dismissedGaps.map((it) => (
+                    <GapItem key={it.key} item={it} dismissed onToggle={onToggleIgnored ? () => onToggleIgnored(it.key) : null} />
+                  ))}
+                </ul>
+              )
+            ) : bot.requirements.length === 0 ? (
               <p className="text-[13px] text-fg-3">Nothing essential — keep your documents up to date.</p>
             ) : (
               <ol className="space-y-2">
@@ -240,7 +294,7 @@ function PerBotReport({ report, loading, onRun, stale, footer, title }) {
   );
 }
 
-export default function BotReadinessPanel({ report, loading, error, onRun, stale, footer, title = 'Bot readiness' }) {
+export default function BotReadinessPanel({ report, loading, error, onRun, stale, footer, title = 'Bot readiness', onToggleIgnored }) {
   const [checked, setChecked] = useState({});
   useEffect(() => { setChecked({}); }, [report?.auditedAt]);
 
@@ -276,7 +330,7 @@ export default function BotReadinessPanel({ report, loading, error, onRun, stale
   // Current reports carry a separate training score per bot; reports saved
   // before that fall through to the single-score layout below.
   if (report.bots && Object.keys(report.bots).length) {
-    return <PerBotReport report={report} loading={loading} onRun={onRun} stale={stale} footer={footer} title={title} />;
+    return <PerBotReport report={report} loading={loading} onRun={onRun} stale={stale} footer={footer} title={title} onToggleIgnored={onToggleIgnored} />;
   }
 
   const tone = scoreTone(report.readinessScore);

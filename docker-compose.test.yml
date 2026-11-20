@@ -13,7 +13,9 @@ name: kgt-ai-hub-tests
 
 services:
   test-postgres:
-    image: postgres:16-alpine
+    # Ships the `vector` extension the hybrid-search migration enables, so the
+    # db-tier integration suite runs against the same stack as production.
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: kgt
       POSTGRES_PASSWORD: kgt

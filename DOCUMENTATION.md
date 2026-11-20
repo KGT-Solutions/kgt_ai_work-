@@ -100,7 +100,7 @@ flowchart LR
 | ORM / database | Prisma 5 · PostgreSQL 16 | Schema `apps/api/prisma/schema.prisma`; migrations applied at container start |
 | Frontend | Next.js 14 (Pages Router) · React 18 · Tailwind CSS 3 | `apps/web`; API base URL baked in at build time (`NEXT_PUBLIC_API_URL`) |
 | LLM providers | Groq (primary, `openai/gpt-oss-120b`), OpenAI (`gpt-4o-mini`), Anthropic (`claude-haiku-4-5-20251001`) | Ordered fail-over chain, plain HTTPS — no provider SDKs |
-| Retrieval | Lexical search (stemmed, typo-tolerant, category-weighted) | `services/shared/lexicalSearch.js` — see §2.4 |
+| Retrieval | Hybrid: lexical (stemmed, typo-tolerant, category-weighted) + pgvector semantic search fused with RRF | `services/shared/lexicalSearch.js`, `engine/hybridRetriever.js` — see §2.4 |
 | Website crawler | `fetch` + Cheerio (static); headless Chromium via `puppeteer-core` (staff-only fallback) | `services/shared/crawler.js`, `crawlerBrowser.js` |
 | PDF ingestion | `pdfjs-dist` | `services/shared/pdfIngest.js` |
 | Email | Nodemailer over Office 365 SMTP (STARTTLS, port 587) | `services/mailer.js`; Resend HTTP API supported as a legacy fallback |
@@ -138,14 +138,18 @@ docker-compose.yml, .env.docker.example, DOCUMENTATION.md
 
 **Provider chain.** `engine/llmClient.js` calls `LLM_PRIMARY`, then each provider in `LLM_FALLBACK`, moving on after any configuration error, rate limit, timeout (`LLM_TIMEOUT_MS`, default 20 s) or upstream failure. Every failed attempt is logged in one line, and a fallback answer logs which provider failed first, so a dead primary key never hides behind a working fallback. At startup the API checks that each configured model exists for its key.
 
-**Retrieval: lexical, not vector.** The platform does **not** use embeddings or a vector database. Each document is split into one chunk per `## ` heading, and chunks are ranked by weighted term overlap:
+**Retrieval: hybrid (lexical + semantic).** Each document is split into one chunk per `## ` heading. The **lexical** scorer (`services/shared/lexicalSearch.js`) ranks chunks by weighted term overlap:
 
 - Porter stemming (`returns` ≈ `return`), stop-word removal, and an exact-match bonus;
 - typo tolerance driven by the tenant's own vocabulary (a misspelled query word is corrected to the closest word that appears in the knowledge base);
 - per-bot **category weights** (Support favours FAQs, Sales favours overview and pricing), plus a boost for policy documents when a question is about money or rules — weights change only the *order* of excerpts, never whether a weak match passes the gate;
 - chunks below 35% of the best chunk's score are dropped, to keep answers on-topic.
 
-This was a deliberate choice: knowledge bases are small and curated (≤ 500 documents per tenant), lexical scores are explainable, cost nothing per query, and give a stable confidence signal (§3.4).
+On top of this, a **semantic** layer (`engine/hybridRetriever.js`) runs a pgvector cosine search over per-chunk OpenAI embeddings (`text-embedding-3-small`, 1536-dim, stored in `DocumentChunk.embedding`) and fuses the two rankings with **Reciprocal Rank Fusion** so a conceptually relevant chunk that shares no keywords can still surface. Design guarantees:
+
+- **The confidence gate stays lexical.** RRF decides *order* only; `confidence.js` gates on the best chunk's unweighted **lexical** score, so semantic matching can improve recall and ranking but can never push an ungrounded answer past the 30% gate (§3.4).
+- **Graceful degradation.** With `HYBRID_SEARCH_ENABLED=false`, no `OPENAI_API_KEY`, or the embedding provider unreachable, retrieval falls back to exactly the lexical result — no turn fails.
+- **Index maintenance.** `DocumentChunk` rows are the source-of-truth `TenantDocument.content` re-chunked; they are rebuilt and re-embedded in the background on the read path (`domains/tenantProfile.loadTenantKnowledge` → `services/shared/chunkStore.syncTenantChunks`) whenever a tenant's knowledge changes, and backfilled for existing tenants with `npm run embeddings:backfill`. The vector index is a ranking aid over the lexical source of truth, so brief staleness affects only ordering, never grounding. Requires a Postgres with the `pgvector` extension (`docker-compose` uses `pgvector/pgvector:pg16`).
 
 **Prompt engineering.**
 
@@ -472,7 +476,11 @@ Copy `.env.docker.example` to `.env.docker`. The API container reads **only** th
 |---|---|---|
 | `LLM_PRIMARY` | `anthropic` if unset (deployment uses `groq`) | First provider |
 | `LLM_FALLBACK` | — | Comma-separated fallbacks, e.g. `openai,anthropic` |
-| `GROQ_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | — | At least one is required for AI answers |
+| `GROQ_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | — | At least one is required for AI answers; `OPENAI_API_KEY` also powers hybrid-search embeddings |
+| `HYBRID_SEARCH_ENABLED` | true | Lexical + semantic (pgvector RRF) retrieval; `false` = lexical only |
+| `EMBEDDING_MODEL` / `EMBEDDING_TIMEOUT_MS` | text-embedding-3-small / 20000 | Embedding model (must be 1536-dim) and request timeout |
+| `RRF_K` / `HYBRID_CANDIDATES` | 60 / 20 | RRF constant and per-side candidate pool size |
+| `DEFAULT_MONTHLY_TOKEN_BUDGET` | 0 (off) | Default per-tenant monthly token cap; over it, bots hand off instead of calling the model (`Tenant.monthlyTokenBudget` overrides) |
 | `GROQ_MODEL` / `OPENAI_MODEL` / `ANTHROPIC_MODEL` | see §2.2 | Model per provider |
 | `LLM_TIMEOUT_MS` | 20000 | Per-provider timeout before fail-over |
 | `LLM_MAX_TOKENS` | 1024 | Chat completion budget (keep ≥ 1024 for reasoning models) |
@@ -571,7 +579,7 @@ Neither stack reads `.env.docker`; LLM calls go to a fake server, email to Mailp
 ## 7. Known limitations
 
 - **Single-instance state.** Rate limiters, the answer cache, the pre-signup audit hand-off and pending lead-summary timers live in process memory. Run one API instance, or move these to a shared store (e.g. Redis) before scaling out. A restart loses pending summary rewrites; the summary written at capture time remains.
-- **Lexical retrieval.** No embeddings: a question phrased with entirely different vocabulary from the documents can miss. Typo tolerance and stemming mitigate this; the "could you tell me more?" reply handles the rest.
+- **Grounding is lexical, even with hybrid search.** The semantic (pgvector) layer improves recall and ranking, but the confidence gate is driven by the lexical score, so a question phrased with *entirely* different vocabulary from the documents — with no lexical overlap at all — still routes to a handoff rather than answering from a semantic-only match. This is deliberate (it keeps the anti-hallucination guarantee); typo tolerance, stemming and the semantic layer mitigate near-misses, and the "could you tell me more?" reply handles the rest.
 - **Hard knowledge split.** By design the Sales Bot cannot see support-only material and vice versa; shared policies must be set to `BOTH`.
 - **Readiness scores are guidance.** They reflect document coverage, not answer accuracy; validate with real questions in *Test bots*.
 - **Visitor emails are unverified.** Confirmation emails go to whatever address a visitor types, mitigated by the 24-hour per-address cooldown and by never echoing visitor text.

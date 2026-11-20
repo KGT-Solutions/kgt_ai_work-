@@ -23,16 +23,28 @@ const MAX_QUESTION_LEN = 160;
 const DIGEST_BUDGET = 12000;
 const PER_DOC_MIN = 600;
 const PER_DOC_MAX = 2500;
+// When covering EVERY document (the audit digest, coverAll), the per-doc slice
+// may shrink below PER_DOC_MIN so breadth wins over depth on a large crawl —
+// this is the smallest slice still worth sending (title + an opening line or two).
+const COVER_ALL_MIN_SNIPPET = 120;
+const DIGEST_HEADER_RESERVE = 96; // "### <title> (<label>)\n" overhead reserved per doc in coverAll
 
 /**
  * A size-capped digest of the tenant's documents. Round-robins across the
  * three categories so a site with forty overview pages still shows the
  * model its pricing page and FAQ, which is where the best questions come from.
  * @param {Array<{ title: string, content: string, category?: string }>} documents
+ * @param {number} [budget] total character budget
+ * @param {{ coverAll?: boolean }} [opts] coverAll: size the per-doc slice so EVERY
+ *   document contributes (used by the auditor so a large crawl is judged on all of
+ *   its pages, not just the first ~30); default off keeps the depth-first digest
+ *   FAQ generation has always used.
  */
-function buildDigest(documents, budget = DIGEST_BUDGET) {
+function buildDigest(documents, budget = DIGEST_BUDGET, { coverAll = false } = {}) {
   if (!documents.length) return '';
-  const perDoc = Math.min(PER_DOC_MAX, Math.max(PER_DOC_MIN, Math.floor(budget / documents.length)));
+  const perDoc = coverAll
+    ? Math.min(PER_DOC_MAX, Math.max(COVER_ALL_MIN_SNIPPET, Math.floor(budget / documents.length) - DIGEST_HEADER_RESERVE))
+    : Math.min(PER_DOC_MAX, Math.max(PER_DOC_MIN, Math.floor(budget / documents.length)));
   const queues = Object.values(CATEGORIES).map((c) => documents.filter((d) => (d.category || DEFAULT_CATEGORY) === c));
 
   const parts = [];
@@ -44,7 +56,10 @@ function buildDigest(documents, budget = DIGEST_BUDGET) {
       const body = String(doc.content || '').replace(/<!--[\s\S]*?-->/g, '').replace(/\n{3,}/g, '\n\n').trim();
       if (!body) continue;
       const label = CATEGORY_PROMPT_LABELS[doc.category || DEFAULT_CATEGORY];
-      const piece = `### ${doc.title} (${label})\n${body.slice(0, Math.min(perDoc, budget - used))}`;
+      // In coverAll, bound the heading so one long title can't eat the per-doc
+      // budget and starve the documents that follow.
+      const title = coverAll ? String(doc.title || '').slice(0, 80) : doc.title;
+      const piece = `### ${title} (${label})\n${body.slice(0, Math.min(perDoc, budget - used))}`;
       parts.push(piece);
       used += piece.length;
       if (used >= budget) break;

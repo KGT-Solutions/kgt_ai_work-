@@ -8,6 +8,10 @@ const express = require('express');
 // documents). Prisma is an in-memory store; the LLM is a mock.
 
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret-for-readiness-routes';
+// These tests reuse one tenant across cases and assert that each edit auto-re-audits;
+// the production per-tenant audit cooldown would skip the second schedule, so disable
+// it here. (The cooldown itself is covered by test/unit/botAuditorSchedule.test.js.)
+process.env.AUDIT_COOLDOWN_MS = '0';
 // Every request here comes from 127.0.0.1: lift the per-IP limits above what the tests use.
 process.env.PREFLIGHT_AUDIT_RATE_LIMIT_MAX = '100';
 process.env.SIGNUP_RATE_LIMIT_MAX = '100';
@@ -44,6 +48,12 @@ const post = (path, body) => fetch(`${base}${path}`, { method: 'POST', headers: 
 const json = async (res) => ({ status: res.status, body: await res.json() });
 // Model calls made by the auditor (signup also starts starter-FAQ generation, a different call).
 const auditCalls = () => generateAnswerMock.mock.calls.filter((c) => /You audit the knowledge base/.test(c.arguments[0].systemPrompt)).length;
+// Poll a (possibly async) condition — for the fire-and-forget re-audit a knowledge
+// change now schedules (Step 9 G2), which resolves on its own microtasks.
+const waitFor = async (cond, { tries = 100, ms = 10 } = {}) => {
+  for (let i = 0; i < tries; i++) { if (await cond()) return; await new Promise((r) => setTimeout(r, ms)); }
+  throw new Error('waitFor: condition not met in time');
+};
 
 before(async () => {
   const app = express();
@@ -203,7 +213,7 @@ describe('workspace: readiness and the knowledge split', () => {
     docs.push(...PAGES.map((p, i) => ({ id: `d${i + 1}`, tenantId: 't1', botScope: 'AUTO', ...p, botScope: (p.botScope || 'AUTO').toUpperCase() })));
   });
 
-  test('POST /preflight-audit saves the report; GET /readiness reports it, then marks it stale after an edit', async () => {
+  test('POST /preflight-audit saves the report; editing a document auto-triggers a re-audit that refreshes it', async () => {
     const audit = await json(await post('/ws/preflight-audit', {}));
     assert.equal(audit.status, 200);
     assert.equal(tenants[0].readinessScore, 90);
@@ -211,13 +221,23 @@ describe('workspace: readiness and the knowledge split', () => {
     assert.equal(readiness.body.report.readinessScore, 90);
     assert.equal(readiness.body.stale, false);
 
+    // Editing knowledge used to leave the saved report stale until a manual
+    // "Check again"; now the document routes schedule a background re-audit
+    // (Step 9 G2), so the report refreshes on its own rather than going stale.
+    const before = auditCalls();
     const patched = await fetch(`${base}/ws/documents/d3`, {
       method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ botScope: 'both' })
     });
     assert.equal(patched.status, 200);
     assert.equal(docs[2].botScope, 'BOTH');
+
+    // The edit kicked off exactly one more audit (scheduleTenantAudit is
+    // self-coalescing), and once it persists the report is in sync again.
+    await waitFor(() => auditCalls() > before);
+    await waitFor(async () => (await json(await fetch(`${base}/ws/readiness`))).body.stale === false);
     readiness = await json(await fetch(`${base}/ws/readiness`));
-    assert.equal(readiness.body.stale, true);
+    assert.equal(readiness.body.stale, false, 'the automatic re-audit brought the report back in sync');
+    assert.equal(readiness.body.report.readinessScore, 90);
   });
 
   test('GET /knowledge/distribution shows how each document splits between the bots', async () => {

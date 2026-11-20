@@ -1,0 +1,60 @@
+[35mapps/api/package.json[m[36m:[m[32m37[m[36m:[m[1;31m<<<<<<<[m HEAD
+[35mapps/api/package.json[m[36m:[m[32m39[m[36m:[m[1;31m=======[m
+[35mapps/api/package.json[m[36m:[m[32m42[m[36m:[m[1;31m>>>>>>>[m origin/main
+[35mapps/api/prisma/schema.prisma[m[36m:[m[32m56[m[36m:[m[1;31m<<<<<<<[m HEAD
+[35mapps/api/prisma/schema.prisma[m[36m:[m[32m64[m[36m:[m[1;31m=======[m
+[35mapps/api/prisma/schema.prisma[m[36m:[m[32m66[m[36m:[m[1;31m>>>>>>>[m origin/main
+[35mapps/api/prisma/schema.prisma[m[36m:[m[32m77[m[36m:[m[1;31m<<<<<<<[m HEAD
+[35mapps/api/prisma/schema.prisma[m[36m:[m[32m90[m[36m:[m[1;31m=======[m
+[35mapps/api/prisma/schema.prisma[m[36m:[m[32m106[m[36m:[m[1;31m>>>>>>>[m origin/main
+[35mapps/api/prisma/schema.prisma[m[36m:[m[32m241[m[36m:[m[1;31m<<<<<<<[m HEAD
+[35mapps/api/prisma/schema.prisma[m[36m:[m[32m256[m[36m:[m[1;31m=======[m
+[35mapps/api/prisma/schema.prisma[m[36m:[m[32m271[m[36m:[m[1;31m>>>>>>>[m origin/main
+[35mapps/api/prisma/schema.prisma[m[36m:[m[32m325[m[36m:[m[1;31m<<<<<<<[m HEAD
+[35mapps/api/prisma/schema.prisma[m[36m:[m[32m331[m[36m:[m[1;31m=======[m
+[35mapps/api/prisma/schema.prisma[m[36m:[m[32m336[m[36m:[m[1;31m>>>>>>>[m origin/main
+[35mapps/api/public/widgets/tenant-chat-widget.js[m[36m:[m[32m748[m[36m:[m[1;31m<<<<<<<[m HEAD
+[35mapps/api/public/widgets/tenant-chat-widget.js[m[36m:[m[32m762[m[36m:[m[1;31m=======[m
+[35mapps/api/public/widgets/tenant-chat-widget.js[m[36m:[m[32m910[m[36m:[m[1;31m>>>>>>>[m origin/main
+[35mapps/api/public/widgets/tenant-chat-widget.js[m[36m:[m[32m919[m[36m:[m[1;31m<<<<<<<[m HEAD
+[35mapps/api/public/widgets/tenant-chat-widget.js[m[36m:[m[32m921[m[36m:[m[1;31m=======[m
+[35mapps/api/public/widgets/tenant-chat-widget.js[m[36m:[m[32m923[m[36m:[m[1;31m>>>>>>>[m origin/main
+[35mapps/api/src/routes/tenantChat.routes.js[m[36m:[m[32m4[m[36m:[m[1;31m<<<<<<<[m HEAD
+[35mapps/api/src/routes/tenantChat.routes.js[m[36m:[m[32m14[m[36m:[m[1;31m=======[m
+[35mapps/api/src/routes/tenantChat.routes.js[m[36m:[m[32m23[m[36m:[m[1;31m>>>>>>>[m origin/main
+[35mapps/api/src/routes/tenantWorkspace.routes.js[m[36m:[m[32m754[m[36m:[m[1;31m<<<<<<<[m HEAD
+[35mapps/api/src/routes/tenantWorkspace.routes.js[m[36m:[m[32m771[m[36m:[m[1;31m=======[m
+[35mapps/api/src/routes/tenantWorkspace.routes.js[m[36m:[m[32m785[m[36m:[m[1;31m>>>>>>>[m origin/main
+[35mapps/api/src/services/shared/crawler.js[m[36m:[m[32m22[m[36m:[m[1;31m<<<<<<<[m HEAD
+[35mapps/api/src/services/shared/crawler.js[m[36m:[m[32m28[m[36m:[m[1;31m=======[m
+[35mapps/api/src/services/shared/crawler.js[m[36m:[m[32m32[m[36m:[m[1;31m>>>>>>>[m origin/main
+[35mapps/api/src/services/shared/crawler.js[m[36m:[m[32m222[m[36m:[m[1;31m<<<<<<<[m HEAD
+[35mapps/api/src/services/shared/crawler.js[m[36m:[m[32m224[m[36m:[m[1;31m=======[m
+[35mapps/api/src/services/shared/crawler.js[m[36m:[m[32m226[m[36m:[m[1;31m>>>>>>>[m origin/main
+[35mapps/api/src/services/shared/crawler.js[m[36m:[m[32m233[m[36m:[m[1;31m<<<<<<<[m HEAD
+[35mapps/api/src/services/shared/crawler.js[m[36m:[m[32m307[m[36m:[m[1;31m=======[m
+[35mapps/api/src/services/shared/crawler.js[m[36m:[m[32m309[m[36m:[m[1;31m>>>>>>>[m origin/main
+[35mapps/api/src/services/shared/crawler.js[m[36m:[m[32m408[m[36m:[m[1;31m<<<<<<<[m HEAD
+[35mapps/api/src/services/shared/crawler.js[m[36m:[m[32m420[m[36m:[m[1;31m=======[m
+[35mapps/api/src/services/shared/crawler.js[m[36m:[m[32m487[m[36m:[m[1;31m>>>>>>>[m origin/main
+[35mapps/api/src/services/tenantChat.js[m[36m:[m[32m14[m[36m:[m[1;31m<<<<<<<[m HEAD
+[35mapps/api/src/services/tenantChat.js[m[36m:[m[32m16[m[36m:[m[1;31m=======[m
+[35mapps/api/src/services/tenantChat.js[m[36m:[m[32m21[m[36m:[m[1;31m>>>>>>>[m origin/main
+[35mapps/api/src/services/tenantChat.js[m[36m:[m[32m146[m[36m:[m[1;31m<<<<<<<[m HEAD
+[35mapps/api/src/services/tenantChat.js[m[36m:[m[32m149[m[36m:[m[1;31m=======[m
+[35mapps/api/src/services/tenantChat.js[m[36m:[m[32m195[m[36m:[m[1;31m>>>>>>>[m origin/main
+[35mapps/api/src/services/tenantChat.js[m[36m:[m[32m268[m[36m:[m[1;31m<<<<<<<[m HEAD
+[35mapps/api/src/services/tenantChat.js[m[36m:[m[32m281[m[36m:[m[1;31m=======[m
+[35mapps/api/src/services/tenantChat.js[m[36m:[m[32m290[m[36m:[m[1;31m>>>>>>>[m origin/main
+[35mapps/api/src/services/tenantChat.js[m[36m:[m[32m296[m[36m:[m[1;31m<<<<<<<[m HEAD
+[35mapps/api/src/services/tenantChat.js[m[36m:[m[32m299[m[36m:[m[1;31m=======[m
+[35mapps/api/src/services/tenantChat.js[m[36m:[m[32m302[m[36m:[m[1;31m>>>>>>>[m origin/main
+[35mapps/api/src/utils/tenantApiKeys.js[m[36m:[m[32m54[m[36m:[m[1;31m<<<<<<<[m HEAD
+[35mapps/api/src/utils/tenantApiKeys.js[m[36m:[m[32m73[m[36m:[m[1;31m=======[m
+[35mapps/api/src/utils/tenantApiKeys.js[m[36m:[m[32m91[m[36m:[m[1;31m>>>>>>>[m origin/main
+[35mapps/api/src/utils/tenantApiKeys.js[m[36m:[m[32m97[m[36m:[m[1;31m<<<<<<<[m HEAD
+[35mapps/api/src/utils/tenantApiKeys.js[m[36m:[m[32m101[m[36m:[m[1;31m=======[m
+[35mapps/api/src/utils/tenantApiKeys.js[m[36m:[m[32m134[m[36m:[m[1;31m>>>>>>>[m origin/main
+[35mapps/web/components/workspace/KeyVault.js[m[36m:[m[32m1[m[36m:[m[1;31m<<<<<<<[m HEAD
+[35mapps/web/components/workspace/KeyVault.js[m[36m:[m[32m4[m[36m:[m[1;31m=======[m
+[35mapps/web/components/workspace/KeyVault.js[m[36m:[m[32m7[m[36m:[m[1;31m>>>>>>>[m origin/main

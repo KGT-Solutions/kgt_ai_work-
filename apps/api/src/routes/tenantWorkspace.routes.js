@@ -29,7 +29,7 @@ const { parseBotScope, parseBotPreference, scopeCounts } = require('../services/
 const { answerCache } = require('../engine/answerCache');
 const { ingestUpload, FileIngestError, MAX_UPLOAD_BYTES } = require('../services/shared/fileIngest');
 const { documentChunks } = require('../domains/tenantProfile');
-const { auditTenant, tenantReadiness } = require('../services/botAuditor');
+const { auditTenant, tenantReadiness, recomputeReadiness, saveTenantReadiness, scheduleTenantAudit } = require('../services/botAuditor');
 const { runSessionSummary, claimSession } = require('../services/chatSessions');
 const { teamRecipients, parseTeamEmail, lowConfidenceBelow } = require('../services/teamAlerts');
 
@@ -142,6 +142,12 @@ router.post('/documents', async (req, res) => {
     select: DOC_FIELDS
   });
   await invalidateTenantKnowledge(req.tenant.id); // next chat request re-reads from the DB
+  // A knowledge change makes the saved readiness report stale; re-audit in the
+  // background so the dashboard score refreshes on its own instead of waiting for
+  // a manual "Check again". Fire-and-forget and self-coalescing per tenant
+  // (botAuditor.scheduleTenantAudit runs one audit at a time), so bulk uploads
+  // and rapid edits can't burst the LLM.
+  scheduleTenantAudit(req.tenant.id);
   // Auto-extract any products described in the pasted note into the catalog.
   const importedProducts = await autoPopulateCatalog(req.tenant.id, content, { title });
   res.status(201).json({ ...doc, importedProducts });
@@ -191,6 +197,7 @@ router.post('/documents/file', (req, res, next) => fileUpload.single('file')(req
   await prisma.tenantDocument.createMany({ data: docs });
   await invalidateTenantKnowledge(req.tenant.id);
   scheduleFaqGeneration(req.tenant.id);
+  if (docs.length) scheduleTenantAudit(req.tenant.id); // only re-audit when something was actually added
   // Auto-extract products from the uploaded file (e.g. a catalog/brochure) into
   // the catalog, so its items show as rich cards with no CSV step.
   const text = parsed.pages.map((p) => `# ${p.title}\n${p.markdown}`).join('\n\n');
@@ -224,6 +231,7 @@ router.post('/documents/pdf', pdfUploadMiddleware, async (req, res) => {
   await prisma.tenantDocument.createMany({ data: docs });
   await invalidateTenantKnowledge(req.tenant.id);
   scheduleFaqGeneration(req.tenant.id); // new content -> fresh sandbox starter questions
+  if (docs.length) scheduleTenantAudit(req.tenant.id); // only re-audit when something was actually added
 
   // Auto-extract products from the uploaded PDF (e.g. a product catalog/brochure).
   const text = parsed.pages.map((p) => `# ${p.title}\n${p.markdown}`).join('\n\n');
@@ -271,6 +279,7 @@ router.patch('/documents/:documentId', async (req, res) => {
 
   const updated = await prisma.tenantDocument.update({ where: { id: existing.id }, data, select: DOC_FIELDS });
   await invalidateTenantKnowledge(req.tenant.id); // an edited chunk must be re-read on the very next chat request
+  scheduleTenantAudit(req.tenant.id); // knowledge changed → refresh readiness in the background
   res.json(updated);
 });
 
@@ -280,6 +289,7 @@ router.delete('/documents/:documentId', async (req, res) => {
   });
   if (!count) return res.status(404).json({ error: 'Document not found' });
   await invalidateTenantKnowledge(req.tenant.id); // a deleted chunk must stop being retrievable immediately
+  scheduleTenantAudit(req.tenant.id); // fewer documents can change readiness → refresh in the background
   res.status(204).end();
 });
 
@@ -349,6 +359,7 @@ router.post('/scrape', async (req, res) => {
   });
   await invalidateTenantKnowledge(req.tenant.id);
   scheduleFaqGeneration(req.tenant.id);
+  if (created.length) scheduleTenantAudit(req.tenant.id); // only re-audit when pages were actually imported
 
   // Product import: the opt-in LLM pass above already produced `distilledProducts`
   // (SCRAPE_DISTILLATION_PRODUCTS); on top of that the default-on heuristic reads
@@ -668,6 +679,23 @@ router.get('/readiness', async (req, res) => {
   res.json(await tenantReadiness(req.tenant.id));
 });
 
+// Mark gap items "Optional / Not applicable" (or clear them) and recompute the
+// saved report's scores — pure, no AI call. The dismissed pillars drop from each
+// bot's weighted score, so the readiness % rises instantly and survives reloads.
+router.patch('/readiness/ignored', async (req, res) => {
+  const ignored = Array.isArray(req.body?.ignoredRequirements)
+    ? [...new Set(req.body.ignoredRequirements.map((v) => String(v || '').trim()).filter((v) => v && v.length <= 100))].slice(0, 50)
+    : [];
+  const tenant = await prisma.tenant.findUnique({ where: { id: req.tenant.id }, select: { readinessReport: true } });
+  const report = tenant?.readinessReport;
+  if (!report || !report.bots) {
+    return res.status(409).json({ error: 'Run a training check first — there is no report to adjust yet.' });
+  }
+  const updated = recomputeReadiness(report, ignored);
+  await saveTenantReadiness(req.tenant.id, updated);
+  res.json(updated);
+});
+
 // How the knowledge splits between the bots, overall and per document:
 // sections each bot can use (support / sales / both), from the same
 // classifier retrieval uses (domains/tenantProfile.js documentChunks).
@@ -721,6 +749,24 @@ router.post('/api-keys', async (req, res) => {
   const label = String(req.body?.label || '').trim().slice(0, 80) || 'Default';
   const { key, row } = await issueApiKey(prisma, req.tenant.id, label);
   res.status(201).json({ id: row.id, keyPrefix: row.keyPrefix, label: row.label, createdAt: row.createdAt, apiKey: key });
+});
+
+// Has the embed widget actually loaded on the customer's site yet? The widget
+// pings POST /api/v1/tenant-chat/:slug/ping on load, stamping widgetSeenAt on the
+// key it used. We report the most recently seen live key so the dashboard can
+// flip from "waiting" to "widget detected" without the owner sending a test chat.
+router.get('/install-status', async (req, res) => {
+  const seen = await prisma.tenantApiKey.findFirst({
+    where: { tenantId: req.tenant.id, revokedAt: null, widgetSeenAt: { not: null } },
+    orderBy: { widgetSeenAt: 'desc' },
+    select: { keyPrefix: true, widgetSeenAt: true, widgetUrl: true }
+  });
+  res.json({
+    installed: !!seen,
+    seenAt: seen?.widgetSeenAt || null,
+    url: seen?.widgetUrl || null,
+    keyPrefix: seen?.keyPrefix || null
+  });
 });
 
 // body { allowedOrigins: ["https://www.acme.com", …] } — the websites allowed
@@ -797,6 +843,75 @@ router.get('/tickets', async (req, res) => {
     take: 100,
     select: { id: true, query: true, confidence: true, kind: true, botType: true, contactEmail: true, status: true, createdAt: true }
   }));
+});
+
+// Thrown inside the answer transaction when the ticket was no longer open by the
+// time we claimed it (a concurrent answer won the race) — rolls the transaction
+// back and maps to 409, so no duplicate document is created.
+class TicketNotOpen extends Error {}
+
+// "Add the answer": the last mile of the feedback loop. Turn an unanswered
+// ticket into a published knowledge document and mark the ticket resolved, in
+// one transaction — ticket → FAQ document → ticket 'answered'. Afterwards the
+// RAG cache is cleared (so the very next chat can use the new answer) and a
+// readiness re-audit is scheduled, exactly like any other knowledge change.
+//
+// The document and the ticket update commit together or not at all; the cache
+// and audit side effects run only after that commit (same ordering as /scrape
+// and the signup /complete). Scoped to req.tenant.id, so one tenant can never
+// answer — or even see — another tenant's ticket.
+router.post('/tickets/:id/answer', async (req, res) => {
+  const ticket = await prisma.supportTicket.findFirst({
+    where: { id: req.params.id, tenantId: req.tenant.id },
+    select: { id: true, query: true, status: true }
+  });
+  if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+  // Only an open ticket can be answered — re-answering a resolved one would add
+  // a duplicate document, so guide the caller to the Documents page instead.
+  if (ticket.status !== 'open') return res.status(409).json({ error: 'This ticket has already been answered.' });
+
+  const content = String(req.body?.answer || '').trim().slice(0, MAX_CONTENT_LEN);
+  if (!content) return res.status(400).json({ error: 'answer is required' });
+  // Defaults to the FAQ category — the natural home for a one-off answered
+  // question — but the caller may file it under any valid category.
+  const category = parseCategory(req.body?.category || 'FAQ');
+  if (!category.ok) return res.status(400).json({ error: category.error });
+  const botScope = parseBotScope(req.body?.botScope);
+  if (!botScope.ok) return res.status(400).json({ error: botScope.error });
+  if (!(await roomForDocuments(req.tenant.id, 1))) return res.status(409).json(TOO_MANY_DOCS);
+
+  // The visitor's question becomes the document title, so the new FAQ reads as
+  // "Q → A"; fall back to a generic title if the ticket somehow has no query.
+  const title = (ticket.query || 'Answer').trim().slice(0, MAX_TITLE_LEN) || 'Answer';
+
+  let document;
+  try {
+    document = await prisma.$transaction(async (tx) => {
+      // Claim the ticket atomically: flip it to answered ONLY if it's still open.
+      // Under concurrent double-submits (two tabs, a retry, a fast double-click)
+      // exactly one request gets count 1; the others get 0 and abort here, so a
+      // single ticket never yields two FAQ documents.
+      const claimed = await tx.supportTicket.updateMany({
+        where: { id: ticket.id, tenantId: req.tenant.id, status: 'open' },
+        data: { status: 'answered' }
+      });
+      if (claimed.count === 0) throw new TicketNotOpen();
+      return tx.tenantDocument.create({
+        data: { tenantId: req.tenant.id, title, content, category: category.value, botScope: botScope.value },
+        select: DOC_FIELDS
+      });
+    });
+  } catch (err) {
+    if (err instanceof TicketNotOpen) return res.status(409).json({ error: 'This ticket has already been answered.' });
+    throw err;
+  }
+
+  // Best-effort: the document + status change are already committed, so a cache or
+  // readiness hiccup must not turn a successful answer into a 500.
+  await invalidateTenantKnowledge(req.tenant.id)
+    .catch((err) => console.warn(`[workspace] tenant ${req.tenant.id}: cache invalidation after answer failed: ${err.message}`));
+  scheduleTenantAudit(req.tenant.id); // knowledge changed → refresh readiness in the background
+  res.status(201).json({ ticket: { id: ticket.id, status: 'answered' }, document });
 });
 
 // ── Leads: visitors who left an email in a chat, with the conversation and

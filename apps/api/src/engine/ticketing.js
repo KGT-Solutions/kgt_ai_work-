@@ -18,6 +18,7 @@ const prisma = require('../lib/prisma');
  */
 async function fileSupportTicket({ profile, query, confidence = null, ctx, kind = 'unanswered', contactEmail = null }) {
   if (!ctx.tenantId) return null; // ticketing requires a tenant to scope the ticket to
+  if (ctx.sandbox) return null;   // a dashboard test chat never files a real ticket
   try {
     return await prisma.supportTicket.create({
       data: {

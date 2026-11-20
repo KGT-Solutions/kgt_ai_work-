@@ -1,7 +1,8 @@
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
 const {
-  makeApiKey, hashApiKey, keyPrefix, issueApiKey, findValidApiKey, shouldTouchLastUsed
+  makeApiKey, hashApiKey, keyPrefix, issueApiKey, findValidApiKey, shouldTouchLastUsed,
+  shouldTouchWidgetSeen, sanitizeWidgetUrl
 } = require('../../src/utils/tenantApiKeys');
 
 // Minimal stand-in for prisma.tenantApiKey, keyed by keyHash like the real unique index.
@@ -87,5 +88,31 @@ describe('tenantApiKeys — lastUsedAt throttling', () => {
 
   test('writes again once the interval has passed', () => {
     assert.equal(shouldTouchLastUsed({ lastUsedAt: new Date(now - 6 * 60 * 1000) }, now), true);
+  });
+});
+
+describe('tenantApiKeys — widget install telemetry', () => {
+  const now = Date.parse('2026-11-19T12:00:00Z');
+
+  test('shouldTouchWidgetSeen: writes on the first ping, skips within the interval, writes after it', () => {
+    assert.equal(shouldTouchWidgetSeen({ widgetSeenAt: null }, now), true);
+    assert.equal(shouldTouchWidgetSeen({ widgetSeenAt: new Date(now - 60 * 1000) }, now), false);
+    assert.equal(shouldTouchWidgetSeen({ widgetSeenAt: new Date(now - 6 * 60 * 1000) }, now), true);
+  });
+
+  test('sanitizeWidgetUrl keeps origin + path and drops the query/hash (no token leakage)', () => {
+    assert.equal(sanitizeWidgetUrl('https://shop.acme.com/pricing?token=secret#top'), 'https://shop.acme.com/pricing');
+    assert.equal(sanitizeWidgetUrl('http://acme.test/'), 'http://acme.test/');
+  });
+
+  test('sanitizeWidgetUrl rejects non-http(s), empty and non-string values', () => {
+    for (const bad of ['', '   ', 'ftp://x/y', 'javascript:alert(1)', 'not a url', undefined, null, 42, {}]) {
+      assert.equal(sanitizeWidgetUrl(bad), null);
+    }
+  });
+
+  test('sanitizeWidgetUrl caps very long URLs', () => {
+    const long = `https://acme.test/${'a'.repeat(500)}`;
+    assert.ok(sanitizeWidgetUrl(long).length <= 300);
   });
 });

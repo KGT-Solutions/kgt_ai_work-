@@ -745,6 +745,21 @@
     }
   });
 
+  // Tell the API the widget loaded, so the dashboard can show "widget detected"
+  // without waiting for a first chat. Best-effort: fire once, never block the UI,
+  // and swallow every error. Only origin + path is sent (no query/hash), so a
+  // page's tokens or PII never leave the site.
+  function pingInstall() {
+    try {
+      fetch(apiBase + '/api/v1/tenant-chat/' + encodeURIComponent(tenantSlug) + '/ping', {
+        method: 'POST',
+        keepalive: true,
+        headers: { 'Content-Type': 'application/json', 'x-tenant-api-key': apiKey },
+        body: JSON.stringify({ url: window.location.origin + window.location.pathname })
+      }).catch(function () {});
+    } catch (e) { /* fetch/keepalive unsupported — the first chat still records use */ }
+  }
+
   // ── Brand theme (Theme Studio). The design the company applied in its
   // dashboard plus its logo, fetched once at start-up. The widget is already
   // usable in its classic look, so a slow or failed fetch changes nothing.
@@ -900,6 +915,7 @@
     document.body.appendChild(launcher);
     applyStaticStrings();
     renderTabs();
+    pingInstall();
     loadTheme();
   }
 

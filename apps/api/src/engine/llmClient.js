@@ -231,7 +231,7 @@ async function callGroq({ systemPrompt, userPrompt, maxTokens }) {
   return { ...result, provider: 'groq' };
 }
 
-// OPENAI_BASE_URL points the OpenAI client at any OpenAI-compatible server —
+// OPENAI_BASE_URL points the OpenAI client at any OpenAI-compatible server --
 // the E2E suite's fake LLM (e2e/fixtures/fakeLlm.js) uses it. Production
 // refuses a non-https value (utils/assertProdSafety.js).
 function openaiBaseUrl() {

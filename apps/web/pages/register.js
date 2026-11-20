@@ -9,6 +9,7 @@ import { DOC_CATEGORIES, DEFAULT_CATEGORY } from '../lib/documentCategories';
 import { DEFAULT_BOT_SCOPE } from '../lib/botScopes';
 import { DEFAULT_BOT_PREFERENCE, botPreferenceLabel, botsFor } from '../lib/botPreferences';
 import { putSignupHandoff } from '../lib/signupHandoff';
+import { applyIgnoredRequirements } from '../lib/readiness';
 import AccountVerifyStep from '../components/signup/AccountVerifyStep';
 import BotSelectionStep from '../components/signup/BotSelectionStep';
 import KnowledgeUploadStep from '../components/signup/KnowledgeUploadStep';
@@ -29,7 +30,7 @@ import TrainingReadinessStep from '../components/signup/TrainingReadinessStep';
 //                         score is advice, not a gate
 //   6. Review & launch  — creates the isolated tenant, its first (hashed) API key and
 //                         the login in one request, then lands the company, signed
-//                         in, on /dashboard.
+//                         in, on /dashboard/bots (where the one-time API key shows).
 
 // Business category drives the tailored knowledge prompts and a tone hint for
 // the bots (mirrors apps/api/src/services/shared/businessCategory.js). `asksFor`
@@ -67,8 +68,12 @@ export default function Register() {
   const normalizedEmail = account.email.trim().toLowerCase();
   const emailVerified = !!verification && verification.email === normalizedEmail;
 
-  // Which bots to deploy: 'support' | 'sales' | 'both'.
+  // Which bots to deploy: 'support' | 'sales' | 'both'. botPrefTouched is set once
+  // the visitor actively picks a bot card; until then a pure website crawl defaults
+  // to the Sales Bot (see effectiveBotPreference below), since a product catalog
+  // trains Sales well but starves Support.
   const [botPreference, setBotPreference] = useState(DEFAULT_BOT_PREFERENCE);
+  const [botPrefTouched, setBotPrefTouched] = useState(false);
 
   // One list for everything: crawled pages (url set), file sections (sourceFile) and written entries.
   const [pages, setPages] = useState([]);
@@ -86,6 +91,12 @@ export default function Register() {
 
   const trainable = pages.filter(isTrainable);
   const hasCrawled = trainable.some((p) => p.url);
+  // Pure crawl: everything to train on came from the website scan, nothing uploaded
+  // or hand-written. Until the visitor picks a bot themselves, such a signup defaults
+  // to the Sales Bot so onboarding reflects the catalog instead of a starved Support
+  // score. The backend mirrors this (inferBotPreference in publicRegister.routes.js).
+  const crawlOnly = trainable.length > 0 && trainable.every((p) => p.url);
+  const effectiveBotPreference = botPrefTouched ? botPreference : (crawlOnly ? 'sales' : DEFAULT_BOT_PREFERENCE);
 
   // The training check of exactly what will be trained on, for the chosen
   // bots. auditKey fingerprints pages + bots; the Training step re-runs the
@@ -93,8 +104,23 @@ export default function Register() {
   // upload made on that screen). failedKey stops a failed check retrying
   // itself in a loop — "Try again" is the visitor's call.
   const [audit, setAudit] = useState({ report: null, key: null, failedKey: null, loading: false, error: '' });
-  const auditKey = JSON.stringify({ botPreference, pages: trainable.map(toApiPage) });
+  // Gaps the visitor marked "Optional / Not applicable": their pillars drop from
+  // the training score (lib/readiness.js) instantly, and are persisted at launch.
+  const [ignored, setIgnored] = useState(() => new Set());
+  const toggleIgnored = (key) => setIgnored((prev) => {
+    const next = new Set(prev);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  });
+  const auditKey = JSON.stringify({ botPreference: effectiveBotPreference, businessCategory: account.businessCategory, pages: trainable.map(toApiPage) });
   const auditCurrent = audit.key === auditKey && !audit.loading;
+  // Only dismissals that still match a gap in the current report count — if a
+  // re-check (e.g. after an upload) resolves a dismissed pillar, its key is
+  // dropped so it no longer affects the score or the saved payload.
+  const itemKeys = new Set((audit.report?.bots ? Object.values(audit.report.bots) : []).flatMap((b) => (b.requirementItems || []).map((i) => i.key)));
+  const effectiveIgnored = new Set([...ignored].filter((k) => itemKeys.has(k)));
+  // The report with dismissals applied — what the Training and Review steps show.
+  const displayReport = audit.report ? applyIgnoredRequirements(audit.report, effectiveIgnored) : null;
   const canLaunch = emailVerified && trainable.length > 0;
 
   const runAudit = async () => {
@@ -103,7 +129,8 @@ export default function Register() {
     setAudit((a) => ({ ...a, loading: true, error: '' }));
     try {
       const report = await api.preflightAudit({
-        companyName: account.companyName.trim(), industryLabel: account.industryLabel, botPreference, pages: trainable.map(toApiPage)
+        companyName: account.companyName.trim(), industryLabel: account.industryLabel, businessCategory: account.businessCategory,
+        botPreference: effectiveBotPreference, pages: trainable.map(toApiPage)
       });
       setAudit({ report, key, failedKey: null, loading: false, error: '' });
     } catch (err) {
@@ -158,8 +185,10 @@ export default function Register() {
         password: account.password,
         industryLabel: account.industryLabel,
         businessCategory: account.businessCategory,
-        botPreference,
+        botPreference: effectiveBotPreference,
         pages: trainable.map(toApiPage),
+        // Gaps dismissed in the Training step — the API recomputes + saves the boosted scores.
+        ignoredRequirements: [...effectiveIgnored],
         // Required by the API whenever crawled pages are included; stored as the consent record.
         websiteConsent: hasCrawled ? { authorized: true, url: crawl?.url } : undefined,
         // Seeds the Theme Studio's three widget designs; the API re-validates it.
@@ -174,7 +203,9 @@ export default function Register() {
         // say "trained on N of M pages".
         pagesDiscovered: data.pagesDiscovered, pagesTrained: data.pagesTrained
       });
-      router.push('/dashboard');
+      // Land on Test Bots: the first thing to do with a fresh workspace is try the
+      // bots. SignupWelcome there surfaces the one-time API key + embed snippets.
+      router.push('/dashboard/bots');
     } catch (err) {
       setLaunching(false);
       if (err.data?.code === 'EMAIL_NOT_VERIFIED') {
@@ -234,7 +265,7 @@ export default function Register() {
             <StepCompany account={account} setAccount={setAccount} onBack={() => goTo(STEP.ACCOUNT)} onNext={() => goTo(STEP.BOTS)} />
           )}
           {step === STEP.BOTS && (
-            <BotSelectionStep value={botPreference} onChange={setBotPreference}
+            <BotSelectionStep value={effectiveBotPreference} onChange={(v) => { setBotPreference(v); setBotPrefTouched(true); }}
               onBack={() => goTo(STEP.COMPANY)} onNext={() => goTo(STEP.KNOWLEDGE)} />
           )}
           {step === STEP.KNOWLEDGE && (
@@ -244,12 +275,13 @@ export default function Register() {
               onBack={() => goTo(STEP.BOTS)} onNext={() => goTo(STEP.TRAINING)} />
           )}
           {step === STEP.TRAINING && (
-            <TrainingReadinessStep audit={audit} botsDeployed={botsFor(botPreference)} onAddPages={addPages} onRecheck={runAudit}
+            <TrainingReadinessStep audit={{ ...audit, report: displayReport }} botsDeployed={botsFor(effectiveBotPreference)}
+              ignored={effectiveIgnored} onToggleIgnored={toggleIgnored} onAddPages={addPages} onRecheck={runAudit}
               onBack={() => goTo(STEP.KNOWLEDGE)} onNext={() => goTo(STEP.REVIEW)} />
           )}
           {step === STEP.REVIEW && (
-            <StepReview account={account} botPreference={botPreference} trainable={trainable} crawledHost={hasCrawled ? crawl?.baseHost : null}
-              readiness={auditCurrent ? audit.report : null} canLaunch={canLaunch} launching={launching} launchError={launchError}
+            <StepReview account={account} botPreference={effectiveBotPreference} trainable={trainable} crawledHost={hasCrawled ? crawl?.baseHost : null}
+              readiness={auditCurrent ? displayReport : null} canLaunch={canLaunch} launching={launching} launchError={launchError}
               onBack={() => goTo(STEP.TRAINING)} onLaunch={launch} />
           )}
         </div>

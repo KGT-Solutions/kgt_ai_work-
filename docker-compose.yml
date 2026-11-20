@@ -18,7 +18,12 @@
 
 services:
   postgres:
-    image: postgres:16-alpine
+    # pgvector/pgvector ships the `vector` extension the hybrid-search migration
+    # (prisma/migrations/20261117090000_pgvector_hybrid) enables. Same Postgres 16
+    # major as the stock image, Debian-based rather than alpine; the data volume
+    # is compatible, so this is a drop-in swap. A managed Postgres can use its own
+    # build as long as the extension is available.
+    image: pgvector/pgvector:pg16
     container_name: kgt-ai-hub-postgres
     # Same file as the API so credentials stay in sync even when compose is
     # started without `--env-file` (interpolation would otherwise force the

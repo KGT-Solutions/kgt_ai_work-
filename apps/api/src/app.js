@@ -1,6 +1,7 @@
 require('dotenv').config();
 const path = require('path');
 const express = require('express');
+const helmet = require('helmet');
 const { corsPolicy } = require('./utils/corsPolicy');
 const { wrapRouterAsync } = require('./utils/wrapAsync');
 const { errorHandler } = require('./middleware/errorHandler');
@@ -25,6 +26,20 @@ const app = express();
 // match the real number of proxies: set it to 0 if the API is ever exposed
 // directly, or visitors could spoof X-Forwarded-For to dodge rate limits.
 app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS ?? 1));
+// Standard security headers (HSTS, X-Content-Type-Options, X-Frame-Options,
+// a default CSP, referrer policy, etc.). Registered before the routes so every
+// response carries them, including the embeddable widget script and the chat API.
+//
+// The ONE default we relax is Cross-Origin-Resource-Policy: Helmet defaults it to
+// `same-origin`, which would make a browser refuse to execute the widget's
+// `<script src="{API}/widgets/tenant-chat-widget.js">` tag on a customer's own
+// (different-origin) site. `cross-origin` restores that load. This does not widen
+// data access: the chat API is still gated by its per-tenant API key and by CORS
+// (utils/corsPolicy.js), and the widget injects DOM into the host page rather than
+// framing us, so X-Frame-Options / frame-ancestors stay at their safe defaults.
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' }
+}));
 // Open CORS for the widget and its chat API only; everything else is
 // limited to the KGT web app's origins (utils/corsPolicy.js).
 app.use(corsPolicy());

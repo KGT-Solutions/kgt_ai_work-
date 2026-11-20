@@ -167,6 +167,9 @@ function workspace(base, auth) {
     updateProduct: (id, patch) => r(`/catalog/products/${enc(id)}`, { method: 'PATCH', body: patch }),
     deleteProduct: (id) => r(`/catalog/products/${enc(id)}`, { method: 'DELETE' }),
     listApiKeys: () => r('/api-keys'),
+    // Has the embed widget loaded on the customer's site yet?
+    // { installed, seenAt, url, keyPrefix }.
+    getInstallStatus: () => r('/install-status'),
     createApiKey: (label) => r('/api-keys', { method: 'POST', body: { label } }),
     revokeApiKey: (keyId, { force = false } = {}) => r(`/api-keys/${enc(keyId)}${force ? '?force=true' : ''}`, { method: 'DELETE' }),
     // The websites allowed to use a key from a browser; [] allows any.
@@ -206,6 +209,10 @@ function workspace(base, auth) {
     getFaqs: () => r('/faqs'),
     regenerateFaqs: () => r('/faqs/regenerate', { method: 'POST' }),
     listTickets: () => r('/tickets'),
+    // "Add the answer": publish an answer to an unanswered ticket as a knowledge
+    // document and mark the ticket resolved. { answer, category?='FAQ', botScope? }
+    // → { ticket: { id, status: 'answered' }, document }.
+    answerTicket: (id, payload) => r(`/tickets/${enc(id)}/answer`, { method: 'POST', body: payload }),
     // Visitors who left an email, with transcript and AI summary: { leads, counts, filters }.
     // botType: 'all' | 'sales' | 'support'; status: 'all' | 'NEW' | 'CONTACTED' — filtered by the API.
     listLeads: ({ botType = 'all', status = 'all' } = {}) => r(`/leads?botType=${enc(botType)}&status=${enc(status)}`),
@@ -227,6 +234,9 @@ function workspace(base, auth) {
     // Readiness audit: run now (saved), or read the saved one: { report, stale, running }
     runReadinessAudit: () => r('/preflight-audit', { method: 'POST' }),
     getReadiness: () => r('/readiness'),
+    // Mark gap items "Optional / Not applicable" (keys like "sales:pricing") and
+    // recompute the saved report's scores — no AI call. Returns the updated report.
+    setIgnoredRequirements: (ignoredRequirements) => r('/readiness/ignored', { method: 'PATCH', body: { ignoredRequirements } }),
     // How the documents split between the bots: { totals, documents: [{ id, title, botScope, sections, counts }] }
     getKnowledgeDistribution: () => r('/knowledge/distribution'),
     // Which bots the company deploys: 'support' | 'sales' | 'both'

@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { Badge, Button, Card, Checkbox, Input, Select, Spinner, Textarea, cx } from '../ui';
-import { IconAlert, IconArrowLeft, IconArrowRight, IconCheck, IconChevronDown, IconDocs, IconGlobe, IconPencil, IconUpload } from '../ui/icons';
+import { IconAlert, IconArrowLeft, IconArrowRight, IconCheck, IconChevronDown, IconDocs, IconGlobe, IconPencil, IconUpload, IconX } from '../ui/icons';
 import { api } from '../../lib/api';
-import { DOC_CATEGORIES, categoryLabel } from '../../lib/documentCategories';
+import { DOC_CATEGORIES, DEFAULT_CATEGORY, categoryLabel } from '../../lib/documentCategories';
 import { BOT_SCOPES, DEFAULT_BOT_SCOPE } from '../../lib/botScopes';
 
 // Signup wizard: the knowledge the bots train on, in one compact card.
@@ -28,7 +28,21 @@ export default function KnowledgeUploadStep({
   pages, trainableCount, maxEntries, onAddPages, updatePage, addEntry,
   website, onBack, onNext
 }) {
+  const [advisoryDismissed, setAdvisoryDismissed] = useState(false);
   const live = pages.filter((p) => !p.deleted);
+  // Advisory only: when every entry is filed under one category, the knowledge is
+  // one-dimensional and the readiness audit will score low on the missing pillars.
+  // Nudge the user to spread it — never a gate, and dismissed per session.
+  // Based on entries that actually have content (a blank "Write an entry" row or a
+  // half-filled page must not trigger or distort the advice); an entry with no
+  // category counts as the default one, matching what the backend would store.
+  const filled = live.filter((p) => p.title?.trim() && p.content?.trim());
+  const categoryIds = new Set(filled.map((p) => p.category || DEFAULT_CATEGORY));
+  const oneDimensional = filled.length > 1 && categoryIds.size === 1;
+  const soleCategory = oneDimensional ? [...categoryIds][0] : null;
+  const otherCategoryLabels = oneDimensional
+    ? DOC_CATEGORIES.filter((c) => c.id !== soleCategory).map((c) => c.short).join(' or ')
+    : '';
   return (
     <div className="mx-auto max-w-3xl space-y-4">
       <Card>
@@ -56,6 +70,18 @@ export default function KnowledgeUploadStep({
           </div>
         </div>
         <div className="space-y-1.5 p-3">
+          {oneDimensional && !advisoryDismissed && (
+            <div className="flex items-start gap-2 rounded-lg border border-amber-400/25 bg-amber-400/[0.06] px-3 py-2.5 text-[12.5px] text-amber-100">
+              <IconAlert className="mt-0.5 h-4 w-4 shrink-0" />
+              <span className="flex-1">
+                All your knowledge is filed under <strong>{categoryLabel(soleCategory)}</strong>. Bots answer best with a spread across
+                categories — add a few entries under {otherCategoryLabels} so both bots have what they need.
+              </span>
+              <button type="button" onClick={() => setAdvisoryDismissed(true)} className="shrink-0 text-amber-200/80 hover:text-amber-100" aria-label="Dismiss">
+                <IconX className="h-4 w-4" />
+              </button>
+            </div>
+          )}
           {live.length === 0 && pages.length === 0 ? (
             <p className="px-2 py-6 text-center text-[13px] text-fg-3">Nothing yet — upload a document or scan your website above.</p>
           ) : pages.map((p) => <EntryRow key={p.id} page={p} onChange={(patch) => updatePage(p.id, patch)} />)}
@@ -219,6 +245,20 @@ function EntryRow({ page, onChange }) {
       </button>
       {open && (
         <div className="space-y-2 border-t border-white/[0.06] p-3">
+          {/* What was ingested, at a glance: category · source · size. */}
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-fg-3">
+            <span>{categoryLabel(page.category)}</span>
+            <span aria-hidden="true">·</span>
+            {page.url ? (
+              <a href={page.url} target="_blank" rel="noopener noreferrer" className="inline-flex max-w-full items-center gap-1 truncate text-brand-300 hover:text-brand-200 hover:underline">
+                <IconGlobe className="h-3 w-3 shrink-0" /><span className="truncate">{page.url}</span>
+              </a>
+            ) : (
+              <span className="truncate">{page.sourceFile || 'Written by you'}</span>
+            )}
+            <span aria-hidden="true">·</span>
+            <span>{(page.content || '').length.toLocaleString()} characters</span>
+          </div>
           <Input value={page.title} onChange={(e) => onChange({ title: e.target.value })} placeholder="Title, e.g. Shipping & returns" aria-label="Entry title" />
           <Textarea value={page.content} onChange={(e) => onChange({ content: e.target.value })} className="font-mono text-[12.5px]" aria-label="Entry content"
             placeholder={'## A question or topic\nThe answer, in plain words.\n\n## Another topic\n…'} />
