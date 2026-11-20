@@ -4,18 +4,36 @@ import Link from 'next/link';
 import { useRouter } from 'next/router';
 import { OrbAuthShell, OrbStepTracker } from '../../components/orb/auth';
 import { CreateAccountStep, EnterCodeStep, CompanyStep, KnowledgeStep, TrainingStep, ReviewStep } from '../../components/orb/register';
+import { setToken } from '../../lib/api';
+import { putSignupHandoff } from '../../lib/signupHandoff';
 
 // Orb onboarding wizard (Figma board "0 · Signup and onboarding", 595:1824).
 // Five tracker steps; step 0 (Account) has two sub-screens: create → enter code.
-// No sidebar; centered 1200px shell. (UI build — the create-workspace action is
-// a placeholder redirect; wire it to the register API when ready.)
+// State is lifted here and the steps call the onboarding mutation hooks
+// (lib/onboarding.js) — see each step component.
 const STEPS = ['Account', 'Company', 'Knowledge', 'Training & bots', 'Create workspace'];
 
 export default function OrbRegister() {
   const router = useRouter();
   const [step, setStep] = useState(0);
   const [accountSub, setAccountSub] = useState('create'); // 'create' | 'code'
-  const [email, setEmail] = useState('');
+
+  // ── Lifted onboarding state ───────────────────────────────────────────────
+  const [account, setAccount] = useState({ email: '', password: '' });
+  const [verification, setVerification] = useState(null); // { email, token } after OTP
+  const [company, setCompany] = useState({ companyName: '', contactName: '', industry: 'fertility', industryLabel: 'Fertility & IVF clinic' });
+  const [bots, setBots] = useState({ support: true, sales: true });
+  const [entries, setEntries] = useState([]);
+
+  // On a successful /complete: sign in and hand off to the test page.
+  const onComplete = (data) => {
+    setToken('client', data.token);
+    putSignupHandoff({
+      apiKey: data.apiKey, slug: data.slug, documentsCreated: data.documentsCreated,
+      pagesDiscovered: data.pagesDiscovered, pagesTrained: data.pagesTrained
+    });
+    router.push('/testorb');
+  };
 
   const topRight = (
     <span className="orb-small text-orb-secondary">
@@ -36,15 +54,29 @@ export default function OrbRegister() {
           <OrbStepTracker steps={STEPS} current={step} />
 
           {step === 0 && accountSub === 'create' && (
-            <CreateAccountStep email={email} setEmail={setEmail} onSendCode={() => setAccountSub('code')} />
+            <CreateAccountStep account={account} setAccount={setAccount} onSent={() => setAccountSub('code')} />
           )}
           {step === 0 && accountSub === 'code' && (
-            <EnterCodeStep email={email} onDifferentEmail={() => setAccountSub('create')} onVerify={() => setStep(1)} />
+            <EnterCodeStep
+              email={account.email.trim()}
+              onDifferentEmail={() => setAccountSub('create')}
+              onVerified={(v) => { setVerification(v); setStep(1); }}
+            />
           )}
-          {step === 1 && <CompanyStep onContinue={() => setStep(2)} />}
-          {step === 2 && <KnowledgeStep onBack={() => setStep(1)} onContinue={() => setStep(3)} />}
-          {step === 3 && <TrainingStep onBack={() => setStep(2)} onContinue={() => setStep(4)} />}
-          {step === 4 && <ReviewStep onBack={() => setStep(3)} onCreate={() => router.push('/testorb')} />}
+          {step === 1 && <CompanyStep company={company} setCompany={setCompany} onBack={() => setStep(0)} onContinue={() => setStep(2)} />}
+          {step === 2 && <KnowledgeStep entries={entries} setEntries={setEntries} companyName={company.companyName} onBack={() => setStep(1)} onContinue={() => setStep(3)} />}
+          {step === 3 && (
+            <TrainingStep
+              bots={bots} setBots={setBots} company={company} entries={entries}
+              onBack={() => setStep(2)} onContinue={() => setStep(4)}
+            />
+          )}
+          {step === 4 && (
+            <ReviewStep
+              account={account} verification={verification} company={company} bots={bots} entries={entries}
+              onBack={() => setStep(3)} onComplete={onComplete}
+            />
+          )}
         </div>
       </OrbAuthShell>
     </>

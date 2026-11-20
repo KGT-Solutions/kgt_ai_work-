@@ -11,6 +11,7 @@ export { default as Input, Textarea } from './Input';
 export { default as Checkbox } from './Checkbox';
 export { default as Chip } from './Chip';
 export { default as Drawer } from './Drawer';
+export { default as Modal } from './Modal';
 export { default as CodeBlock } from './CodeBlock';
 export { default as Banner } from './Banner';
 export { default as Segmented } from './Segmented';
