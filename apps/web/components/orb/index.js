@@ -16,6 +16,7 @@ export { default as Banner } from './Banner';
 export { default as Segmented } from './Segmented';
 export { default as ScoreBar } from './ScoreBar';
 export { default as OrbMark } from './OrbMark';
+export { default as OrbLogo } from './OrbLogo';
 export { default as Toggle } from './Toggle';
 export { default as ChatMessage, AnnotationBox } from './ChatMessage';
 export * from './icons';
