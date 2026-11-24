@@ -1,6 +1,6 @@
 import Head from 'next/head';
 import OrbShell from '../../components/shell/OrbShell';
-import { InstallStatusCard, SnippetsCard, WherePasteCard, KeysCard } from '../../components/orb/install';
+import { InstallStatusCard, SnippetsCard, WherePasteCard, KeysCard, useKeyIssuer } from '../../components/orb/install';
 
 // Install page. DATA CONTAINER: owns the page data; swap for an API/state source
 // later — the cards below never change.
@@ -29,14 +29,14 @@ const DATA = {
     { title: 'On every page', body: 'Paste it just before </body>. Site builders call this custom code or footer scripts.' },
     { title: 'Check it worked', body: 'Open any page with the snippet. The status above changes to “Widget seen” within a minute.' },
     { title: 'Live comes from a real chat', body: 'Orb shows Live only after the first visitor chat on your site.' }
-  ],
-  keys: [
-    { id: 'k1', label: '6 Oct 2026', keyMasked: 'tk_3f9a1c…', made: '6 Oct', lastUsed: '4 min ago', revoked: false },
-    { id: 'k2', label: 'Old test page', keyMasked: 'tk_81d02e…', made: '6 Oct', lastUsed: 'Revoked 9 Oct', revoked: true }
   ]
 };
 
 export default function InstallPage() {
+  // One shared "issue a key" flow; every "make a key" button opens the same popup.
+  const { open, modals } = useKeyIssuer();
+  const snippets = DATA.snippets.map((s) => ({ ...s, onMakeKey: open }));
+
   return (
     <>
       <Head><title>Install · Orb</title></Head>
@@ -50,12 +50,13 @@ export default function InstallPage() {
           <InstallStatusCard {...DATA.status} />
 
           <div className="grid grid-cols-1 gap-7 lg:grid-cols-[630fr_480fr]">
-            <SnippetsCard snippets={DATA.snippets} footerNote={DATA.snippetsFooter} />
+            <SnippetsCard snippets={snippets} footerNote={DATA.snippetsFooter} />
             <WherePasteCard sections={DATA.wherePaste} />
           </div>
 
-          <KeysCard keys={DATA.keys} />
+          <KeysCard onMakeKey={open} />
         </div>
+        {modals}
       </OrbShell>
     </>
   );
