@@ -1,4 +1,5 @@
 const express = require('express');
+const { logger } = require('../lib/logger');
 const multer = require('multer');
 const { Prisma } = require('@prisma/client');
 const prisma = require('../lib/prisma');
@@ -13,15 +14,26 @@ const { crawlConsentRecord, hostOf } = require('../services/shared/crawlConsent'
 const { createIpRateLimiter } = require('../utils/ipRateLimit');
 const { handleChat } = require('../services/tenantChat');
 const { transcribeAudio, isSttConfigured, MAX_AUDIO_BYTES } = require('../services/shared/speechToText');
+const { isS2sConfigured } = require('../services/shared/speechToSpeech');
+const { runVoiceChat } = require('../services/voiceChat');
 const { detectLanguage } = require('../engine/language');
 const { getMaskedConfig, upsertConfig, testConfig, SmtpConfigError } = require('../services/tenantSmtp');
+const emailConnection = require('../services/emailConnection');
+const { redirectUri: emailRedirectUri } = require('./emailOAuth.routes');
 const crmSettings = require('../services/crm/crmSettings');
 const { CrmError } = require('../services/crm/zohoAuth');
 const { redirectUri: crmRedirectUri } = require('./crmOAuth.routes');
+const hubspotSettings = require('../services/crm/hubspotSettings');
+const { redirectUri: hubspotRedirectUri } = require('./hubspotOAuth.routes');
 const branding = require('../services/branding');
 const { LogoUploadError, MAX_LOGO_UPLOAD_BYTES, ACCEPTED_LOGO_TYPES } = require('../services/shared/logoUpload');
-const { ingestCatalogCsv, getCatalogSummary, listProducts, addProduct, updateProduct, deleteProduct, importExtractedProducts, ProductError } = require('../services/catalogIngest');
+const { ingestCatalogCsv, replaceCatalog, getCatalogSummary, listProducts, addProduct, updateProduct, deleteProduct, importExtractedProducts, ProductError } = require('../services/catalogIngest');
 const { CsvCatalogError, catalogTemplateCsv, MAX_CSV_BYTES } = require('../services/shared/csvCatalog');
+const { inspectWorkbook, extractProductsFromWorkbook, XlsxCatalogError, MAX_XLSX_BYTES } = require('../services/shared/xlsxCatalog');
+const knowledgeSync = require('../services/knowledgeSync');
+const webhooks = require('../services/webhooks');
+const sheetsSync = require('../services/sheetsSync');
+const { redirectUri: sheetsRedirectUri } = require('./sheetsOAuth.routes');
 const { scheduleFaqGeneration, isFaqGenerationRunning } = require('../services/tenantFaqs');
 const { usageBreakdowns } = require('../services/usageStats');
 const { wrapRouterAsync } = require('../utils/wrapAsync');
@@ -30,8 +42,14 @@ const { answerCache } = require('../engine/answerCache');
 const { ingestUpload, FileIngestError, MAX_UPLOAD_BYTES } = require('../services/shared/fileIngest');
 const { documentChunks } = require('../domains/tenantProfile');
 const { auditTenant, tenantReadiness, recomputeReadiness, saveTenantReadiness, scheduleTenantAudit } = require('../services/botAuditor');
+const { getGuardrails, saveGuardrails, parseGuardrailsInput } = require('../services/guardrails');
 const { runSessionSummary, claimSession } = require('../services/chatSessions');
 const { teamRecipients, parseTeamEmail, lowConfidenceBelow } = require('../services/teamAlerts');
+const instructions = require('../services/tenantInstructions');
+const escalationSvc = require('../services/escalation');
+const helpdeskSettings = require('../services/helpdesk/helpdeskSettings');
+const retention = require('../services/retention');
+const { rowsToCsv, BOM } = require('../services/shared/csvExport');
 
 // Everything one tenant can do with its own bots: documents, PDF upload,
 // website import, API keys, test chat, tickets, leads and usage.
@@ -76,7 +94,7 @@ async function autoPopulateCatalog(tenantId, text, { title = '' } = {}) {
     const { imported } = await importExtractedProducts(tenantId, products);
     return imported;
   } catch (err) {
-    console.warn(`[workspace] auto product extraction failed for tenant ${tenantId}: ${err.message}`);
+    logger.warn(`[workspace] auto product extraction failed for tenant ${tenantId}: ${err.message}`);
     return 0;
   }
 }
@@ -330,10 +348,10 @@ router.post('/scrape', async (req, res) => {
       result.pages = distilled.pages;
       distilledProducts = distilled.products;
       if (distilled.distilledCount) {
-        console.info(`[scrape] distilled ${distilled.distilledCount}/${result.pages.length} pages for tenant ${req.tenant.id}`);
+        logger.info(`[scrape] distilled ${distilled.distilledCount}/${result.pages.length} pages for tenant ${req.tenant.id}`);
       }
     } catch (err) {
-      console.warn(`[scrape] distillation skipped for tenant ${req.tenant.id}: ${err.message}`);
+      logger.warn(`[scrape] distillation skipped for tenant ${req.tenant.id}: ${err.message}`);
     }
   }
 
@@ -376,7 +394,7 @@ router.post('/scrape', async (req, res) => {
     const merged = mergeProducts(llmProducts, heuristicProducts);
     if (merged.length) importedProducts = (await importExtractedProducts(req.tenant.id, merged)).imported;
   } catch (err) {
-    console.warn(`[scrape] product import skipped for tenant ${req.tenant.id}: ${err.message}`);
+    logger.warn(`[scrape] product import skipped for tenant ${req.tenant.id}: ${err.message}`);
   }
 
   res.status(201).json({
@@ -480,6 +498,193 @@ router.post('/catalog', (req, res, next) => catalogUpload.single('file')(req, re
   }
 });
 
+// ── Spreadsheet (.xlsx) catalog upload with sheet/column/price selection
+// (Feature 1, services/shared/xlsxCatalog.js). Two steps, so the owner picks
+// before importing: preview (inspect sheets/columns/sample rows) then import
+// (the chosen sheet + column→field mapping). The file is NEVER stored — the
+// import re-uploads it alongside the mapping. `selections` is a JSON form field.
+const xlsxUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_XLSX_BYTES, files: 1, fields: 2 } });
+const xlsxUploadMiddleware = (req, res, next) => xlsxUpload.single('file')(req, res, (err) => {
+  if (!err) return next();
+  if (err instanceof multer.MulterError) {
+    return res.status(err.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({
+      error: err.code === 'LIMIT_FILE_SIZE' ? `Spreadsheets are limited to ${MAX_XLSX_BYTES / (1024 * 1024)}MB` : 'Upload exactly one file in a field named "file"'
+    });
+  }
+  next(err);
+});
+const isXlsxName = (name) => /\.xlsx$/i.test(String(name || ''));
+
+router.post('/catalog/xlsx/preview', xlsxUploadMiddleware, async (req, res, next) => {
+  if (!req.file) return res.status(400).json({ error: 'Attach an .xlsx file in a field named "file"' });
+  if (!isXlsxName(req.file.originalname)) return res.status(415).json({ error: 'Choose an .xlsx workbook. Save an older .xls file as .xlsx first.' });
+  try {
+    res.json({ fileName: req.file.originalname, ...(await inspectWorkbook(req.file.buffer)) });
+  } catch (e) {
+    if (e instanceof XlsxCatalogError) return res.status(e.statusCode).json({ error: e.message });
+    next(e);
+  }
+});
+
+router.post('/catalog/xlsx/import', xlsxUploadMiddleware, async (req, res, next) => {
+  if (!req.file) return res.status(400).json({ error: 'Attach an .xlsx file in a field named "file"' });
+  if (!isXlsxName(req.file.originalname)) return res.status(415).json({ error: 'Choose an .xlsx workbook. Save an older .xls file as .xlsx first.' });
+  let selections;
+  try {
+    selections = typeof req.body?.selections === 'string' ? JSON.parse(req.body.selections) : req.body?.selections;
+  } catch {
+    return res.status(400).json({ error: 'The sheet/column selection was not valid.' });
+  }
+  try {
+    const { products, skipped } = await extractProductsFromWorkbook(req.file.buffer, selections);
+    // A bulk .xlsx import replaces the catalog, exactly like the CSV import.
+    const result = await replaceCatalog(req.tenant.id, products);
+    res.status(201).json({ fileName: req.file.originalname, ...result, skipped });
+  } catch (e) {
+    if (e instanceof XlsxCatalogError) return res.status(e.statusCode).json({ error: e.message });
+    next(e);
+  }
+});
+
+// ── Full-site sitemap sync, weekly auto-refresh & change reports (Feature 2,
+// services/knowledgeSync.js). The saved source + weekly schedule, a manual
+// "Sync now" (rate-limited like a crawl), and the change-report history. All
+// strictly scoped to req.tenant.id.
+router.get('/crawl-source', async (req, res) => {
+  res.json(await knowledgeSync.getCrawlSource(req.tenant.id));
+});
+
+router.put('/crawl-source', async (req, res, next) => {
+  try {
+    res.json(await knowledgeSync.saveCrawlSource(req.tenant.id, req.body));
+  } catch (e) {
+    if (e instanceof knowledgeSync.KnowledgeSyncError) return res.status(e.statusCode).json({ error: e.message });
+    next(e);
+  }
+});
+
+// "Sync now": run a sitemap sync immediately against the saved source (or a URL
+// in the body). Clients confirm crawl authorization and are rate-limited per
+// tenant, mirroring /scrape.
+router.post('/crawl-source/sync', async (req, res, next) => {
+  const isClient = req.actor === 'client';
+  const source = await knowledgeSync.getCrawlSource(req.tenant.id);
+  const url = String(req.body?.url || source.url || '').trim();
+  if (!url || !hostOf(url)) return res.status(400).json({ error: 'Set a website address to sync first.' });
+  if (isClient) {
+    if (req.body?.authorized !== true && !source.url) {
+      return res.status(400).json({ error: 'You must confirm you are authorized to let us crawl this domain' });
+    }
+    if (await isClientCrawlLimited(req.tenant.id)) {
+      return res.status(429).json({ error: 'Too many website syncs. Please try again in an hour.' });
+    }
+  }
+  // Persist the URL as the source if it was passed inline and none is saved yet.
+  if (!source.url) await knowledgeSync.saveCrawlSource(req.tenant.id, { url }).catch(() => {});
+  try {
+    const run = await knowledgeSync.runSitemapSync(req.tenant.id, url, { trigger: 'manual' });
+    res.status(201).json(run);
+  } catch (e) {
+    if (e instanceof knowledgeSync.KnowledgeSyncError || e instanceof CrawlerError) return res.status(e.statusCode).json({ error: e.message });
+    next(e);
+  }
+});
+
+router.get('/crawl-runs', async (req, res) => {
+  res.json({ runs: await knowledgeSync.listCrawlRuns(req.tenant.id) });
+});
+
+router.get('/crawl-runs/:id', async (req, res) => {
+  const run = await knowledgeSync.getCrawlRun(req.tenant.id, req.params.id);
+  if (!run) return res.status(404).json({ error: 'Sync run not found' });
+  res.json(run);
+});
+
+// ── Generic outbound webhooks (Feature 8, services/webhooks.js). CRUD, a test
+// delivery, secret rotation, and the delivery log. The signing secret is
+// returned only on create/rotate, never on list/get. All scoped to req.tenant.id.
+function sendWebhookError(err, res, next) {
+  if (err instanceof webhooks.WebhookError) return res.status(err.statusCode).json({ error: err.message });
+  return next(err);
+}
+
+router.get('/webhooks', async (req, res) => {
+  res.json(await webhooks.listWebhooks(req.tenant.id));
+});
+
+// Delivery log (most recent first); ?webhookId= narrows to one endpoint.
+router.get('/webhooks/deliveries', async (req, res) => {
+  res.json(await webhooks.listDeliveries(req.tenant.id, { webhookId: req.query.webhookId ? String(req.query.webhookId) : null }));
+});
+
+// Create → returns the webhook PLUS the plaintext signing secret, once.
+router.post('/webhooks', async (req, res, next) => {
+  try {
+    res.status(201).json(await webhooks.createWebhook(req.tenant.id, req.body || {}));
+  } catch (err) { sendWebhookError(err, res, next); }
+});
+
+router.patch('/webhooks/:id', async (req, res, next) => {
+  try {
+    res.json(await webhooks.updateWebhook(req.tenant.id, req.params.id, req.body || {}));
+  } catch (err) { sendWebhookError(err, res, next); }
+});
+
+router.delete('/webhooks/:id', async (req, res, next) => {
+  try {
+    res.json(await webhooks.deleteWebhook(req.tenant.id, req.params.id));
+  } catch (err) { sendWebhookError(err, res, next); }
+});
+
+// Rotate the signing secret → returns the new plaintext secret, once.
+router.post('/webhooks/:id/rotate-secret', async (req, res, next) => {
+  try {
+    res.json(await webhooks.rotateSecret(req.tenant.id, req.params.id));
+  } catch (err) { sendWebhookError(err, res, next); }
+});
+
+// Send a one-off `ping` delivery so the owner can confirm their receiver works.
+router.post('/webhooks/:id/test', async (req, res, next) => {
+  try {
+    res.json(await webhooks.testWebhook(req.tenant.id, req.params.id));
+  } catch (err) { sendWebhookError(err, res, next); }
+});
+
+// ── Google Sheets sync (Feature 8, services/sheetsSync.js). Connect a Google
+// account (consent URL for the browser; the public callback stores encrypted
+// tokens), choose a spreadsheet, and pick which events append a row. Status never
+// returns tokens.
+function sendSheetsError(err, res, next) {
+  if (err instanceof sheetsSync.SheetsSyncError) return res.status(err.statusCode).json({ error: err.message });
+  return next(err);
+}
+const sheetsActor = (req) => req.tenantUser?.email || req.actor || 'client';
+
+router.get('/sheets-sync', async (req, res, next) => {
+  try {
+    res.json(await sheetsSync.getStatus(req.tenant));
+  } catch (err) { sendSheetsError(err, res, next); }
+});
+
+router.post('/sheets-sync/connect', async (req, res, next) => {
+  try {
+    res.json(await sheetsSync.beginConnect({ tenantId: req.tenant.id, redirectUri: sheetsRedirectUri(req), actor: sheetsActor(req) }));
+  } catch (err) { sendSheetsError(err, res, next); }
+});
+
+router.post('/sheets-sync/disconnect', async (req, res, next) => {
+  try {
+    res.json(await sheetsSync.disconnect(req.tenant));
+  } catch (err) { sendSheetsError(err, res, next); }
+});
+
+// body { spreadsheetId?, spreadsheetName?, events?, enabled? }
+router.put('/sheets-sync/settings', async (req, res, next) => {
+  try {
+    res.json(await sheetsSync.saveSettings(req.tenant, req.body || {}));
+  } catch (err) { sendSheetsError(err, res, next); }
+});
+
 // ── Custom SMTP: a tenant's own mail server for ticket alerts, lead emails
 // and notifications (services/tenantSmtp.js, services/mailer.js). The
 // password is encrypted at rest and never returned — GET masks it.
@@ -507,6 +712,57 @@ router.post('/smtp-config/test', async (req, res, next) => {
   }
 });
 
+// ── Email Connection (Feature 10, services/emailConnection.js). Google /
+// Microsoft send-only OAuth + per-email-type toggles, alongside the custom SMTP
+// above. Status never returns tokens; connect hands back a consent URL the
+// browser opens, and the public callback (routes/emailOAuth.routes.js) stores
+// the encrypted tokens. Custom SMTP keeps working unchanged.
+function sendEmailConnError(err, res, next) {
+  if (err instanceof emailConnection.EmailConnectionError) return res.status(err.statusCode).json({ error: err.message });
+  return next(err);
+}
+const emailActor = (req) => req.tenantUser?.email || req.actor || 'client';
+
+router.get('/email-connection', async (req, res, next) => {
+  try {
+    res.json(await emailConnection.getStatus(req.tenant));
+  } catch (err) {
+    sendEmailConnError(err, res, next);
+  }
+});
+
+// body { provider: 'google' | 'microsoft' } → { authUrl } for the browser to open.
+router.post('/email-connection/connect', async (req, res, next) => {
+  try {
+    const provider = String(req.body?.provider || '').trim().toLowerCase();
+    res.json(await emailConnection.beginConnect({
+      tenantId: req.tenant.id, provider, redirectUri: emailRedirectUri(req, provider), actor: emailActor(req)
+    }));
+  } catch (err) {
+    sendEmailConnError(err, res, next);
+  }
+});
+
+router.post('/email-connection/disconnect', async (req, res, next) => {
+  try {
+    res.json(await emailConnection.disconnect(req.tenant));
+  } catch (err) {
+    sendEmailConnError(err, res, next);
+  }
+});
+
+// body { leadAlerts?, attentionAlerts?, visitorConfirmation? } (booleans) —
+// per-email-type toggles enforced before each category sends.
+router.put('/email-connection/toggles', async (req, res, next) => {
+  try {
+    res.json(await emailConnection.setToggles(req.tenant, {
+      leadAlerts: req.body?.leadAlerts, attentionAlerts: req.body?.attentionAlerts, visitorConfirmation: req.body?.visitorConfirmation
+    }));
+  } catch (err) {
+    sendEmailConnError(err, res, next);
+  }
+});
+
 // ── CRM integrations (services/crm/*). The dashboard's Integrations page.
 // Status never returns tokens; connect hands back a Zoho consent URL the
 // browser opens, and the public callback (routes/crmOAuth.routes.js) finishes
@@ -530,6 +786,31 @@ router.post('/crm/connect', async (req, res, next) => {
 
 router.post('/crm/disconnect', async (req, res) => {
   res.json(await crmSettings.disconnect(req.tenant.id));
+});
+
+// ── HubSpot CRM (Feature 9, services/crm/hubspot*). Same shape as the Zoho
+// routes above: status never returns tokens; connect hands back a HubSpot consent
+// URL the browser opens, and the public callback (routes/hubspotOAuth.routes.js)
+// finishes the flow and stores the encrypted tokens. One CRM per tenant, so
+// connect is refused (409) while Zoho holds the slot.
+router.get('/crm/hubspot', async (req, res) => {
+  res.json(await hubspotSettings.getHubspotStatus(req.tenant.id));
+});
+
+router.post('/crm/hubspot/connect', async (req, res, next) => {
+  try {
+    const result = await hubspotSettings.beginConnect({
+      tenantId: req.tenant.id, redirectUri: hubspotRedirectUri(req)
+    });
+    res.json(result);
+  } catch (err) {
+    if (err instanceof CrmError) return res.status(err.statusCode).json({ error: err.message });
+    next(err);
+  }
+});
+
+router.post('/crm/hubspot/disconnect', async (req, res) => {
+  res.json(await hubspotSettings.disconnect(req.tenant.id));
 });
 
 // ── Bot Branding & Theme Studio (services/branding.js). The brand kit and
@@ -604,7 +885,8 @@ router.post('/branding/scan', async (req, res, next) => {
   }
 });
 
-// body { logoUrl?, primaryColor?, botName? } — manual edits; '' or null clears any of them.
+// body { logoUrl?, primaryColor?, botName?, showBranding? } — manual edits; '' or null clears
+// text fields. showBranding (boolean) shows/hides the free "Powered by KGT Orb" footer strip.
 // A logo URL makes the server download and decode that image (twice: analyse,
 // then clean), so it draws on the same per-tenant budget as a website scan —
 // unthrottled, pasting URLs in a loop was a CPU sink and a way to point our
@@ -616,7 +898,8 @@ router.patch('/branding', async (req, res, next) => {
   }
   try {
     res.json(await branding.updateBrandKit(req.tenant, {
-      logoUrl: req.body?.logoUrl, primaryColor: req.body?.primaryColor, botName: req.body?.botName
+      logoUrl: req.body?.logoUrl, primaryColor: req.body?.primaryColor, botName: req.body?.botName,
+      showBranding: req.body?.showBranding
     }));
   } catch (err) {
     sendBrandingError(err, res, next);
@@ -645,6 +928,61 @@ router.delete('/branding/logo', async (req, res, next) => {
     res.json(await branding.removeLogo(req.tenant));
   } catch (err) {
     sendBrandingError(err, res, next);
+  }
+});
+
+// ── Client-facing Instructions Editor (Feature 11, services/tenantInstructions.js).
+// The owner tunes each assistant's tone/style/length and a little free-text
+// guidance; the locked grounding/safety/pricing rules stay server-side and
+// cannot be overridden (the directive is appended strictly subordinate to
+// them). Every save is versioned; a previous version can be viewed and restored.
+const instructionActor = (req) => req.tenantUser?.email || req.actor || 'client';
+function sendInstructionError(err, res, next) {
+  if (err instanceof instructions.InstructionError) return res.status(err.statusCode).json({ error: err.message });
+  return next(err);
+}
+
+// The current settings for one assistant, plus the preset catalog the UI renders.
+// ?botType=support|sales (defaults to support).
+router.get('/instructions', async (req, res, next) => {
+  try {
+    const botType = req.query.botType || 'support';
+    res.json({ ...(await instructions.getInstructions(req.tenant, botType)), presets: instructions.PRESETS });
+  } catch (err) {
+    sendInstructionError(err, res, next);
+  }
+});
+
+// body { botType, tone?, style?, length?, guidance?, summary? } — save and
+// snapshot a new version. '' / null clears a preset; the locked rules are
+// unaffected regardless of what is sent.
+router.put('/instructions', async (req, res, next) => {
+  try {
+    res.json(await instructions.updateInstructions(req.tenant, req.body?.botType, {
+      tone: req.body?.tone, style: req.body?.style, length: req.body?.length,
+      guidance: req.body?.guidance, summary: req.body?.summary, actor: instructionActor(req)
+    }));
+  } catch (err) {
+    sendInstructionError(err, res, next);
+  }
+});
+
+// The saved revisions for one assistant, newest first. ?botType=support|sales.
+router.get('/instructions/versions', async (req, res, next) => {
+  try {
+    res.json({ versions: await instructions.listVersions(req.tenant, req.query.botType || 'support') });
+  } catch (err) {
+    sendInstructionError(err, res, next);
+  }
+});
+
+// body { botType, versionId } — restore a previous revision as a new version.
+router.post('/instructions/restore', async (req, res, next) => {
+  if (!req.body || !req.body.versionId) return res.status(400).json({ error: 'versionId is required' });
+  try {
+    res.json(await instructions.restoreVersion(req.tenant, req.body?.botType, req.body.versionId, { actor: instructionActor(req) }));
+  } catch (err) {
+    sendInstructionError(err, res, next);
   }
 });
 
@@ -729,6 +1067,20 @@ router.patch('/bot-preference', async (req, res) => {
   });
   await answerCache.invalidateTenant(req.tenant.id);
   res.json(updated);
+});
+
+// ── Guardrails settings (scaffold). The single owner-tunable config row; absent
+// returns platform defaults. services/guardrails.js owns validation. Tenant
+// scoping + RBAC are inherited from this router's mounts (requireClient /
+// requireOperator + loadTenantFromParam), so a client only ever sees its own.
+router.get('/guardrails', async (req, res) => {
+  res.json(await getGuardrails(req.tenant.id));
+});
+
+router.patch('/guardrails', async (req, res) => {
+  const parsed = parseGuardrailsInput(req.body);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  res.json(await saveGuardrails(req.tenant.id, parsed.data));
 });
 
 // ── API keys. Plaintext is returned only by the POST that issues a key;
@@ -834,6 +1186,36 @@ router.post('/transcribe', (req, res, next) => audioUpload.single('audio')(req, 
   }
 });
 
+// Speech-to-Speech in the dashboard test chat. Same orchestration as the public
+// widget route, but JWT-scoped and sandboxed: req.actor is set here, so
+// runVoiceChat → runTenantChat runs with sandbox=true and writes no live
+// session, lead or usage. Guardrails are not applied to the owner's own test.
+router.post('/voice-chat', (req, res, next) => audioUpload.single('audio')(req, res, (err) => {
+  if (!err) return next();
+  if (err instanceof multer.MulterError) {
+    return res.status(err.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({
+      error: err.code === 'LIMIT_FILE_SIZE' ? `Audio must be ${Math.round(MAX_AUDIO_BYTES / (1024 * 1024))}MB or smaller` : 'Upload one audio file in a field named "audio"'
+    });
+  }
+  return next(err);
+}), async (req, res, next) => {
+  if (!isS2sConfigured()) return res.status(503).json({ error: 'Voice conversations are not available right now.' });
+  if (!req.file?.buffer?.length) return res.status(400).json({ error: 'Attach an audio file in a field named "audio"' });
+  if (await isWsTranscribeLimited(req.tenant.id)) return res.status(429).json({ error: 'Too many voice messages. Please wait a few minutes and try again.' });
+  try {
+    const out = await runVoiceChat({
+      tenant: req.tenant,
+      audio: { buffer: req.file.buffer, filename: req.file.originalname || 'voice.webm', mimeType: req.file.mimetype || 'audio/webm' },
+      body: req.body,
+      sandbox: !!req.actor // the dashboard test chat: leave no trace
+    });
+    res.json(out);
+  } catch (err) {
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    next(err);
+  }
+});
+
 // ── Tickets and usage
 
 router.get('/tickets', async (req, res) => {
@@ -909,7 +1291,7 @@ router.post('/tickets/:id/answer', async (req, res) => {
   // Best-effort: the document + status change are already committed, so a cache or
   // readiness hiccup must not turn a successful answer into a 500.
   await invalidateTenantKnowledge(req.tenant.id)
-    .catch((err) => console.warn(`[workspace] tenant ${req.tenant.id}: cache invalidation after answer failed: ${err.message}`));
+    .catch((err) => logger.warn(`[workspace] tenant ${req.tenant.id}: cache invalidation after answer failed: ${err.message}`));
   scheduleTenantAudit(req.tenant.id); // knowledge changed → refresh readiness in the background
   res.status(201).json({ ticket: { id: ticket.id, status: 'answered' }, document });
 });
@@ -980,7 +1362,7 @@ router.patch('/leads/:leadId', async (req, res) => {
 const SESSIONS_PAGE = 30;
 const SESSION_FIELDS = {
   id: true, externalUserId: true, botType: true, startedAt: true, lastMessageAt: true, messageCount: true,
-  endedAt: true, summary: true, summaryStatus: true, summarizedAt: true
+  endedAt: true, summary: true, summaryStatus: true, summarizedAt: true, pausedAt: true, pauseReason: true
 };
 const isSummarizeLimited = createIpRateLimiter({ name: 'workspace-summarize', max: 20, windowMs: 60 * 60 * 1000 });
 
@@ -996,14 +1378,118 @@ async function leadsBySession(tenantId, sessionIds) {
   return map;
 }
 
-router.get('/sessions', async (req, res) => {
-  const botType = leadFilter(req.query.botType, LEAD_BOT_TYPES, (v) => v.toLowerCase());
-  if (!botType.ok) return res.status(400).json({ error: `botType must be one of: all, ${LEAD_BOT_TYPES.join(', ')}` });
-  const cursor = typeof req.query.cursor === 'string' && req.query.cursor ? req.query.cursor : null;
+// Which of these sessions were escalated (have a SupportTicket), for the Chat
+// Logs "escalated" badge and the CSV column. SupportTicket.sessionId isn't a
+// relation, so this is a separate tenant-scoped lookup, like leadsBySession.
+async function ticketsBySession(tenantId, sessionIds) {
+  if (!sessionIds.length) return new Map();
+  const rows = await prisma.supportTicket.findMany({
+    where: { tenantId, sessionId: { in: sessionIds } },
+    select: { sessionId: true, kind: true, helpdeskProvider: true, helpdeskTicketId: true }
+  });
+  const map = new Map();
+  for (const t of rows) {
+    const cur = map.get(t.sessionId) || { count: 0, kinds: new Set(), helpdeskSynced: false };
+    cur.count += 1;
+    if (t.kind) cur.kinds.add(t.kind);
+    if (t.helpdeskTicketId) cur.helpdeskSynced = true;
+    map.set(t.sessionId, cur);
+  }
+  return map;
+}
 
-  // Conversations with at least one turn; a cursor from another tenant matches nothing.
+// Which of these sessions contain at least one voice (Speech-to-Speech) turn, for
+// the Chat Logs "Voice" badge and CSV column (Feature 4). sessionIds are already
+// tenant-scoped (they came from a tenant-scoped session query), so filtering
+// ChatMessage by them alone is safe.
+async function voiceBySession(sessionIds) {
+  if (!sessionIds.length) return new Set();
+  const rows = await prisma.chatMessage.findMany({
+    where: { sessionId: { in: sessionIds }, source: 'voice' },
+    distinct: ['sessionId'], select: { sessionId: true }
+  });
+  return new Set(rows.map((r) => r.sessionId));
+}
+
+// Advanced Chat Logs filters (Feature 16). Parses the shared query params into a
+// Prisma where-clause, 400-ing on a bad value. `escalated` can't be expressed as
+// a plain column (no relation), so it's returned separately and applied by the
+// caller once the escalated-session id set is known.
+const SESSION_STATUSES = ['active', 'paused'];
+const SESSION_ESCALATED = ['yes', 'no'];
+const MAX_SEARCH_LEN = 200;
+
+function parseDateParam(raw) {
+  if (raw === undefined || raw === '') return { ok: true, value: undefined };
+  const d = new Date(String(raw));
+  return Number.isNaN(d.getTime()) ? { ok: false } : { ok: true, value: d };
+}
+
+function parseSessionFilters(req) {
+  const botType = leadFilter(req.query.botType, LEAD_BOT_TYPES, (v) => v.toLowerCase());
+  if (!botType.ok) return { ok: false, error: `botType must be one of: all, ${LEAD_BOT_TYPES.join(', ')}` };
+  const status = leadFilter(req.query.status, SESSION_STATUSES, (v) => v.toLowerCase());
+  if (!status.ok) return { ok: false, error: `status must be one of: all, ${SESSION_STATUSES.join(', ')}` };
+  const escalated = leadFilter(req.query.escalated, SESSION_ESCALATED, (v) => v.toLowerCase());
+  if (!escalated.ok) return { ok: false, error: `escalated must be one of: all, ${SESSION_ESCALATED.join(', ')}` };
+  const from = parseDateParam(req.query.from);
+  if (!from.ok) return { ok: false, error: 'from must be a valid date' };
+  const to = parseDateParam(req.query.to);
+  if (!to.ok) return { ok: false, error: 'to must be a valid date' };
+  const q = typeof req.query.q === 'string' ? req.query.q.trim().slice(0, MAX_SEARCH_LEN) : '';
+
   const where = { tenantId: req.tenant.id, messageCount: { gt: 0 } };
   if (botType.value) where.botType = botType.value;
+  if (status.value === 'paused') where.pausedAt = { not: null };
+  if (status.value === 'active') where.pausedAt = null;
+  if (from.value || to.value) {
+    where.lastMessageAt = { ...(from.value ? { gte: from.value } : {}), ...(to.value ? { lte: to.value } : {}) };
+  }
+  if (q) {
+    where.OR = [
+      { summary: { contains: q, mode: 'insensitive' } },
+      { externalUserId: { contains: q, mode: 'insensitive' } },
+      { messages: { some: { content: { contains: q, mode: 'insensitive' } } } }
+    ];
+  }
+  return {
+    ok: true, where, escalated: escalated.value,
+    filters: {
+      botType: botType.value || 'all', status: status.value || 'all',
+      escalated: escalated.value || 'all', q, from: from.value?.toISOString() || null, to: to.value?.toISOString() || null
+    }
+  };
+}
+
+// Narrow a where-clause to (or away from) the tenant's escalated sessions. The
+// set is bounded (take EXPORT_MAX) — far more than a dashboard would scroll.
+const EXPORT_MAX = 5000;
+async function applyEscalatedFilter(where, tenantId, escalated) {
+  if (!escalated) return where;
+  const rows = await prisma.supportTicket.findMany({
+    where: { tenantId, sessionId: { not: null } }, distinct: ['sessionId'], select: { sessionId: true }, take: EXPORT_MAX
+  });
+  const ids = rows.map((r) => r.sessionId);
+  // escalated=yes with no escalated sessions must match nothing, not everything.
+  if (escalated === 'yes') return { ...where, id: ids.length ? { in: ids } : { in: ['__none__'] } };
+  return ids.length ? { ...where, id: { notIn: ids } } : where;
+}
+
+// Send a CSV download. A BOM makes Excel read UTF-8 (Hindi) correctly; the
+// filename is ASCII-sanitised so it can't break the Content-Disposition header.
+function sendCsv(res, filename, csv) {
+  const safe = String(filename).replace(/[^\w.-]+/g, '_');
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${safe}"`);
+  res.send(BOM + csv);
+}
+
+router.get('/sessions', async (req, res) => {
+  const parsed = parseSessionFilters(req);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const cursor = typeof req.query.cursor === 'string' && req.query.cursor ? req.query.cursor : null;
+
+  const where = await applyEscalatedFilter(parsed.where, req.tenant.id, parsed.escalated);
   const rows = await prisma.chatSession.findMany({
     where,
     orderBy: [{ lastMessageAt: { sort: 'desc', nulls: 'last' } }, { id: 'desc' }],
@@ -1012,11 +1498,59 @@ router.get('/sessions', async (req, res) => {
     select: SESSION_FIELDS
   });
   const page = rows.slice(0, SESSIONS_PAGE);
-  const leads = await leadsBySession(req.tenant.id, page.map((s) => s.id));
+  const ids = page.map((s) => s.id);
+  const [leads, tickets, voice] = await Promise.all([
+    leadsBySession(req.tenant.id, ids), ticketsBySession(req.tenant.id, ids), voiceBySession(ids)
+  ]);
   res.json({
-    sessions: page.map((s) => ({ ...s, leads: leads.get(s.id) || [] })),
+    filters: parsed.filters,
+    sessions: page.map((s) => {
+      const t = tickets.get(s.id);
+      return {
+        ...s, leads: leads.get(s.id) || [],
+        escalated: !!t, ticketCount: t?.count || 0,
+        ticketKinds: t ? [...t.kinds] : [], helpdeskSynced: !!t?.helpdeskSynced,
+        hasVoice: voice.has(s.id)
+      };
+    }),
     nextCursor: rows.length > SESSIONS_PAGE ? page.at(-1).id : null
   });
+});
+
+// CSV export of the filtered conversations (Feature 16). Same filters as the
+// list, no pagination (capped at EXPORT_MAX), tenant-scoped. Cells are escaped
+// against CSV/formula injection (services/shared/csvExport.js).
+router.get('/sessions/export.csv', async (req, res) => {
+  const parsed = parseSessionFilters(req);
+  if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+  const where = await applyEscalatedFilter(parsed.where, req.tenant.id, parsed.escalated);
+  const rows = await prisma.chatSession.findMany({
+    where, orderBy: [{ lastMessageAt: { sort: 'desc', nulls: 'last' } }, { id: 'desc' }], take: EXPORT_MAX, select: SESSION_FIELDS
+  });
+  const ids = rows.map((s) => s.id);
+  const [leads, tickets, voice] = await Promise.all([
+    leadsBySession(req.tenant.id, ids), ticketsBySession(req.tenant.id, ids), voiceBySession(ids)
+  ]);
+  const headers = ['Session ID', 'Started', 'Last message', 'Bot', 'Messages', 'Status', 'Escalated', 'Helpdesk', 'Voice', 'Visitor', 'Lead emails', 'Summary'];
+  const data = rows.map((s) => {
+    const t = tickets.get(s.id);
+    const emails = (leads.get(s.id) || []).map((l) => l.email).filter(Boolean).join('; ');
+    return [
+      s.id,
+      s.startedAt ? new Date(s.startedAt).toISOString() : '',
+      s.lastMessageAt ? new Date(s.lastMessageAt).toISOString() : '',
+      s.botType || '',
+      s.messageCount ?? 0,
+      s.pausedAt ? 'paused' : 'active',
+      t ? 'yes' : 'no',
+      t?.helpdeskSynced ? 'synced' : '',
+      voice.has(s.id) ? 'yes' : '',
+      s.externalUserId || '',
+      emails,
+      s.summary || ''
+    ];
+  });
+  sendCsv(res, `chat-logs-${new Date().toISOString().slice(0, 10)}.csv`, rowsToCsv(headers, data));
 });
 
 // One conversation: its summary, leads and every message, oldest first.
@@ -1031,11 +1565,35 @@ router.get('/sessions/:sessionId', async (req, res) => {
       where: { sessionId: session.id },
       orderBy: CHRONOLOGICAL,
       take: 500,
-      select: { id: true, role: true, content: true, botType: true, confidence: true, answered: true, createdAt: true }
+      select: { id: true, role: true, content: true, botType: true, confidence: true, answered: true, imageKeys: true, source: true, createdAt: true }
     }),
     leadsBySession(req.tenant.id, [session.id])
   ]);
-  res.json({ ...session, leads: leads.get(session.id) || [], messages });
+  // tenantId lets the client build scoped chat-image URLs for the transcript.
+  // hasVoice drives the "Voice" badge in the drawer header (Feature 4); the
+  // per-message tags come from each message's own source.
+  const hasVoice = messages.some((m) => m.source === 'voice');
+  res.json({ ...session, tenantId: req.tenant.id, hasVoice, leads: leads.get(session.id) || [], messages });
+});
+
+// CSV export of a single conversation's transcript (Feature 16). Tenant-scoped;
+// another tenant's session id reads as a missing one.
+router.get('/sessions/:sessionId/export.csv', async (req, res) => {
+  const session = await prisma.chatSession.findFirst({
+    where: { id: req.params.sessionId, tenantId: req.tenant.id }, select: { id: true }
+  });
+  if (!session) return res.status(404).json({ error: 'Session not found' });
+  const messages = await prisma.chatMessage.findMany({
+    where: { sessionId: session.id }, orderBy: CHRONOLOGICAL, take: 2000,
+    select: { role: true, content: true, botType: true, confidence: true, answered: true, source: true, createdAt: true }
+  });
+  const headers = ['Time', 'Role', 'Bot', 'Source', 'Confidence', 'Answered', 'Message'];
+  const data = messages.map((m) => [
+    m.createdAt ? new Date(m.createdAt).toISOString() : '',
+    m.role, m.botType || '', m.source === 'voice' ? 'voice' : 'text',
+    m.confidence ?? '', m.answered == null ? '' : (m.answered ? 'yes' : 'no'), m.content || ''
+  ]);
+  sendCsv(res, `conversation-${session.id}.csv`, rowsToCsv(headers, data));
 });
 
 // ── Improvements: conversations with genuine misses — each weak reply and
@@ -1131,6 +1689,88 @@ router.post('/sessions/:sessionId/summarize', async (req, res) => {
   await claimSession(session.id, { force: true });
   runSessionSummary(session.id);
   res.status(202).json({ id: session.id, summaryStatus: 'pending' });
+});
+
+// Pause / resume a conversation from Chat Logs. A paused conversation gets no
+// bot replies (services/tenantChat.js) until it is resumed. Pausing here is a
+// human action (pauseReason 'manual'); spam auto-pause sets 'spam' on its own.
+// Both are idempotent and tenant-scoped.
+router.patch('/sessions/:sessionId/pause', async (req, res) => {
+  const session = await prisma.chatSession.findFirst({ where: { id: req.params.sessionId, tenantId: req.tenant.id }, select: { id: true } });
+  if (!session) return res.status(404).json({ error: 'Session not found' });
+  res.json(await prisma.chatSession.update({ where: { id: session.id }, data: { pausedAt: new Date(), pauseReason: 'manual' }, select: SESSION_FIELDS }));
+});
+
+router.patch('/sessions/:sessionId/resume', async (req, res) => {
+  const session = await prisma.chatSession.findFirst({ where: { id: req.params.sessionId, tenantId: req.tenant.id }, select: { id: true } });
+  if (!session) return res.status(404).json({ error: 'Session not found' });
+  res.json(await prisma.chatSession.update({ where: { id: session.id }, data: { pausedAt: null, pauseReason: null }, select: SESSION_FIELDS }));
+});
+
+// ── Human Escalation (Feature 5, services/escalation.js): per-tenant trigger
+// keywords + business hours + reply ETA. GET returns the settings; PUT upserts
+// them (validated).
+router.get('/escalation', async (req, res) => {
+  res.json(await escalationSvc.getEscalationSettings(req.tenant.id));
+});
+
+router.put('/escalation', async (req, res, next) => {
+  try {
+    res.json(await escalationSvc.updateEscalationSettings(req.tenant.id, req.body || {}));
+  } catch (err) {
+    if (err instanceof escalationSvc.EscalationError) return res.status(err.statusCode).json({ error: err.message });
+    next(err);
+  }
+});
+
+// ── Helpdesk integration (Feature 5, services/helpdesk): connect Zoho Desk or
+// Freshdesk so an escalation opens a real ticket there. Credentials go in
+// encrypted and are never returned; status shows the recent push log.
+router.get('/helpdesk', async (req, res) => {
+  res.json(await helpdeskSettings.getHelpdeskStatus(req.tenant.id));
+});
+
+router.post('/helpdesk/connect', async (req, res, next) => {
+  try {
+    res.json(await helpdeskSettings.connectHelpdesk(req.tenant.id, req.body || {}));
+  } catch (err) {
+    if (err instanceof helpdeskSettings.HelpdeskConfigError) return res.status(err.statusCode).json({ error: err.message });
+    next(err);
+  }
+});
+
+// Toggle ticket mirroring on/off without disconnecting. Body: { isEnabled }.
+router.patch('/helpdesk', async (req, res, next) => {
+  try {
+    res.json(await helpdeskSettings.setHelpdeskEnabled(req.tenant.id, !!req.body?.isEnabled));
+  } catch (err) {
+    if (err instanceof helpdeskSettings.HelpdeskConfigError) return res.status(err.statusCode).json({ error: err.message });
+    next(err);
+  }
+});
+
+router.post('/helpdesk/disconnect', async (req, res) => {
+  res.json(await helpdeskSettings.disconnectHelpdesk(req.tenant.id));
+});
+
+// ── Chat-log retention (Feature 16, services/retention.js): a FIXED server
+// policy (30 days) + a guarded purge. GET returns the fixed, read-only policy;
+// there is no PUT — tenants cannot set a custom period. POST /purge runs a
+// dry-run (default) or the real purge of conversations older than the window.
+router.get('/retention', async (req, res) => {
+  res.json(await retention.getRetentionSettings(req.tenant.id));
+});
+
+// Body: { dryRun?: boolean } — dryRun defaults to true, so the dashboard shows
+// the count before anyone deletes anything. Pass { dryRun: false } to purge.
+router.post('/retention/purge', async (req, res, next) => {
+  try {
+    const dryRun = req.body?.dryRun !== false;
+    res.json(await retention.purgeTenant(req.tenant.id, { dryRun }));
+  } catch (err) {
+    if (err instanceof retention.RetentionError) return res.status(err.statusCode).json({ error: err.message });
+    next(err);
+  }
 });
 
 // ── Team alerts (services/teamAlerts.js): who gets "new lead" and "needs

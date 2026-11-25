@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Badge, Button, Card, CardHeader, Field, Input, Spinner, cx } from '../ui';
+import { Badge, Button, Card, CardHeader, Checkbox, Field, Input, Spinner, cx } from '../ui';
 import { useToast } from '../ui/toast';
 import { BASE_URL } from '../../lib/api';
 
@@ -14,6 +14,12 @@ import { BASE_URL } from '../../lib/api';
 
 const SOURCE_LABEL = { website: 'From your website', manual: 'Edited by you', fallback: 'Default palette' };
 const HEADER_LABEL = { minimal: 'Clean header', glass: 'Glass header', solid: 'Solid header', gradient: 'Gradient header' };
+// The widget footer (apps/api/public/widgets/tenant-chat-widget.js). The AI
+// notice is permanent and can never be hidden; the "Powered by" strip is the
+// owner's free, toggleable branding. Keep this copy in step with the widget's
+// English STRINGS (aiNotice / poweredBy).
+const AI_NOTICE = 'You are chatting with an AI assistant';
+const POWERED_BY = 'Powered by KGT Orb';
 const HEX_RE = /^#[0-9a-fA-F]{6}$/;
 
 function rgba(hex, alpha) {
@@ -265,7 +271,7 @@ function MockBubble({ theme, side, children }) {
   );
 }
 
-function ThemeCard({ theme, companyName, title, logoUrl, badge = theme.logoBadge, live, applying, disabled, onApply }) {
+function ThemeCard({ theme, companyName, title, logoUrl, badge = theme.logoBadge, showBranding, live, applying, disabled, onApply }) {
   const head = headerLook(theme);
   return (
     <Card className={cx('flex flex-col overflow-hidden', live && 'ring-2 ring-emerald-400/50')}>
@@ -304,6 +310,13 @@ function ThemeCard({ theme, companyName, title, logoUrl, badge = theme.logoBadge
               Send
             </div>
           </div>
+          {/* Footer: the free "Powered by" strip (hidden when the toggle is off)
+              and the permanent AI-assistant notice beneath it, which always
+              shows — exactly as the live widget renders them. */}
+          <div style={{ borderTop: '1px solid rgba(15,23,42,.08)', padding: '6px 10px 7px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1 }}>
+            {showBranding !== false && <span style={{ fontSize: 10, lineHeight: 1.3, color: '#94a3b8' }}>{POWERED_BY}</span>}
+            <span style={{ fontSize: 10.5, lineHeight: 1.3, color: '#475569' }}>{AI_NOTICE}</span>
+          </div>
         </div>
       </div>
 
@@ -338,6 +351,7 @@ export default function BrandingStudio({ ws, companyName }) {
   const [saving, setSaving] = useState(false);
   const [botNameInput, setBotNameInput] = useState('');
   const [savingName, setSavingName] = useState(false);
+  const [savingBranding, setSavingBranding] = useState(false);
   // A chosen-but-unsaved logo file and its local preview (an object URL);
   // it's uploaded by "Save & regenerate".
   const [pendingLogo, setPendingLogo] = useState(null);
@@ -502,6 +516,22 @@ export default function BrandingStudio({ ws, companyName }) {
     }
   };
 
+  // Free toggle for the "Powered by KGT Orb" strip. The AI-assistant notice is
+  // never affected — it always shows in the widget, by design.
+  const toggleBranding = async (next) => {
+    setSavingBranding(true);
+    try {
+      adopt(await ws.updateBranding({ showBranding: next }));
+      toast.success(next
+        ? '“Powered by KGT Orb” is shown on your widget. The next page load picks it up.'
+        : '“Powered by KGT Orb” is hidden. The AI-assistant notice always stays.');
+    } catch (err) {
+      toast.error(err.message);
+    } finally {
+      setSavingBranding(false);
+    }
+  };
+
   if (loading) {
     return <Card className="flex items-center gap-2 p-6 text-sm text-fg-3"><Spinner className="h-4 w-4" />Loading your brand kit…</Card>;
   }
@@ -637,6 +667,31 @@ export default function BrandingStudio({ ws, companyName }) {
         </form>
       </Card>
 
+      <Card className="overflow-hidden">
+        <CardHeader
+          title="Footer &amp; notices"
+          description="The strip at the very bottom of your chat widget."
+          action={<Badge tone="success">Free</Badge>}
+        />
+        <div className="space-y-4 p-5 sm:p-6">
+          <Checkbox checked={data.showBranding !== false} disabled={savingBranding}
+            onChange={(e) => toggleBranding(e.target.checked)}>
+            <span className="font-medium text-fg">Show the “{POWERED_BY}” badge</span>
+            <span className="mt-0.5 block text-[12.5px] text-fg-3">
+              A small credit line at the bottom of the widget. Turn it off at no charge — it’s free either way.
+              {savingBranding && <span className="ml-2 text-fg-3">Saving…</span>}
+            </span>
+          </Checkbox>
+          <div className="flex items-start gap-3 rounded-lg border border-white/[0.06] bg-white/[0.02] p-3">
+            <span className="mt-0.5 shrink-0 text-base" aria-hidden>🔒</span>
+            <p className="text-[12.5px] leading-relaxed text-fg-3">
+              <span className="font-medium text-fg-2">“{AI_NOTICE}”</span> is always shown and can’t be hidden —
+              visitors must know they’re talking to an AI, so this notice isn’t affected by any branding or theme setting.
+            </p>
+          </div>
+        </div>
+      </Card>
+
       <div>
         <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
           <div>
@@ -660,6 +715,7 @@ export default function BrandingStudio({ ws, companyName }) {
               logoUrl={pendingLogo ? pendingLogo.previewUrl : resolveLogo(
                 theme.logoBadge?.variant === 'reversed' && data.logoUrlReversed ? data.logoUrlReversed : data.logoUrl)}
               badge={pendingLogo ? (headerIsLight(theme) ? PENDING_ON_LIGHT : PENDING_ON_COLOUR) : theme.logoBadge}
+              showBranding={data.showBranding}
               live={liveId === theme.id} applying={applyingId === theme.id} disabled={busy}
               onApply={() => apply(theme.id)} />
           ))}

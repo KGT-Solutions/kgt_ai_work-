@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const { logger } = require('../lib/logger');
 const prisma = require('../lib/prisma');
 // Called through the module (llm.generateAnswer), not destructured, so a test
 // mock installed at any point always takes effect — never a real API call.
@@ -481,7 +482,7 @@ async function auditKnowledge({ company, documents, tenantId = null, botPreferen
       if (tenantId) await logUsage({ ctx: { tenantId }, provider: answer.provider, model: answer.model, usage: answer.usage });
       model = parseAuditResponse(answer.text);
     } catch (err) {
-      console.warn(`[botAuditor] ${company.name}: AI audit failed, using keyword estimate: ${err.attempts ? llm.formatAttempts(err.attempts) : err.message}`);
+      logger.warn(`[botAuditor] ${company.name}: AI audit failed, using keyword estimate: ${err.attempts ? llm.formatAttempts(err.attempts) : err.message}`);
       method = 'heuristic';
       notice = 'The AI audit could not run just now — showing a keyword-based estimate. Try again in a minute for the full audit.';
     }
@@ -654,7 +655,7 @@ function runAudit(tenantId) {
       if (!await store().claimOnce(keys.jobLock('audit', tenantId), AUDIT_LOCK_MS)) return;
       await module.exports.auditTenant(tenantId);
     } catch (err) {
-      console.warn(`[botAuditor] tenant ${tenantId}: background audit failed: ${err.message}`);
+      logger.warn(`[botAuditor] tenant ${tenantId}: background audit failed: ${err.message}`);
     } finally {
       lastAuditAt.set(tenantId, Date.now());
       running.delete(tenantId);

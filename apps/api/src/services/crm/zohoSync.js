@@ -1,4 +1,5 @@
 const defaultPrisma = require('../../lib/prisma');
+const { logger } = require('../../lib/logger');
 const { CrmError, getAccessToken, isZohoConfigured } = require('./zohoAuth');
 
 // Resilient, bi-directional Zoho CRM sync. Everything here is designed to fail
@@ -233,7 +234,7 @@ async function upsertLead({ apiDomain, token, lead, summary, sessionId, fieldMap
   try {
     await attachNote({ apiDomain, token, recordId: crmRecordId, title: 'KGT Orb — AI chat summary', content: body, fetchImpl });
   } catch (err) {
-    console.warn(`[crm] note attach failed for Zoho lead ${crmRecordId}: ${err.message}`);
+    logger.warn(`[crm] note attach failed for Zoho lead ${crmRecordId}: ${err.message}`);
   }
 
   return { crmRecordId, created };
@@ -266,7 +267,7 @@ async function syncLeadToCrm({ tenant, lead, summary = null, extra = {} }, deps 
   try {
     integration = await prisma.tenantCRMIntegration.findUnique({ where: { tenantId: tenant.id } });
   } catch (err) {
-    console.error(`[crm] could not load integration for tenant ${tenant.slug || tenant.id}: ${err.message}`);
+    logger.error(`[crm] could not load integration for tenant ${tenant.slug || tenant.id}: ${err.message}`);
     return { skipped: 'lookup-failed' };
   }
   if (!integration || !integration.isEnabled) return { skipped: 'no-integration' };
@@ -284,7 +285,7 @@ async function syncLeadToCrm({ tenant, lead, summary = null, extra = {} }, deps 
         apiDomain, token: accessToken, lead, summary, sessionId: lead.sessionId,
         fieldMapping: integration.fieldMapping || {}, extra, fetchImpl
       }),
-      (n, err) => { attempts += 1; console.warn(`[crm] lead ${lead.id} sync retry ${n}: ${err.message}`); }
+      (n, err) => { attempts += 1; logger.warn(`[crm] lead ${lead.id} sync retry ${n}: ${err.message}`); }
     );
     let outcome;
     try {
@@ -294,7 +295,7 @@ async function syncLeadToCrm({ tenant, lead, summary = null, extra = {} }, deps 
       // The stored token still looked fresh but Zoho rejected it (revoked, or
       // superseded by another refresh). Mint a new one and retry — once: a
       // second rejection means the connection itself is broken.
-      console.warn(`[crm] lead ${lead.id}: Zoho rejected the access token — refreshing it and retrying once`);
+      logger.warn(`[crm] lead ${lead.id}: Zoho rejected the access token — refreshing it and retrying once`);
       ({ accessToken, apiDomain } = await getToken({ integration, prisma, fetchImpl, now, force: true }));
       attempts += 1;
       outcome = await attempt();
@@ -305,14 +306,14 @@ async function syncLeadToCrm({ tenant, lead, summary = null, extra = {} }, deps 
     await prisma.lead.update({
       where: { id: lead.id },
       data: { crmProvider: 'ZOHO', crmRecordId, crmSyncedAt: new Date(now) }
-    }).catch((err) => console.warn(`[crm] could not mirror CRM id onto lead ${lead.id}: ${err.message}`));
+    }).catch((err) => logger.warn(`[crm] could not mirror CRM id onto lead ${lead.id}: ${err.message}`));
 
     await updateSyncLog(prisma, logId, { status: 'SUCCESS', crmRecordId, attempts });
-    console.log(`[crm] lead ${lead.id} ${created ? 'created in' : 'updated in'} Zoho as ${crmRecordId} (tenant ${tenant.slug || tenant.id})`);
+    logger.info(`[crm] lead ${lead.id} ${created ? 'created in' : 'updated in'} Zoho as ${crmRecordId} (tenant ${tenant.slug || tenant.id})`);
     return { synced: true, crmRecordId, created };
   } catch (err) {
     await updateSyncLog(prisma, logId, { status: 'FAILED', error: safeError(err) });
-    console.error(`[crm] ERROR: lead ${lead.id} sync FAILED (tenant ${tenant.slug || tenant.id}): ${err.message}`);
+    logger.error(`[crm] ERROR: lead ${lead.id} sync FAILED (tenant ${tenant.slug || tenant.id}): ${err.message}`);
     return { synced: false, error: err.message };
   }
 }
@@ -368,7 +369,7 @@ async function applyInboundStatus({ recordId, zohoStatus, tenantId = null, email
     });
     return { updated: changed, leadId: lead.id, status, tenantId: lead.tenantId };
   } catch (err) {
-    console.error(`[crm] ERROR: inbound status update FAILED (record ${recordId}): ${err.message}`);
+    logger.error(`[crm] ERROR: inbound status update FAILED (record ${recordId}): ${err.message}`);
     return { updated: false, reason: 'exception' };
   }
 }

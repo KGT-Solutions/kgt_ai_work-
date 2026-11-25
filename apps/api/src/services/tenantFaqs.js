@@ -1,4 +1,5 @@
 const prisma = require('../lib/prisma');
+const { logger } = require('../lib/logger');
 const { store, keys } = require('../lib/sharedStore');
 const { generateAnswer, isLlmConfigured, formatAttempts } = require('../engine/llmClient');
 const { logUsage } = require('../engine/usageTracking');
@@ -162,7 +163,7 @@ function parseFaqResponse(text) {
  */
 async function generateTenantFaqs(tenantId) {
   const fail = async (message) => {
-    console.warn(`[tenantFaqs] tenant ${tenantId}: ${message}`);
+    logger.warn(`[tenantFaqs] tenant ${tenantId}: ${message}`);
     return prisma.tenantFaq.upsert({
       where: { tenantId },
       create: { tenantId, status: 'failed', error: message.slice(0, 500) },
@@ -237,7 +238,7 @@ function scheduleFaqGeneration(tenantId) {
         await generateTenantFaqs(tenantId);
       } while (state.rerun);
     } catch (err) {
-      console.warn(`[tenantFaqs] tenant ${tenantId}: could not schedule generation: ${err.message}`);
+      logger.warn(`[tenantFaqs] tenant ${tenantId}: could not schedule generation: ${err.message}`);
     } finally {
       running.delete(tenantId);
       await store().del(keys.jobLock('faqs', tenantId)).catch(() => {});

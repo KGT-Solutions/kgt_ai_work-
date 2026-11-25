@@ -1,3 +1,4 @@
+const { logger } = require('../../lib/logger');
 // PDF -> training documents: the upload counterpart to crawler.js, for the
 // sites a crawl can't read (JS-only storefronts, bot-blocking CDNs) or reads
 // badly. Produces the same "## Heading" markdown shape
@@ -338,7 +339,7 @@ async function pdfToDocuments(buffer, filename) {
     extracted = await extractPdfLines(buffer);
   } catch (err) {
     if (err instanceof PdfIngestError) throw err;
-    console.error('[pdfIngest] unexpected pdf.js failure:', err);
+    logger.error('[pdfIngest] unexpected pdf.js failure:', err);
     throw new PdfIngestError(
       'That PDF could not be read — it may be damaged or saved in an unusual format. ' +
         'Try re-saving it (File > Print > Save as PDF) and uploading it again.',

@@ -1,3 +1,4 @@
+const { logger } = require('../../lib/logger');
 // Image Guardrail & Similarity Pre-Check — a cheap pre-flight that runs BEFORE
 // the heavy, KB-grounded chat generation whenever a visitor attaches an image.
 //
@@ -159,7 +160,7 @@ async function evaluateImage({ dataUrl, userText = '', tenant = null, classify =
     if (!parsed) return { relevant: true, kind: 'other', productText: '', text: '', degraded: true };
     return { ...parsed, degraded: false };
   } catch (err) {
-    console.warn(`[imageGuardrail] vision classify failed, passing image through: ${err.message}`);
+    logger.warn(`[imageGuardrail] vision classify failed, passing image through: ${err.message}`);
     return { relevant: true, kind: 'other', productText: '', text: '', degraded: true };
   }
 }

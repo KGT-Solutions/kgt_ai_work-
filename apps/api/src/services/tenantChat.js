@@ -1,4 +1,5 @@
 const prisma = require('../lib/prisma');
+const { logger } = require('../lib/logger');
 const { getEngineAnswer } = require('../engine/chatEngine');
 const { resolveLanguage } = require('../engine/language');
 const { matchCatalogProducts } = require('./catalogIngest');
@@ -16,6 +17,10 @@ const {
   runImageGuardrailPipeline, isImagePipelineEnabled, parseImageDataUrl,
   guardrailFallbackMessage, securityRefusalMessage
 } = require('./shared/imageGuardrailPipeline');
+const { looksLikeSpam, isSpamCheckpoint } = require('./shared/spamCheck');
+const { persistChatImage, sessionImageCount, MAX_IMAGES_PER_SESSION } = require('./shared/chatImage');
+const { instructionDirectiveFor } = require('./tenantInstructions');
+const { escalationContextFor } = require('./escalation');
 
 // One chat turn for one tenant. Shared by every way a tenant's bots are
 // reached — the embed widget (API key), the client dashboard (client JWT)
@@ -86,14 +91,14 @@ class ChatRequestError extends Error {
  *   (0-3 suggested next questions), sessionId and the botType that answered
  * @throws {ChatRequestError} for invalid input (400) or rate limiting (429)
  */
-async function runTenantChat({ tenant, body, sandbox = false, imageDeps = undefined }) {
+async function runTenantChat({ tenant, body, sandbox = false, imageDeps = undefined, guardrails = null }) {
   const query = String(body?.query || '').trim();
   // A photo on its own is a valid message — the widget says so ("either text
   // or an image is required") and sends one with no query — so a turn is
   // valid when it carries either. The image is a base64 data URL; its shape
   // and size are checked here so a malformed one is a 400 rather than a
   // polite "I can't read that" the caller can't act on.
-  const image = typeof body?.image === 'string' && body.image.trim() ? body.image.trim() : null;
+  let image = typeof body?.image === 'string' && body.image.trim() ? body.image.trim() : null;
   if (!query && !image) throw new ChatRequestError('query or image is required', 400);
   if (query.length > MAX_QUERY_LEN) throw new ChatRequestError(`query must be ${MAX_QUERY_LEN} characters or fewer`, 400);
   if (image) {
@@ -106,6 +111,12 @@ async function runTenantChat({ tenant, body, sandbox = false, imageDeps = undefi
   const bot = parseBotType(body);
   if (!bot.ok) throw new ChatRequestError(bot.error, 400);
   const botType = bot.value;
+
+  // How the turn was sent — 'voice' for a Speech-to-Speech turn
+  // (services/voiceChat.js), 'text' otherwise. Written onto both persisted rows
+  // so Chat Logs and the CSV can tag voice turns (Feature 4). Only 'voice' is
+  // honoured; anything else is 'text'.
+  const source = body?.source === 'voice' ? 'voice' : 'text';
 
   // Which language the bot must answer in. The UI's top-level selector
   // (body.language) is authoritative: on Hindi the reply is Hindi even for an
@@ -140,6 +151,13 @@ async function runTenantChat({ tenant, body, sandbox = false, imageDeps = undefi
     }
   }
 
+  // A paused conversation (spam auto-pause below, or a human from Chat Logs)
+  // gets no bot reply: the visitor's message is still recorded so staff can see
+  // what kept coming, but the engine never runs. Sandbox chats are never paused.
+  if (!sandbox && session.pausedAt) {
+    return pausedTurn({ session, botType, language, userContent: query || '(image attached)', source });
+  }
+
   // What the transcript records for this turn: the visitor's own words, or a
   // marker when they sent only a photo. Never the text a model read out of the
   // image — the transcript is what the visitor said.
@@ -153,6 +171,21 @@ async function runTenantChat({ tenant, body, sandbox = false, imageDeps = undefi
   // metadata or in the text rendered inside it is a hard refusal. It runs after
   // the session exists so a refusal still returns a sessionId and is recorded,
   // and it never throws — a vision outage degrades to "treat as relevant".
+  // Images can be turned off per tenant (dashboard → Guardrails). When they are,
+  // an attached photo is ignored: a turn with text still answers on the text,
+  // and a photo-only turn is politely declined. The widget hides its attach
+  // button when disabled; this is the server-side backstop. Never gates the
+  // dashboard's own test chat (sandbox).
+  const imagesAllowed = sandbox || guardrails?.imagesEnabled !== false;
+  if (image && !imagesAllowed) {
+    if (!query) return refuseImageTurn({ session, botType, language, userContent, answer: imagesOffMessage(language), sandbox, source });
+    image = null; // fall through and answer the text alone
+  }
+
+  // Content keys of the images stored for THIS turn, written onto the user
+  // message below and surfaced in Chat Logs and lead alerts.
+  let storedImageKeys = [];
+
   let imageText = '';
   let imageProductText = '';
   if (image && isImagePipelineEnabled()) {
@@ -164,10 +197,22 @@ async function runTenantChat({ tenant, body, sandbox = false, imageDeps = undefi
       // A security hit gets a deliberately generic refusal that never says what
       // was detected; everything else gets the polite "send a relevant photo".
       const answer = verdict.security ? securityRefusalMessage(language) : guardrailFallbackMessage(language);
-      return refuseImageTurn({ session, botType, language, userContent, answer, sandbox });
+      return refuseImageTurn({ session, botType, language, userContent, answer, sandbox, source });
     }
     imageText = String(verdict.text || '').trim();
     imageProductText = String(verdict.productText || '').trim();
+
+    // The image cleared the guardrail: store it (EXIF stripped) so it shows in
+    // Chat Logs and lead alerts. Sandbox leaves no trace; a conversation keeps
+    // at most MAX_IMAGES_PER_SESSION images; best-effort, so a storage failure
+    // never costs the visitor their answer.
+    if (!sandbox) {
+      const already = await sessionImageCount({ sessionId: session.id });
+      if (already < MAX_IMAGES_PER_SESSION) {
+        const key = await persistChatImage({ tenantId: tenant.id, dataUrl: image });
+        if (key) storedImageKeys = [key];
+      }
+    }
   }
 
   // A photo-only turn still needs a question to retrieve and answer against.
@@ -177,7 +222,7 @@ async function runTenantChat({ tenant, body, sandbox = false, imageDeps = undefi
   // ask for a description rather than guess.
   const visionQuery = [imageProductText, imageText].filter(Boolean).join(' — ').slice(0, MAX_QUERY_LEN);
   if (!query && !visionQuery) {
-    return refuseImageTurn({ session, botType, language, userContent, answer: guardrailFallbackMessage(language), sandbox });
+    return refuseImageTurn({ session, botType, language, userContent, answer: guardrailFallbackMessage(language), sandbox, source });
   }
   const effectiveQuery = query || visionQuery;
   // The engine and retrieval see what the photo showed, clearly labelled, so an
@@ -191,6 +236,44 @@ async function runTenantChat({ tenant, body, sandbox = false, imageDeps = undefi
     take: 6
   });
 
+  // ── Spam auto-pause ──
+  // At a few escalating visitor-message counts (services/shared/spamCheck.js),
+  // ask the model whether this visitor is spamming/abusing the widget. A spam
+  // verdict pauses the conversation and answers this turn with the paused
+  // notice instead of a generated reply — so the check runs BEFORE the engine,
+  // and a flagged flood costs nothing further. Fails open (never pauses on a
+  // classifier error), and never runs for the dashboard's own test chat.
+  // session.messageCount counts both roles (2 per recorded turn), so the number
+  // of this incoming visitor message is messageCount/2 + 1.
+  if (!sandbox && guardrails?.spamCheckEnabled) {
+    const visitorMessageNumber = Math.floor(session.messageCount / 2) + 1;
+    if (isSpamCheckpoint(visitorMessageNumber)) {
+      const spam = await looksLikeSpam({
+        // recentTurns is newest-first; reverse a copy to chronological, then this turn last.
+        messages: [...[...recentTurns].reverse().map((m) => ({ role: m.role, content: m.content })), { role: 'user', content: userContent }]
+      });
+      if (spam) {
+        session = await prisma.chatSession.update({
+          where: { id: session.id }, data: { pausedAt: new Date(), pauseReason: 'spam' }
+        });
+        return pausedTurn({ session, botType, language, userContent, source });
+      }
+    }
+  }
+
+  // The business owner's tone/style/length preferences for this assistant
+  // (Feature 11). Appended to the system prompt subordinate to the locked rules
+  // (services/tenantInstructions.js + domains/tenantProfile.js); never throws,
+  // so chat falls back to the stock persona on any lookup failure.
+  const clientInstructions = await instructionDirectiveFor(tenant.id, botType);
+
+  // Human Escalation (Feature 5): the tenant's trigger keywords + the reply-ETA
+  // sentence for right now, precomputed in the turn's language. Drives the
+  // handoff.keyword action and the ETA appended to a handoff reply
+  // (domains/handoffActions.js). Never throws — chat falls back to no triggers
+  // and no ETA on any lookup failure.
+  const escalation = await escalationContextFor(tenant.id, { lang: language });
+
   const result = await getEngineAnswer({
     profile: BOT_PROFILE_FACTORIES[botType](tenant),
     query: engineQuery,
@@ -199,7 +282,9 @@ async function runTenantChat({ tenant, body, sandbox = false, imageDeps = undefi
       sessionId: session.id, // tickets and an email left later are tied to this conversation
       sandbox, // a dashboard test chat: engine/ticketing.js skips filing real tickets
       recentTurns: recentTurns.reverse().map((m) => ({ role: m.role, content: m.content })),
-      language // pins the reply language (engine/promptBuilder.js)
+      language, // pins the reply language (engine/promptBuilder.js)
+      clientInstructions, // tone/style/length only — subordinate to the grounding rules
+      escalation // trigger keywords + reply ETA (Feature 5)
     }
   });
 
@@ -239,7 +324,7 @@ async function runTenantChat({ tenant, body, sandbox = false, imageDeps = undefi
       const matchText = [effectiveQuery, reply.answer, imageProductText].filter(Boolean).join('\n');
       products = await matchCatalogProducts(tenant.id, matchText, { listIntent: wantsCatalog });
     } catch (err) {
-      console.warn(`[tenantChat] product match failed for tenant ${tenant.id}: ${err.message}`);
+      logger.warn(`[tenantChat] product match failed for tenant ${tenant.id}: ${err.message}`);
     }
     // Multi-turn carryover: the visitor named no product this turn, but the
     // message refers back to ones we just showed ("link as well", "show
@@ -250,7 +335,7 @@ async function runTenantChat({ tenant, body, sandbox = false, imageDeps = undefi
         const prev = await store().get(productKey);
         if (Array.isArray(prev) && prev.length) products = prev;
       } catch (err) {
-        console.warn(`[tenantChat] product context read failed for tenant ${tenant.id}: ${err.message}`);
+        logger.warn(`[tenantChat] product context read failed for tenant ${tenant.id}: ${err.message}`);
       }
     }
   }
@@ -263,8 +348,8 @@ async function runTenantChat({ tenant, body, sandbox = false, imageDeps = undefi
   if (!sandbox) {
     await prisma.chatMessage.createMany({
       data: [
-        { sessionId: session.id, role: 'user', content: userContent, botType },
-        { sessionId: session.id, role: 'assistant', content: reply.answer, confidence: confidence ?? null, botType, answered: finalAnswered }
+        { sessionId: session.id, role: 'user', content: userContent, botType, imageKeys: storedImageKeys, source },
+        { sessionId: session.id, role: 'assistant', content: reply.answer, confidence: confidence ?? null, botType, answered: finalAnswered, source }
       ]
     });
     // After the messages are written, so the lead's transcript and the alert include this turn.
@@ -303,7 +388,7 @@ async function runTenantChat({ tenant, body, sandbox = false, imageDeps = undefi
     try {
       await store().set(productKey, products, PRODUCT_CONTEXT_TTL_MS);
     } catch (err) {
-      console.warn(`[tenantChat] product context write failed for tenant ${tenant.id}: ${err.message}`);
+      logger.warn(`[tenantChat] product context write failed for tenant ${tenant.id}: ${err.message}`);
     }
   }
 
@@ -319,20 +404,56 @@ async function runTenantChat({ tenant, body, sandbox = false, imageDeps = undefi
  * sessionId still comes back so the widget keeps the same conversation.
  * @returns {Promise<object>} the same response shape as a normal turn
  */
-async function refuseImageTurn({ session, botType, language, userContent, answer, sandbox = false }) {
+async function refuseImageTurn({ session, botType, language, userContent, answer, sandbox = false, source = 'text' }) {
   // Sandbox test chats leave no trace — mirror the main turn's persistence guard.
   if (!sandbox) {
     await prisma.chatMessage.createMany({
       data: [
-        { sessionId: session.id, role: 'user', content: userContent, botType },
+        { sessionId: session.id, role: 'user', content: userContent, botType, source },
         // answered: false — the visitor's question was not answered, so this
         // turn counts as a miss in the dashboard rather than a success.
-        { sessionId: session.id, role: 'assistant', content: answer, confidence: null, botType, answered: false }
+        { sessionId: session.id, role: 'assistant', content: answer, confidence: null, botType, answered: false, source }
       ]
     });
     await recordTurn({ session, botType });
   }
   return { answer, followUps: [], sessionId: session.id, botType, language, products: [] };
+}
+
+// Shown when a visitor attaches a photo but the tenant has turned image uploads
+// off, and there is no text to answer instead. In the active language.
+function imagesOffMessage(language) {
+  return language === 'hi'
+    ? 'क्षमा करें, इस चैट में तस्वीरें नहीं भेजी जा सकतीं। कृपया अपना सवाल टेक्स्ट में लिखें।'
+    : 'Sorry, image uploads aren’t available in this chat. Please describe your question in text.';
+}
+
+// The notice a visitor sees once their conversation is paused (spam
+// auto-detection, or a human from Chat Logs). Deliberately neutral — it does
+// not say "spam" — and in the active language.
+function pausedNotice(language) {
+  return language === 'hi'
+    ? 'यह बातचीत फ़िलहाल रोक दी गई है। कृपया बाद में दोबारा कोशिश करें।'
+    : 'This conversation has been paused. Please try again later.';
+}
+
+/**
+ * Answer a turn with no bot reply because the conversation is paused. The
+ * visitor's message is still recorded (so staff see what continued to arrive),
+ * but nothing is generated, no lead/alert fires, and the paused notice is
+ * returned. Mirrors refuseImageTurn's persistence. Never runs in a sandbox.
+ * @returns {Promise<object>} the same response shape as a normal turn
+ */
+async function pausedTurn({ session, botType, language, userContent, source = 'text' }) {
+  const answer = pausedNotice(language);
+  await prisma.chatMessage.createMany({
+    data: [
+      { sessionId: session.id, role: 'user', content: userContent, botType, source },
+      { sessionId: session.id, role: 'assistant', content: answer, confidence: null, botType, answered: false, source }
+    ]
+  });
+  await recordTurn({ session, botType });
+  return { answer, followUps: [], sessionId: session.id, botType, language, products: [], paused: true, pauseReason: session.pauseReason || 'manual' };
 }
 
 // A short, persona-appropriate lead-in used when we answer a product/listing
@@ -354,7 +475,9 @@ function catalogLeadIn(botType, language) {
 async function handleChat(req, res, next) {
   try {
     // req.actor is set only behind the dashboard's gatekeepers; the widget route has none.
-    res.json(await runTenantChat({ tenant: req.tenant, body: req.body, sandbox: !!req.actor }));
+    // req.guardrails is loaded by the widget route's middleware (spam auto-pause reads it);
+    // the dashboard mounts don't set it, so the owner's own test chat is never gated.
+    res.json(await runTenantChat({ tenant: req.tenant, body: req.body, sandbox: !!req.actor, guardrails: req.guardrails || null }));
   } catch (err) {
     if (err instanceof ChatRequestError) return res.status(err.statusCode).json({ error: err.message });
     next(err);

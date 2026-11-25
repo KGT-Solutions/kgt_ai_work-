@@ -2,6 +2,8 @@ const express = require('express');
 const crypto = require('crypto');
 const prisma = require('../lib/prisma');
 const { applyInboundStatus } = require('../services/crm/zohoSync');
+const { applyInboundStatus: applyHubspotStatus } = require('../services/crm/hubspotSync');
+const { tenantIdForPortal } = require('../services/crm/hubspotSettings');
 const { createIpRateLimiter } = require('../utils/ipRateLimit');
 
 // Inbound CRM webhooks: a sales rep changing a lead's status inside Zoho
@@ -69,6 +71,103 @@ router.post('/zoho', async (req, res) => {
 
   const result = await applyInboundStatus({ recordId, zohoStatus, tenantId, email });
   return res.status(200).json({ ok: true, ...result });
+});
+
+// ── Inbound HubSpot webhooks (Feature 9): a sales rep changing a contact's
+// lifecycle stage or lead status inside HubSpot mirrors back into KGT Orb.
+//
+//   POST /api/v1/webhooks/hubspot   (public; HubSpot-signature authenticated)
+//
+// HubSpot POSTs an ARRAY of event objects (portalId, objectId, propertyName,
+// propertyValue, subscriptionType). Authenticity is proven by the v1 signature —
+// SHA256(clientSecret + rawBody) in the x-hubspot-signature header — so no
+// per-tenant secret is needed; the portalId maps each event to its tenant. A
+// shared-secret token (HUBSPOT_WEBHOOK_SECRET) is also accepted as an escape
+// hatch. The handler NEVER throws into Express: an event we can't act on is
+// acknowledged with a reason, so HubSpot doesn't retry forever.
+
+const isHubspotWebhookRateLimited = createIpRateLimiter({
+  name: 'crm-webhook-hubspot',
+  max: Number(process.env.CRM_WEBHOOK_RATE_LIMIT_MAX || 30),
+  windowMs: Number(process.env.CRM_WEBHOOK_RATE_LIMIT_WINDOW_MIN || 1) * 60 * 1000
+});
+
+// Timing-safe equality for strings of any length.
+function safeEqual(a, b) {
+  const ba = Buffer.from(String(a || ''));
+  const bb = Buffer.from(String(b || ''));
+  return ba.length === bb.length && crypto.timingSafeEqual(ba, bb);
+}
+
+/**
+ * Verify a HubSpot webhook request. Returns true/false, or null when nothing is
+ * configured to verify against (so the route can answer 503 rather than trust it).
+ */
+function hubspotSignatureOk(req) {
+  const sharedSecret = String(process.env.HUBSPOT_WEBHOOK_SECRET || '').trim();
+  const clientSecret = String(process.env.HUBSPOT_CLIENT_SECRET || '').trim();
+  if (!sharedSecret && !clientSecret) return null; // not configured
+
+  // Escape hatch: a shared token (header or ?token=), like the Zoho webhook.
+  if (sharedSecret && safeEqual(req.get('x-hubspot-webhook-token') || req.query.token, sharedSecret)) {
+    return true;
+  }
+  // HubSpot v1 signature: SHA256(clientSecret + rawRequestBody), hex. Needs the
+  // exact bytes HubSpot sent (captured in app.js as req.rawBody).
+  if (clientSecret && req.rawBody) {
+    const provided = req.get('x-hubspot-signature');
+    if (!provided) return false;
+    const expected = crypto.createHash('sha256').update(clientSecret + req.rawBody.toString('utf8')).digest('hex');
+    return safeEqual(provided, expected);
+  }
+  return false;
+}
+
+// Only these contact property changes carry a status we map back.
+const STATUS_PROPERTIES = new Set(['hs_lead_status', 'lifecyclestage']);
+
+router.post('/hubspot', async (req, res) => {
+  if (await isHubspotWebhookRateLimited(req.ip)) {
+    return res.status(429).json({ error: 'Too many requests' });
+  }
+
+  const ok = hubspotSignatureOk(req);
+  if (ok === null) return res.status(503).json({ error: 'HubSpot webhooks are not configured' });
+  if (!ok) return res.status(401).json({ error: 'Invalid webhook signature' });
+
+  // HubSpot sends an array of events; a single object is tolerated too.
+  const events = Array.isArray(req.body) ? req.body : (req.body ? [req.body] : []);
+  if (!events.length) return res.status(200).json({ ok: true, processed: 0 });
+
+  // Cache portalId → tenantId within this batch (events usually share a portal).
+  const tenantByPortal = new Map();
+  let updated = 0;
+  const results = [];
+
+  for (const ev of events.slice(0, 100)) {
+    const propertyName = ev?.propertyName;
+    if (!STATUS_PROPERTIES.has(String(propertyName))) { results.push({ reason: 'ignored-property' }); continue; }
+    const portalId = ev?.portalId != null ? String(ev.portalId) : null;
+    const recordId = ev?.objectId != null ? String(ev.objectId) : null;
+    const value = ev?.propertyValue;
+    if (!recordId || value === undefined || value === null || value === '') {
+      results.push({ reason: 'incomplete-event' });
+      continue;
+    }
+
+    let tenantId = portalId ? tenantByPortal.get(portalId) : null;
+    if (tenantId === undefined || tenantId === null) {
+      tenantId = await tenantIdForPortal(portalId);
+      if (portalId) tenantByPortal.set(portalId, tenantId);
+    }
+    if (!tenantId) { results.push({ reason: 'unknown-portal' }); continue; }
+
+    const r = await applyHubspotStatus({ recordId, propertyName, value, tenantId });
+    if (r.updated) updated += 1;
+    results.push(r);
+  }
+
+  return res.status(200).json({ ok: true, processed: results.length, updated });
 });
 
 module.exports = router;

@@ -1,4 +1,5 @@
 const express = require('express');
+const { logger } = require('../lib/logger');
 const crypto = require('crypto');
 const prisma = require('../lib/prisma');
 const multer = require('multer');
@@ -350,7 +351,7 @@ router.post('/complete', async (req, res) => {
   // Every refusal is logged with its reason: a signup that silently never
   // completes otherwise looks, later, like a login bug ("Invalid email or password").
   const refuse = (status, body) => {
-    console.warn(`[register] signup refused (${status}) for ${maskAddress(String(req.body?.email || '').trim().toLowerCase())}: ${body.code || body.error}`);
+    logger.warn(`[register] signup refused (${status}) for ${maskAddress(String(req.body?.email || '').trim().toLowerCase())}: ${body.code || body.error}`);
     return res.status(status).json(body);
   };
   if (await isCompleteRateLimited(req.ip)) {
@@ -453,7 +454,7 @@ router.post('/complete', async (req, res) => {
       throw e;
     }
   }
-  console.log(`[register] account created for ${maskAddress(email)} (tenant ${created.tenant.slug})`);
+  logger.info(`[register] account created for ${maskAddress(email)} (tenant ${created.tenant.slug})`);
   // Brand kit + the three widget designs (Theme Studio). `branding` is what
   // /analyze returned, sent back by the wizard — untrusted like everything in
   // this body, so saveBrandKit re-validates every field. With real brand
@@ -465,7 +466,7 @@ router.post('/complete', async (req, res) => {
     source: brand ? 'website' : 'fallback',
     sourceUrl: consentHost ? `https://${consentHost}` : null,
     autoSelect: true
-  }).catch((err) => console.warn(`[register] tenant ${created.tenant.id}: could not save the brand kit: ${err.message}`));
+  }).catch((err) => logger.warn(`[register] tenant ${created.tenant.id}: could not save the brand kit: ${err.message}`));
   // No invalidateTenantKnowledge call needed — this tenant's knowledge
   // cache has never been populated, so there's nothing stale to clear.
   // Warm the knowledge cache, which also kicks off the background build of the
@@ -474,7 +475,7 @@ router.post('/complete', async (req, res) => {
   // delays or fails signup (hybridRetriever falls back to lexical until it lands).
   require('../domains/tenantProfile')
     .loadTenantKnowledge(created.tenant.id)
-    .catch((err) => console.warn(`[register] tenant ${created.tenant.id}: initial knowledge warm failed: ${err.message}`));
+    .catch((err) => logger.warn(`[register] tenant ${created.tenant.id}: initial knowledge warm failed: ${err.message}`));
   // Starter questions are written in the background, usually before the
   // new client reaches the Test Bots page.
   scheduleFaqGeneration(created.tenant.id);
@@ -489,7 +490,7 @@ router.post('/complete', async (req, res) => {
   if (reviewed) {
     readiness = { score: reviewed.readinessScore, level: reviewed.readinessLevel };
     await saveTenantReadiness(created.tenant.id, reviewed).catch((err) => {
-      console.warn(`[register] tenant ${created.tenant.id}: could not save the readiness report: ${err.message}`);
+      logger.warn(`[register] tenant ${created.tenant.id}: could not save the readiness report: ${err.message}`);
       scheduleTenantAudit(created.tenant.id);
     });
   } else {

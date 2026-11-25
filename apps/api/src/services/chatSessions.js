@@ -1,4 +1,5 @@
 const prisma = require('../lib/prisma');
+const { logger } = require('../lib/logger');
 const { generateAnswer, isLlmConfigured, formatAttempts } = require('../engine/llmClient');
 const { logUsage } = require('../engine/usageTracking');
 const { buildSummaryPrompt, cleanSummary, scheduleLeadSummary, loadTranscript } = require('./leads');
@@ -58,7 +59,7 @@ async function recordTurn({ session, botType }) {
       }
     });
   } catch (err) {
-    console.warn(`[sessions] session ${session.id}: could not update its bookkeeping: ${err.message}`);
+    logger.warn(`[sessions] session ${session.id}: could not update its bookkeeping: ${err.message}`);
   }
 }
 
@@ -68,11 +69,23 @@ async function recordTurn({ session, botType }) {
  * handed to services/leads.js instead.
  * @returns {Promise<object|null>} the updated session, or null
  */
+// Fire-and-forget integration event (webhooks / Google Sheets, Feature 8).
+// Lazily required and defensive — a broken integration never affects the summary sweep.
+function emitSessionCompleted(tenantId, data) {
+  try {
+    const { emitTenantEvent } = require('./integrationEvents');
+    Promise.resolve(emitTenantEvent(tenantId, 'chat.session.completed', data))
+      .catch((err) => logger.warn(`[sessions] integration event failed: ${err.message}`));
+  } catch (err) {
+    logger.warn(`[sessions] integration events unavailable: ${err.message}`);
+  }
+}
+
 async function summarizeSession(sessionId) {
   const finish = (data) => prisma.chatSession.update({ where: { id: sessionId }, data: { ...data, summarizedAt: new Date() } })
     .catch(() => null); // session deleted mid-run
   const fail = (message) => {
-    console.warn(`[sessions] session ${sessionId}: summary failed: ${message}`);
+    logger.warn(`[sessions] session ${sessionId}: summary failed: ${message}`);
     return finish({ summaryStatus: 'failed' });
   };
 
@@ -102,7 +115,11 @@ async function summarizeSession(sessionId) {
     await logUsage({ ctx: { tenantId: session.tenantId }, provider, model, usage });
     const summary = cleanSummary(text);
     if (!summary) return fail('the model returned an empty summary');
-    return await finish({ summary, summaryStatus: 'ready' });
+    const done = await finish({ summary, summaryStatus: 'ready' });
+    // Announce the wrapped-up conversation to the tenant's outbound integrations
+    // (webhooks / Google Sheets, Feature 8). Fire-and-forget; never blocks the sweep.
+    emitSessionCompleted(session.tenantId, { sessionId, botType, summary });
+    return done;
   } catch (err) {
     return fail(err.attempts ? formatAttempts(err.attempts) : err.message);
   }
@@ -224,7 +241,7 @@ async function sweep() {
     for (const id of ids) runSessionSummary(id);
     return ids.length;
   } catch (err) {
-    console.warn(`[sessions] summary sweep failed: ${err.message}`);
+    logger.warn(`[sessions] summary sweep failed: ${err.message}`);
     return 0;
   }
 }
@@ -233,7 +250,7 @@ async function sweep() {
 function startSessionSummaryWorker() {
   const timer = setInterval(sweep, SWEEP_MS);
   timer.unref?.();
-  console.log(`[sessions] summary worker: every ${SWEEP_MS / 1000}s, conversations idle ${SUMMARY_IDLE_MS / 1000}s+`);
+  logger.info(`[sessions] summary worker: every ${SWEEP_MS / 1000}s, conversations idle ${SUMMARY_IDLE_MS / 1000}s+`);
   return () => clearInterval(timer);
 }
 

@@ -152,7 +152,8 @@ const BADGE_TONES = {
   green: 'border-green-400/25 bg-green-400/10 text-green-200',
   success: 'border-emerald-400/25 bg-emerald-400/10 text-emerald-200',
   warning: 'border-amber-400/25 bg-amber-400/10 text-amber-200',
-  danger: 'border-rose-400/25 bg-rose-400/10 text-rose-200'
+  danger: 'border-rose-400/25 bg-rose-400/10 text-rose-200',
+  violet: 'border-violet-400/25 bg-violet-400/10 text-violet-200'
 };
 export function Badge({ tone = 'neutral', dot = false, className = '', children }) {
   const dotColor = { success: 'bg-emerald-400', warning: 'bg-amber-400', danger: 'bg-rose-400', blue: 'bg-brand-400', green: 'bg-green-400', neutral: 'bg-fg-3' }[tone];

@@ -155,7 +155,7 @@ describe('branding: publicTheme (what the widget fetches)', () => {
   test('no applied design means the classic look, even when a brand kit exists', async () => {
     const prisma = fakePrisma();
     await branding.getBranding(TENANT, { prisma });
-    assert.deepEqual(await branding.publicTheme(TENANT, { prisma }), { companyName: 'Acme Foods', botName: null, logoUrl: null, theme: null });
+    assert.deepEqual(await branding.publicTheme(TENANT, { prisma }), { companyName: 'Acme Foods', botName: null, logoUrl: null, theme: null, showBranding: true });
   });
 
   test('an applied design comes back with the logo and company name', async () => {
@@ -209,7 +209,7 @@ describe('branding: bot display name', () => {
     const prisma = fakePrisma();
     await branding.updateBrandKit(TENANT, { botName: 'Support Assistant' }, { prisma, analyzeLogo: noAnalysis, cleanLogo: noClean });
     assert.deepEqual(await branding.publicTheme(TENANT, { prisma }),
-      { companyName: 'Acme Foods', botName: 'Support Assistant', logoUrl: null, theme: null });
+      { companyName: 'Acme Foods', botName: 'Support Assistant', logoUrl: null, theme: null, showBranding: true });
   });
 });
 

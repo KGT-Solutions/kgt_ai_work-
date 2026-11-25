@@ -75,6 +75,7 @@ model Tenant {
   apiKeys        TenantApiKey[]
   consents       TenantConsent[]
   chatSessions   ChatSession[]
+  chatImages     ChatImageAsset[]
   tickets        SupportTicket[]
   leads          Lead[]
   usageLogs      UsageLog[]
@@ -86,6 +87,19 @@ model Tenant {
   crmSyncLogs    CRMSyncLog[]
   branding       TenantBranding?
   logoAssets     TenantLogoAsset[]
+  guardrails     TenantGuardrails?
+  instructions   TenantInstruction[]
+  emailSettings  TenantEmailSettings?
+  escalation     TenantEscalationSettings?
+  helpdesk       TenantHelpdeskIntegration?
+  helpdeskLogs   HelpdeskSyncLog[]
+  retention      TenantRetentionSettings?
+  voiceUsage     TenantVoiceUsage[]
+  crawlSource    TenantCrawlSource?
+  crawlRuns      TenantCrawlRun[]
+  webhooks          TenantWebhook[]
+  webhookDeliveries WebhookDelivery[]
+  sheetSync         TenantSheetSync?
 }
 
 // Structured product rows from a catalog CSV upload (services/catalogIngest.js).
@@ -362,11 +376,56 @@ model ChatSession {
   // SESSION_SUMMARY_LEASE_MIN means the holder died mid-run, so the
   // conversation becomes claimable again instead of being stuck pending.
   summaryClaimedAt DateTime?
+  // A paused conversation gets no bot replies until a human resumes it
+  // (services/tenantChat.js). Set by spam auto-detection or from Chat Logs.
+  pausedAt         DateTime?
+  pauseReason      String? // spam | manual — CHECK constraint in migration 20261121090000_chat_session_pause
   messages         ChatMessage[]
 
   @@index([tenantId])
   @@index([tenantId, lastMessageAt])
   @@index([lastMessageAt])
+}
+
+// Full-site sitemap sync source + weekly auto-refresh schedule (Feature 2,
+// services/knowledgeSync.js). One row per tenant: the website to keep in sync
+// and whether the weekly background refresh is on. The run history lives in
+// TenantCrawlRun. Strictly tenant-scoped.
+model TenantCrawlSource {
+  id            String    @id @default(uuid())
+  tenant        Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantId      String    @unique
+  url           String? // the site to sync from its sitemap; null = not configured
+  weeklyEnabled Boolean   @default(false) // weekly background auto-refresh (gated by KNOWLEDGE_SYNC_ENABLED)
+  lastRunAt     DateTime?
+  lastRunId     String? // the most recent TenantCrawlRun id (not a FK — a run may be pruned)
+  lastStatus    String? // completed | failed — mirror of the last run's status
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+// One sitemap-sync run and its change report (Feature 2). report holds the
+// structured per-page detail ({ counts, pages:[{url,title,status,error?}], sitemaps }).
+// trigger: manual | scheduled. status: running | completed | failed.
+model TenantCrawlRun {
+  id              String    @id @default(uuid())
+  tenant          Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantId        String
+  sourceUrl       String
+  trigger         String    @default("manual") // manual | scheduled — CHECK constraint in migration
+  status          String    @default("running") // running | completed | failed — CHECK constraint in migration
+  pagesDiscovered Int       @default(0)
+  pagesAdded      Int       @default(0)
+  pagesUpdated    Int       @default(0)
+  pagesRemoved    Int       @default(0)
+  pagesUnchanged  Int       @default(0)
+  errorsCount     Int       @default(0)
+  report          Json? // { counts, pages: [{ url, title, status, error? }], sitemaps }
+  startedAt       DateTime  @default(now())
+  finishedAt      DateTime?
+
+  @@index([tenantId])
+  @@index([tenantId, startedAt])
 }
 
 model ChatMessage {
@@ -383,9 +442,38 @@ model ChatMessage {
   // on greetings, handoffs, "can't answer that" and outage replies. The
   // visitor's confirmation email recaps only these (services/leads.js).
   answered   Boolean     @default(false)
+  // Content keys of the visitor images attached to this (user) turn, each a
+  // ChatImageAsset of the same tenant (services/shared/chatImage.js). Empty on
+  // every assistant row and on text-only turns.
+  imageKeys  String[]    @default([])
+  // How the visitor sent this turn: 'text' (typed) or 'voice' (Speech-to-Speech,
+  // services/voiceChat.js). Set on both rows of a voice turn so Chat Logs and the
+  // CSV export can show a "Voice" tag. CHECK constraint in migration
+  // 20261127090000_voice_source_minutes.
+  source     String      @default("text")
   createdAt  DateTime    @default(now())
 
   @@index([sessionId])
+}
+
+// A visitor-uploaded chat image, re-encoded through sharp so every EXIF/GPS
+// block is dropped, stored once per tenant by the sha256 of its processed bytes
+// (so the same photo sent twice is one row). Served by the scoped, content-
+// addressed route (routes/chatImages.routes.js); referenced from
+// ChatMessage.imageKeys. Never written for the dashboard's own test chat.
+model ChatImageAsset {
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  key       String // sha256 hex prefix of the processed bytes
+  data      Bytes
+  mimeType  String // image/jpeg | image/png | image/webp
+  width     Int
+  height    Int
+  bytes     Int
+  createdAt DateTime @default(now())
+
+  @@id([tenantId, key])
+  @@index([tenantId])
 }
 
 model SupportTicket {
@@ -402,6 +490,15 @@ model SupportTicket {
   sessionId    String? // the conversation, so an email left later attaches here
   contactEmail String? // left by the visitor in the chat
   status       String   @default("open")
+  // Human Escalation (Feature 5). The reply ETA shown to the visitor when this
+  // ticket was raised (services/escalation.js), e.g. "within about 30 minutes" —
+  // a snapshot, so it reads the same later even if business hours change. The
+  // helpdesk mirror: which external helpdesk this ticket was pushed to and its
+  // id there, set once services/helpdesk/helpdeskSync.js creates it. Null = not
+  // (yet) synced; a down or unconfigured helpdesk simply leaves these null.
+  replyEta         String?
+  helpdeskProvider String? // 'zoho_desk' | 'freshdesk'
+  helpdeskTicketId String?
   createdAt    DateTime @default(now())
 
   @@index([tenantId, status])
@@ -482,6 +579,12 @@ model TenantCRMIntegration {
   // The CRM data centre / regional domain: 'in' (zohoapis.in), 'com', 'eu',
   // 'au', 'jp', ... — resolved to a base URL in services/crm/zohoAuth.js.
   region       String      @default("com")
+  // HubSpot account (hub/portal) id, captured at connect from the token
+  // introspection endpoint (services/crm/hubspotAuth.js). Null for Zoho. An
+  // inbound HubSpot webhook carries only the portalId + object id, so this maps
+  // an event back to the right tenant (routes/crmWebhook.routes.js) and keeps
+  // a contact id — unique only WITHIN a portal — from colliding across tenants.
+  portalId     String?
   accessToken  String? // AES-256-GCM ciphertext; short-lived, refreshed on expiry
   refreshToken String? // AES-256-GCM ciphertext; long-lived, mints access tokens
   tokenExpiry  DateTime? // when accessToken stops being valid
@@ -495,6 +598,8 @@ model TenantCRMIntegration {
   syncLogs CRMSyncLog[]
 
   @@index([tenantId])
+  // Inbound HubSpot webhooks look a tenant up by (provider, portalId).
+  @@index([provider, portalId])
 }
 
 // Audit trail of every sync attempt, in either direction, so a failed or
@@ -600,6 +705,10 @@ model TenantBranding {
   // The bot's display name in the widget header ("Support Assistant", "Aria").
   // Null = the widget's default title. Independent of the applied design.
   botName         String?
+  // The free "Powered by KGT Orb" footer strip in the widget and its preview.
+  // Owner-toggleable at no charge; true = shown. The permanent "You are chatting
+  // with an AI assistant" notice is NOT governed by this and can never be hidden.
+  showBranding    Boolean   @default(true)
   // The logo the client uploaded themselves (TenantLogoAsset), by content
   // hash — part of its public URL, so a new upload is a new URL and browsers
   // never show a stale cached one. Non-null = it is THE logo, ahead of logoUrl.
@@ -609,4 +718,352 @@ model TenantBranding {
   scannedAt       DateTime?
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
+}
+
+// Per-tenant Guardrails settings (one row per tenant, created on first save;
+// absent = platform defaults). Owner-tunable from the dashboard Guardrails
+// screen. This is only the SCAFFOLD — the config store and its endpoints;
+// enforcement (per-device limits, spam auto-pause, country block) and image
+// persistence are built on top of it later.
+model TenantGuardrails {
+  id       String @id @default(uuid())
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantId String @unique
+
+  // Per-device rate limit ("maxMessages every windowSeconds"); null = platform default.
+  maxMessages   Int?
+  windowSeconds Int?
+  // Shown to a visitor in place of a reply when the limit is hit; null = default copy.
+  limitMessage  String?
+
+  // Auto-pause a conversation detected as spam (checked at the visitor's
+  // 2nd/4th/8th/16th message). Off by default.
+  spamCheckEnabled Boolean @default(false)
+
+  // ISO-3166 alpha-2 codes whose visitors are blocked (widget hidden). IP
+  // geolocation is advisory — a VPN defeats it — so this is a deterrent, not a
+  // security control. Empty = no country blocked.
+  blockedCountries String[] @default([])
+
+  // Master toggle for visitor image uploads in chat.
+  imagesEnabled Boolean @default(true)
+
+  // Monthly Speech-to-Speech allowance in minutes (Feature 4). null = platform
+  // default (env VOICE_MONTHLY_MINUTES_DEFAULT); 0 = unlimited. Metered per UTC
+  // month in TenantVoiceUsage (services/voiceUsage.js).
+  voiceMonthlyMinutes Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// Monthly voice-minute metering for Speech-to-Speech (Feature 4). One row per
+// (tenant, UTC month); secondsUsed accumulates the estimated spoken-input
+// duration of each live voice turn (services/voiceUsage.js). The cap itself is
+// TenantGuardrails.voiceMonthlyMinutes; this is only the running tally. Sandbox
+// test chats never write here.
+model TenantVoiceUsage {
+  id          String   @id @default(uuid())
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantId    String
+  period      String // 'YYYY-MM' (UTC)
+  secondsUsed Int      @default(0)
+  turns       Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([tenantId, period])
+  @@index([tenantId])
+}
+
+// Client-facing Instructions Editor (Feature 11): the business owner's tone /
+// style / length preferences and free-text guidance per assistant (Support /
+// Sales). These are layered onto the system prompt AFTER the locked grounding,
+// safety, pricing, scope and privacy rules and explicitly subordinate to them
+// (domains/tenantProfile.js + services/tenantInstructions.js) — they can shape
+// how an answer sounds, never what facts it may state or which questions it may
+// answer. One row per (tenant, botType); absent = the stock persona, unchanged.
+model TenantInstruction {
+  id       String @id @default(uuid())
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantId String
+  botType  String // 'support' | 'sales'
+
+  // Preset controls (null = unset → that line is simply omitted from the prompt).
+  tone   String? // friendly | professional | playful | formal | empathetic
+  style  String? // concise | detailed | conversational | direct
+  length String? // short | medium | long
+  // Free-text style/tone guidance, bounded and sanitised before storage.
+  guidance String?
+
+  // Monotonic revision counter; the newest saved state. Each save appends a
+  // TenantInstructionVersion snapshot with this number.
+  version   Int      @default(1)
+  updatedBy String? // actor email, else role ('client' | 'operator')
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  versions TenantInstructionVersion[]
+
+  @@unique([tenantId, botType])
+  @@index([tenantId])
+}
+
+// One saved revision of a TenantInstruction, for the version-history panel:
+// view and restore a previous version. A restore writes a NEW version whose
+// content copies the chosen one, so history is append-only and auditable.
+model TenantInstructionVersion {
+  id            String            @id @default(uuid())
+  instruction   TenantInstruction @relation(fields: [instructionId], references: [id], onDelete: Cascade)
+  instructionId String
+  tenantId      String // denormalised for scoped lookups
+  botType       String
+  version       Int
+
+  tone     String?
+  style    String?
+  length   String?
+  guidance String?
+
+  // Metadata: a short human summary of the change, and who made it.
+  summary String?
+  actor   String?
+
+  createdAt DateTime @default(now())
+
+  @@index([instructionId, version])
+  @@index([tenantId, botType, version])
+}
+
+// Email Connection (Feature 10). One row per tenant holding BOTH an optional
+// Google/Microsoft OAuth send connection (services/emailConnection.js, sending
+// through the Gmail API / Microsoft Graph with send-only scopes) AND the
+// per-email-type toggles enforced before each category is sent. Custom SMTP
+// stays in TenantSmtpConfig and is unaffected; mailer.js prefers an OAuth
+// connection, then SMTP, then the platform transport. OAuth tokens are
+// encrypted at rest (utils/encryption.js) and never returned to the client.
+model TenantEmailSettings {
+  id       String @id @default(uuid())
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantId String @unique
+
+  // OAuth send connection. null provider = not connected (SMTP/platform used).
+  provider     String? // 'google' | 'microsoft'
+  oauthEmail   String? // the connected mailbox; used as the From address
+  refreshToken String? // encrypted (AES-256-GCM); the long-lived grant
+  accessToken  String? // encrypted; a short-lived cache, refreshed as needed
+  tokenExpiry  DateTime?
+  scope        String?
+  connectedAt  DateTime?
+  connectedBy  String? // actor email/role that connected it
+
+  // Per-email-type toggles (default on). Enforced server-side before each send
+  // (services/teamAlerts.js, services/leads.js). Account-security emails
+  // (password reset, signup verification) are NOT governed here and always send.
+  leadAlertsEnabled          Boolean @default(true) // "new lead captured" alerts to the team
+  attentionAlertsEnabled     Boolean @default(true) // handoff / low-confidence alerts to the team
+  visitorConfirmationEnabled Boolean @default(true) // the confirmation email to the visitor who left an email
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ── Generic outbound webhooks (Feature 8, services/webhooks.js). A tenant
+// registers HTTP endpoints and subscribes each to one or more events
+// (lead.created, ticket.created, chat.session.completed). On an event we POST a
+// signed JSON envelope to every matching endpoint. The signing `secret` is stored
+// ONLY as AES-256-GCM ciphertext (utils/encryption.js) and is returned to the
+// client just once, at creation/rotation. Strictly tenant-scoped.
+model TenantWebhook {
+  id       String @id @default(uuid())
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantId String
+
+  url         String
+  secret      String // encrypted (AES-256-GCM); the HMAC signing key, never returned after creation
+  events      String[] @default([]) // subscribed event names
+  enabled     Boolean  @default(true)
+  description String?
+
+  // Rollup of the latest delivery, for the dashboard list.
+  lastStatus     String? // 'success' | 'failed'
+  lastDeliveryAt DateTime?
+  failureCount   Int       @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  deliveries WebhookDelivery[]
+
+  @@index([tenantId])
+}
+
+// One webhook delivery outcome (an attempt-set per event). Stores ONLY the status
+// code and a short error message — never the request body, the secret, or any
+// response body (same discipline as the CRM/helpdesk sync logs).
+model WebhookDelivery {
+  id        String        @id @default(uuid())
+  tenant    Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantId  String
+  webhook   TenantWebhook @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+  webhookId String
+
+  event      String
+  status     String // 'success' | 'failed'
+  statusCode Int?
+  attempts   Int     @default(1)
+  error      String?
+
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, createdAt])
+  @@index([webhookId, createdAt])
+}
+
+// ── Google Sheets sync (Feature 8, services/sheetsSync.js). A tenant connects a
+// Google account (the SAME OAuth app as the email connection, with the
+// spreadsheets scope) and picks a spreadsheet; subscribed events append a row.
+// Tokens are stored ONLY as AES-256-GCM ciphertext and never returned to the
+// client. One row per tenant. Append is fire-and-forget and fails safe.
+model TenantSheetSync {
+  id       String @id @default(uuid())
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantId String @unique
+
+  // OAuth connection. null refreshToken = not connected.
+  refreshToken   String? // encrypted; the long-lived grant
+  accessToken    String? // encrypted; a short-lived cache, refreshed as needed
+  tokenExpiry    DateTime?
+  scope          String?
+  connectedEmail String? // the connected Google account
+  connectedAt    DateTime?
+  connectedBy    String? // actor email/role that connected it
+
+  // What to write, and where.
+  spreadsheetId   String?
+  spreadsheetName String?  // the sheet/tab name to append to (null = Sheet1)
+  events          String[] @default(["lead.created"])
+  enabled         Boolean  @default(false)
+
+  lastStatus String?
+  lastSyncAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ── Human Escalation (Feature 5, services/escalation.js). Per-tenant control of
+// WHEN a conversation hands off to a person and WHAT the visitor is told to
+// expect. One row per tenant; absent = the platform defaults (no extra trigger
+// phrases, no ETA promised). These never weaken the grounded chat: a trigger
+// keyword only routes to the existing handoff path, it can't change an answer.
+model TenantEscalationSettings {
+  id       String @id @default(uuid())
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantId String @unique
+
+  // Extra phrases that, if a visitor's message contains one, trigger a handoff
+  // on top of the built-in "talk to a human" detection (domains/handoffActions.js).
+  // Lower-cased, de-duplicated, bounded. keywordsEnabled is the master switch.
+  triggerKeywords String[] @default([])
+  keywordsEnabled Boolean  @default(true)
+
+  // Business hours, for the reply-ETA message. An IANA timezone (e.g.
+  // "Asia/Kolkata"; null = UTC) and a per-weekday list of open ranges:
+  // { "mon": [["09:00","17:00"]], "sat": [], ... }. An empty object means hours
+  // aren't configured, so no ETA is computed.
+  businessTimezone String?
+  businessHours    Json    @default("{}")
+
+  // Reply ETA. Inside business hours the visitor is told replies come within
+  // replyEtaMinutes (null = a generic "as soon as we can"); outside hours they
+  // see offHoursEtaText (null = a generic "when we're back" line).
+  replyEtaMinutes Int?
+  offHoursEtaText String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// ── Helpdesk integration (Feature 5, services/helpdesk/*). A tenant can connect
+// ONE external helpdesk (Zoho Desk or Freshdesk) so an escalated chat opens a
+// real ticket there. Credentials are stored ONLY as AES-256-GCM ciphertext
+// (utils/encryption.js), exactly like SMTP passwords and CRM tokens, and are
+// never returned to the client. Ticket creation is fire-and-forget and fails
+// safe: a down or unconfigured helpdesk never breaks the chat or the handoff.
+model TenantHelpdeskIntegration {
+  id       String @id @default(uuid())
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantId String @unique
+
+  provider  String  // 'zoho_desk' | 'freshdesk' (CHECK constraint in the migration)
+  isEnabled Boolean @default(true)
+
+  // Freshdesk: the account subdomain ("acme" or "acme.freshdesk.com") and the
+  // API key (encrypted). Basic auth, no OAuth.
+  freshdeskDomain String?
+  apiKey          String? // encrypted
+
+  // Zoho Desk: OAuth via the platform's Zoho app (ZOHO_CLIENT_ID/SECRET) plus a
+  // per-tenant refresh token (encrypted) at a data-centre region, an org id and
+  // an optional department the tickets land in. accessToken is a short-lived
+  // cache refreshed as needed (services/crm/zohoAuth.js machinery is reused).
+  region       String?
+  orgId        String?
+  departmentId String?
+  refreshToken String? // encrypted
+  accessToken  String? // encrypted
+  tokenExpiry  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  logs HelpdeskSyncLog[]
+}
+
+// Audit trail of every helpdesk ticket-creation attempt, so a failed or skipped
+// push can always be traced from the dashboard. error holds a safe summary only
+// ({ message, statusCode }) — never the raw provider body, keys or tokens.
+model HelpdeskSyncLog {
+  id            String                     @id @default(uuid())
+  tenant        Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantId      String
+  integration   TenantHelpdeskIntegration? @relation(fields: [integrationId], references: [id], onDelete: SetNull)
+  integrationId String?
+  ticketId      String? // the KGT SupportTicket this push was for
+  provider      String // 'zoho_desk' | 'freshdesk'
+  operation     String  @default("ticket.create")
+  status        String  @default("PENDING") // PENDING | SUCCESS | FAILED | SKIPPED
+  externalTicketId String? // the helpdesk's own ticket id, once known
+  attempts      Int     @default(0)
+  error         Json? // { message, statusCode? } — never raw bodies or secrets
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([tenantId, createdAt])
+  @@index([ticketId])
+}
+
+// ── Chat-log retention (Feature 16, services/retention.js). Per-tenant policy
+// for how long conversations are kept. One row per tenant; absent = keep for
+// ever (the platform default). A purge deletes whole ChatSessions older than the
+// window, which cascades their ChatMessages; it is guarded (a dry-run first, a
+// minimum floor) so it can never wipe recent, active conversations by accident.
+model TenantRetentionSettings {
+  id       String @id @default(uuid())
+  tenant   Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenantId String @unique
+
+  // Keep conversations whose last activity is within this many days; older ones
+  // are eligible for purge. Null = keep for ever (nothing is ever purged).
+  retentionDays   Int?
+  // When on, the background sweep (services/retention.js) purges on a schedule;
+  // off = a purge only happens when someone runs it from the dashboard.
+  autoPurgeEnabled Boolean @default(false)
+
+  lastPurgeAt      DateTime?
+  lastPurgedCount  Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }

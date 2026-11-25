@@ -1,4 +1,5 @@
 const net = require('net');
+const { logger } = require('../lib/logger');
 const nodemailer = require('nodemailer');
 const prisma = require('../lib/prisma');
 const { encrypt, decrypt, encryptionConfigured } = require('../utils/encryption');
@@ -238,7 +239,7 @@ async function resolveTenantTransport(tenantId) {
   try {
     pass = decrypt(r.smtpPass);
   } catch (err) {
-    console.error(`[tenantSmtp] tenant ${tenantId}: could not decrypt SMTP password (has ENCRYPTION_KEY changed?) — using platform SMTP. ${err.message}`);
+    logger.error(`[tenantSmtp] tenant ${tenantId}: could not decrypt SMTP password (has ENCRYPTION_KEY changed?) — using platform SMTP. ${err.message}`);
     return null;
   }
   // The same rules as a test, at every send: a config saved before the rules
@@ -250,7 +251,7 @@ async function resolveTenantTransport(tenantId) {
     validatePort(r.smtpPort);
     ip = await smtpTarget(host);
   } catch (err) {
-    console.warn(`[tenantSmtp] tenant ${tenantId}: SMTP config refused (${err.message}) — using platform SMTP.`);
+    logger.warn(`[tenantSmtp] tenant ${tenantId}: SMTP config refused (${err.message}) — using platform SMTP.`);
     return null;
   }
   return {

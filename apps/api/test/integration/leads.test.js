@@ -103,6 +103,12 @@ beforeEach(async () => {
   };
   prisma.tenantFaq.findUnique = async () => null;
   prisma.tenantDocument.findMany = async () => []; // no knowledge base unless a test adds one
+  // Hot-path lookups added by the Instructions Editor (Feature 11) and Email
+  // Connection (Feature 10): the engine reads per-assistant instructions and
+  // sendConfirmation / team alerts read the per-email toggles. Keep this test
+  // hermetic (no real DB) — default to "nothing set", i.e. stock behaviour.
+  prisma.tenantInstruction = { findUnique: async () => null };
+  prisma.tenantEmailSettings = { findUnique: async () => null };
   invalidateTenantKnowledge(TENANT.id);
   prisma.supportTicket.create = async ({ data }) => { const t = { id: `t${tickets.length + 1}`, ...data }; tickets.push(t); return t; };
   prisma.supportTicket.findFirst = async ({ where }) => tickets.find((t) => matches(t, where)) || null;

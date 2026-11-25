@@ -298,7 +298,29 @@ irreversible.
 
 ## 5. Backup and restore
 
-### Take a backup
+### Automatic backups (the `backup` sidecar)
+
+The `backup` service in `docker-compose.yml` (script: `infra/backup/backup.sh`)
+takes a compressed `pg_dump` **once a day** — at `BACKUP_HOUR_UTC` (02:00 UTC by
+default), plus one on container start — and prunes dumps older than
+`BACKUP_RETENTION_DAYS` (14 by default). Dumps are named `kgthub_<date>.dump` and
+live in the `kgt_ai_hub_pg_backups` Docker volume.
+
+Configure it in the env file (see `.env.docker.example`): `BACKUP_ENABLED`,
+`BACKUP_HOUR_UTC`, `BACKUP_RETENTION_DAYS`, `BACKUP_ON_START`, `BACKUP_OFFSITE_CMD`.
+
+> **A dump on the same host as the database is not a backup against disk loss.**
+> In production, either map the volume to offsite-replicated storage or set
+> `BACKUP_OFFSITE_CMD` to copy each dump off the host (e.g. `aws s3 cp "$1" s3://…`).
+
+Check it is running and producing files:
+
+```bash
+docker logs kgt-ai-hub-backup --tail 20            # [backup] ... dump OK (… bytes)
+docker exec kgt-ai-hub-backup ls -lh /backups      # recent, non-trivial .dump files
+```
+
+### Take a manual backup (ad-hoc)
 
 ```bash
 docker exec kgt-ai-hub-postgres pg_dump -U kgthub -d kgthub -Fc \
@@ -310,13 +332,20 @@ them encrypted, keep them off the application host, and never commit them.
 
 ### Restore
 
+A dump taken by the sidecar lives inside the backup volume; copy it out first,
+then restore it (an ad-hoc dump from the command above is already on the host):
+
 ```bash
+# From the sidecar volume (skip if you already have the .dump on the host):
+docker cp kgt-ai-hub-backup:/backups/kgthub_YYYY-MM-DD_HHMM.dump ./restore.dump
+
 docker exec -i kgt-ai-hub-postgres pg_restore -U kgthub -d kgthub --clean \
-  < kgthub_YYYY-MM-DD.dump
+  < ./restore.dump
 ```
 
 Restore into an empty or scratch database first and verify, before ever pointing
-it at production.
+it at production. **An untested backup is not a backup** — run this drill
+periodically, not only during an incident.
 
 ### Wipe test data
 

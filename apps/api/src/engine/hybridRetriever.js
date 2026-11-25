@@ -1,4 +1,5 @@
 const { Prisma } = require('@prisma/client');
+const { logger } = require('../lib/logger');
 const prisma = require('../lib/prisma');
 const { retrieve } = require('./retriever');
 // Called through the module objects (not destructured) so a test's mock.method
@@ -59,7 +60,7 @@ async function vectorCandidates(tenantId, queryVec, allowedKeys, limit) {
     return rows.map((r) => r.chunkKey);
   } catch (err) {
     // A missing extension/table, or any query error, degrades to lexical-only.
-    console.warn(`[hybridRetriever] vector search failed for tenant ${tenantId}: ${err.message}`);
+    logger.warn(`[hybridRetriever] vector search failed for tenant ${tenantId}: ${err.message}`);
     return [];
   }
 }

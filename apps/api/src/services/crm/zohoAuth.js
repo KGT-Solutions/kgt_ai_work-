@@ -1,4 +1,5 @@
 const { encrypt, decrypt } = require('../../utils/encryption');
+const { logger } = require('../../lib/logger');
 
 // Zoho OAuth2 token manager. Two jobs, both region-aware:
 //   1. resolveDomains(region) — turn a tenant's data-centre region ('in',
@@ -248,7 +249,7 @@ async function refreshAndPersist({ integration, prisma, fetchImpl, now }) {
         data: { accessToken: encrypt(fresh.accessToken), tokenExpiry: fresh.tokenExpiry }
       });
     } catch (err) {
-      console.warn(`[crm] could not persist refreshed Zoho token (integration ${integration.id}): ${err.message}`);
+      logger.warn(`[crm] could not persist refreshed Zoho token (integration ${integration.id}): ${err.message}`);
     }
   }
   return fresh;

@@ -1,4 +1,5 @@
 const Redis = require('ioredis');
+const { logger } = require('../logger');
 
 // The shared driver: makes N API instances behave as one for rate limiting,
 // knowledge invalidation, alert throttling and background-job locks. Same
@@ -80,7 +81,7 @@ function createRedisDriver() {
     const now = Date.now();
     if (now - lastLoggedAt < LOG_EVERY_MS) return;
     lastLoggedAt = now;
-    console.error(
+    logger.error(
       `[sharedStore] Redis unavailable (${err.message}). Rate limits are failing OPEN, caches are bypassed ` +
       'and background job locks are refused until it returns — see src/lib/sharedStore/redisDriver.js'
     );
@@ -94,7 +95,7 @@ function createRedisDriver() {
       const now = Date.now();
       if (now - lastLoggedAt > LOG_EVERY_MS) {
         lastLoggedAt = now;
-        console.error(`[sharedStore] Redis ${label} failed (${err.message}); using the degraded fallback`);
+        logger.error(`[sharedStore] Redis ${label} failed (${err.message}); using the degraded fallback`);
       }
       return fallback;
     }

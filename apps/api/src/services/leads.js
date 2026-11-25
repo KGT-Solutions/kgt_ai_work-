@@ -1,9 +1,11 @@
 const prisma = require('../lib/prisma');
+const { logger } = require('../lib/logger');
 const { sendMail, isProduction, maskAddress } = require('./mailer');
 const { generateAnswer, isLlmConfigured, formatAttempts } = require('../engine/llmClient');
 const { logUsage } = require('../engine/usageTracking');
 const { notifyLeadCaptured } = require('./teamAlerts');
-const { syncLeadToCrm } = require('./crm/zohoSync');
+const { syncLeadToCrm } = require('./crm/crmSync');
+const { emailTypeEnabled } = require('./emailConnection');
 
 // Leads: a visitor who left an email in a bot conversation
 // (domains/handoffActions.js sets contactCaptured; services/tenantChat.js
@@ -21,6 +23,19 @@ const { syncLeadToCrm } = require('./crm/zohoSync');
 // fails because of them. The widget has no "conversation ended" signal, so
 // every later turn in the same conversation re-schedules the summary for
 // SUMMARY_IDLE_MS after the last message — it ends up covering the whole chat.
+
+// Announce an event to the tenant's outbound integrations (webhooks + Google
+// Sheets, Feature 8). Lazily required and fully fire-and-forget: a slow or broken
+// integration must never delay or break a lead capture or a chat reply.
+function emitIntegrationEvent(tenantId, event, data) {
+  try {
+    const { emitTenantEvent } = require('./integrationEvents');
+    Promise.resolve(emitTenantEvent(tenantId, event, data)).catch((err) =>
+      logger.warn(`[leads] ${event} integration dispatch failed: ${err.message}`));
+  } catch (err) {
+    logger.warn(`[leads] integration events unavailable: ${err.message}`);
+  }
+}
 
 const MAX_TRANSCRIPT_MESSAGES = 100; // most recent; older turns are dropped
 const MAX_MESSAGE_CHARS = 2000;
@@ -152,15 +167,15 @@ async function deliver({ kind, tenant, lead, send }) {
   for (let attempt = 0; ; attempt++) {
     const result = await send();
     if (result.sent && result.simulated) {
-      console.warn(`[leads] ${kind} NOT delivered (${where}): no mail transport configured, so it was only printed to the log.`);
+      logger.warn(`[leads] ${kind} NOT delivered (${where}): no mail transport configured, so it was only printed to the log.`);
       return result;
     }
     if (result.sent) {
-      console.log(`[leads] ${kind} sent via ${result.via} (${where})${attempt ? ` after ${attempt + 1} attempts` : ''}`);
+      logger.info(`[leads] ${kind} sent via ${result.via} (${where})${attempt ? ` after ${attempt + 1} attempts` : ''}`);
       return result;
     }
     const delay = result.transient ? RETRY_DELAYS_MS[attempt] : undefined;
-    console.error(`[leads] ERROR: ${kind} FAILED (${where}): ${result.reason || 'unknown'}` +
+    logger.error(`[leads] ERROR: ${kind} FAILED (${where}): ${result.reason || 'unknown'}` +
       (delay !== undefined ? ` — retrying in ${Math.round(delay / 1000)}s (attempt ${attempt + 1} of ${RETRY_DELAYS_MS.length + 1})` : ' — giving up'));
     if (delay === undefined) return result;
     await sleep(delay);
@@ -168,6 +183,13 @@ async function deliver({ kind, tenant, lead, send }) {
 }
 
 async function sendConfirmation({ tenant, lead }) {
+  // Per-email toggle (dashboard → Email settings). The lead is still saved and
+  // the team still alerted (subject to its own toggle); only the visitor-facing
+  // confirmation is suppressed when the tenant turns it off.
+  if (!await emailTypeEnabled(tenant.id, 'visitorConfirmation')) {
+    logger.info(`[leads] visitor confirmation SKIPPED (lead ${lead.id}, tenant ${tenant.slug || tenant.id}): confirmation emails are turned off for this tenant`);
+    return { sent: false, skipped: 'disabled-by-tenant' };
+  }
   const cooldownMs = confirmationCooldownMs();
   const recent = cooldownMs > 0 && await prisma.lead.findFirst({
     where: { tenantId: tenant.id, email: lead.email, confirmationSentAt: { gte: new Date(Date.now() - cooldownMs) } },
@@ -175,7 +197,7 @@ async function sendConfirmation({ tenant, lead }) {
   });
   if (recent) {
     // A warning, not info: a skipped email looks exactly like a lost one from the outside.
-    console.warn(`[leads] visitor confirmation email SKIPPED (lead ${lead.id}, tenant ${tenant.slug || tenant.id}): ` +
+    logger.warn(`[leads] visitor confirmation email SKIPPED (lead ${lead.id}, tenant ${tenant.slug || tenant.id}): ` +
       `${maskAddress(lead.email)} was already emailed in the last ${cooldownMs / 3600000}h (anti-spam cooldown). ` +
       'To re-test with the same address, set LEAD_CONFIRMATION_COOLDOWN_HOURS=0 and recreate the API container.');
     return { sent: false, skipped: 'cooldown' };
@@ -203,7 +225,7 @@ async function dispatchConfirmation({ tenant, lead }) {
   try {
     return await sendConfirmation({ tenant, lead });
   } catch (err) {
-    console.error(`[leads] ERROR: visitor confirmation email FAILED (lead ${lead.id}, tenant ${tenant.slug || tenant.id}): unexpected error\n${err.stack || err.message}`);
+    logger.error(`[leads] ERROR: visitor confirmation email FAILED (lead ${lead.id}, tenant ${tenant.slug || tenant.id}): unexpected error\n${err.stack || err.message}`);
     return { sent: false, reason: 'exception', error: err.message };
   }
 }
@@ -280,7 +302,7 @@ async function loadTranscript(lead) {
 async function summarizeLead(leadId) {
   let lead = null;
   const fail = async (message) => {
-    console.warn(`[leads] lead ${leadId}: summary failed: ${message}`);
+    logger.warn(`[leads] lead ${leadId}: summary failed: ${message}`);
     if (lead) await syncSession(lead, { summarizedAt: new Date() }); // tried: the session sweep won't retry until new messages
     return prisma.lead.update({ where: { id: leadId }, data: { summaryStatus: 'failed' } }).catch(() => null); // lead deleted mid-run
   };
@@ -317,7 +339,7 @@ async function summarizeLead(leadId) {
 async function syncSession(lead, data) {
   if (!lead.sessionId) return;
   await prisma.chatSession.updateMany({ where: { id: lead.sessionId, tenantId: lead.tenantId }, data })
-    .catch((err) => console.warn(`[leads] lead ${lead.id}: could not copy the summary to session ${lead.sessionId}: ${err.message}`));
+    .catch((err) => logger.warn(`[leads] lead ${lead.id}: could not copy the summary to session ${lead.sessionId}: ${err.message}`));
 }
 
 // leadId -> pending timer; leadId -> { rerun } while a summary is being
@@ -377,7 +399,7 @@ async function alertTeamWithSummary({ tenant, lead, summarized }) {
   const done = await Promise.race([summarized, timeout]);
   clearTimeout(timer);
   const summary = done?.summaryStatus === 'ready' ? done.chatSummary : null;
-  if (!summary) console.warn(`[leads] lead ${lead.id}: team alert sent without the AI summary (not ready within ${ALERT_SUMMARY_WAIT_MS / 1000}s or failed)`);
+  if (!summary) logger.warn(`[leads] lead ${lead.id}: team alert sent without the AI summary (not ready within ${ALERT_SUMMARY_WAIT_MS / 1000}s or failed)`);
   return notifyLeadCaptured({ tenant, lead, summary }); // never rejects
 }
 
@@ -414,7 +436,7 @@ async function captureLead({ tenant, botType, sessionId, email, alertTeam = true
     // SMTP round trip, let alone a retry. Results land in the log (see deliver).
     dispatchConfirmation({ tenant, lead });
   } else {
-    console.log(`[leads] visitor confirmation not re-sent (lead ${lead.id}): this conversation's lead was already confirmed`);
+    logger.info(`[leads] visitor confirmation not re-sent (lead ${lead.id}): this conversation's lead was already confirmed`);
   }
   // The summary starts now (replacing any pending idle re-run); a new lead's
   // team alert goes out as soon as it's written. Neither is awaited, like the confirmation.
@@ -422,14 +444,23 @@ async function captureLead({ tenant, botType, sessionId, email, alertTeam = true
   timers.delete(lead.id);
   const summarized = runSummary(lead.id);
   if (!existing && alertTeam) alertTeamWithSummary({ tenant, lead, summarized });
-  // Mirror a new lead into the tenant's CRM (Zoho), once the summary is ready
-  // so the CRM note carries it. Fire-and-forget and self-contained: it never
-  // blocks or breaks the chat reply, and no-ops unless a CRM is connected
-  // (services/crm/zohoSync.js). A repeat visitor is de-duplicated inside Zoho.
+  // Mirror a new lead into the tenant's CRM (Zoho or HubSpot), once the summary
+  // is ready so the CRM note carries it. Fire-and-forget and self-contained: it
+  // never blocks or breaks the chat reply, and no-ops unless a CRM is connected.
+  // The dispatcher (services/crm/crmSync.js) routes to the connected provider; a
+  // repeat visitor is de-duplicated inside the CRM.
   if (!existing) {
     Promise.resolve(summarized)
       .then((sum) => syncLeadToCrm({ tenant, lead, summary: sum?.chatSummary || null }))
-      .catch((err) => console.warn(`[leads] CRM sync dispatch failed (lead ${lead.id}): ${err.message}`));
+      .catch((err) => logger.warn(`[leads] CRM sync dispatch failed (lead ${lead.id}): ${err.message}`));
+    // Fan the new lead out to the tenant's webhooks / Google Sheets (Feature 8),
+    // once the summary is ready so a synced row/payload can carry it.
+    Promise.resolve(summarized)
+      .then((sum) => emitIntegrationEvent(tenant.id, 'lead.created', {
+        leadId: lead.id, email: lead.email, botType: lead.botType, sessionId: lead.sessionId,
+        summary: sum?.summaryStatus === 'ready' ? sum.chatSummary : null
+      }))
+      .catch(() => {});
   }
   return lead;
 }
@@ -448,7 +479,7 @@ async function trackLeadActivity({ tenant, botType, sessionId, contactEmail, ale
     const leads = await prisma.lead.findMany({ where: { tenantId: tenant.id, sessionId }, select: { id: true } });
     for (const { id } of leads) scheduleLeadSummary(id, SUMMARY_IDLE_MS);
   } catch (err) {
-    console.warn(`[leads] tenant ${tenant.id}: could not record lead activity: ${err.message}`);
+    logger.warn(`[leads] tenant ${tenant.id}: could not record lead activity: ${err.message}`);
   }
   return null;
 }

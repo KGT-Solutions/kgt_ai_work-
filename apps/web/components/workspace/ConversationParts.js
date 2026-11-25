@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { cx } from '../ui';
 import { IconChevronDown } from '../ui/icons';
+import { chatImageUrl } from '../../lib/api';
 
 // Pieces shared by the Leads and Sessions views of Leads & Summaries.
 
@@ -54,7 +55,7 @@ export function SummaryText({ summary }) {
  * The raw chat, folded away: the summary is what staff read first, and the
  * transcript is there for whoever wants to check the details.
  */
-export function TranscriptToggle({ messages, showMeta = true }) {
+export function TranscriptToggle({ messages, showMeta = true, tenantId = null }) {
   const [open, setOpen] = useState(false);
   const count = messages?.length || 0;
   return (
@@ -65,8 +66,28 @@ export function TranscriptToggle({ messages, showMeta = true }) {
         {open ? 'Hide full transcript' : 'View full transcript'}
         <span className="font-normal">({count} {count === 1 ? 'message' : 'messages'})</span>
       </button>
-      {open && <Transcript messages={messages} showMeta={showMeta} className="mt-3" />}
+      {open && <Transcript messages={messages} showMeta={showMeta} tenantId={tenantId} className="mt-3" />}
     </section>
+  );
+}
+
+// The images a visitor attached to a turn, as thumbnails that open the full
+// image in a new tab. Needs the tenant id to build the scoped image URL.
+function MessageImages({ imageKeys, tenantId }) {
+  if (!tenantId || !imageKeys?.length) return null;
+  return (
+    <div className="mt-1.5 flex flex-wrap gap-2">
+      {imageKeys.map((key) => {
+        const url = chatImageUrl(tenantId, key);
+        return (
+          <a key={key} href={url} target="_blank" rel="noreferrer noopener" className="block">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={url} alt="Attached by visitor" loading="lazy"
+              className="h-20 w-20 rounded-lg border border-white/[0.1] object-cover" />
+          </a>
+        );
+      })}
+    </div>
   );
 }
 
@@ -74,7 +95,7 @@ export function TranscriptToggle({ messages, showMeta = true }) {
  * messages: [{ role, content, createdAt?/at?, confidence? }], oldest first.
  * With showMeta, each bubble shows its time, and low-confidence answers are flagged.
  */
-export function Transcript({ messages, showMeta = false, className = 'max-h-96' }) {
+export function Transcript({ messages, showMeta = false, tenantId = null, className = 'max-h-96' }) {
   if (!messages?.length) return <p className="text-[13px] text-fg-3">The conversation isn't available.</p>;
   return (
     <ol className={cx('flex flex-col gap-2 overflow-y-auto pr-1', className)}>
@@ -87,10 +108,19 @@ export function Transcript({ messages, showMeta = false, className = 'max-h-96' 
             low && 'ring-1 ring-amber-400/30')}>
             <span className="mb-0.5 flex items-center gap-2 text-[10.5px] font-medium uppercase tracking-wide text-fg-3">
               {m.role === 'user' ? 'Visitor' : 'Assistant'}
+              {m.source === 'voice' && (
+                <span className="inline-flex items-center gap-1 rounded-full bg-violet-400/15 px-1.5 py-0.5 normal-case tracking-normal text-violet-200">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-3 w-3" aria-hidden="true">
+                    <rect x="9" y="2" width="6" height="12" rx="3" /><path d="M5 10a7 7 0 0 0 14 0" /><line x1="12" y1="17" x2="12" y2="21" />
+                  </svg>
+                  Voice
+                </span>
+              )}
               {showMeta && at && <span className="font-normal normal-case tracking-normal">{new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>}
               {low && <span className="normal-case tracking-normal text-amber-300">Low confidence · {Math.round(m.confidence * 100)}%</span>}
             </span>
             {m.content}
+            <MessageImages imageKeys={m.imageKeys} tenantId={tenantId} />
           </li>
         );
       })}

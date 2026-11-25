@@ -97,6 +97,22 @@
     if (savedLang === 'en' || savedLang === 'hi') lang = savedLang;
   } catch (e) { /* storage unavailable: default to English */ }
 
+  // A stable per-browser id, sent with every chat so the backend can apply the
+  // tenant's per-device rate limit (dashboard → Guardrails) to this browser,
+  // not just its IP — so one office behind a shared IP isn't limited as one
+  // visitor. Persisted best-effort; a fresh random id each load (private
+  // windows, storage blocked) still works, it just can't survive a reload.
+  function randomId() {
+    if (window.crypto && typeof window.crypto.randomUUID === 'function') return window.crypto.randomUUID();
+    return 'b-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+  }
+  var BID_KEY = ns + '-bid';
+  var browserId;
+  try {
+    browserId = window.localStorage.getItem(BID_KEY) || '';
+    if (!browserId) { browserId = randomId(); window.localStorage.setItem(BID_KEY, browserId); }
+  } catch (e) { browserId = randomId(); }
+
   function setLang(next) {
     if (next !== 'en' && next !== 'hi') return;
     lang = next;
@@ -122,7 +138,12 @@
       imageTooBig: 'That image is too large (max 5MB).',
       imageType: 'Please choose a PNG, JPEG, WebP or GIF image.',
       mic: 'Voice input', listening: 'Listening… tap to stop', transcribing: 'Transcribing…',
-      micDenied: 'Microphone access was blocked.', voiceError: 'Could not transcribe that. Please try again.'
+      micDenied: 'Microphone access was blocked.', voiceError: 'Could not transcribe that. Please try again.',
+      s2s: 'Voice conversation', s2sChoose: 'Speak in:', s2sEnglish: 'English', s2sHindi: 'हिंदी',
+      s2sThinking: 'Thinking…', s2sError: 'Voice conversation failed. Please try again.', s2sReplay: 'Replay answer',
+      // Footer: the AI notice is permanent and can never be hidden; the
+      // "Powered by" strip is the owner's free, toggleable branding.
+      aiNotice: 'You are chatting with an AI assistant', poweredBy: 'Powered by KGT Orb'
     },
     hi: {
       titleSupport: 'सहायता', titleSales: 'सेल्स से बात करें',
@@ -137,7 +158,10 @@
       imageTooBig: 'यह तस्वीर बहुत बड़ी है (अधिकतम 5MB)।',
       imageType: 'कृपया PNG, JPEG, WebP या GIF तस्वीर चुनें।',
       mic: 'आवाज़ से बोलें', listening: 'सुन रहा हूँ… रोकने के लिए टैप करें', transcribing: 'लिखा जा रहा है…',
-      micDenied: 'माइक्रोफ़ोन की अनुमति नहीं मिली।', voiceError: 'उसे समझ नहीं पाया। कृपया फिर कोशिश करें।'
+      micDenied: 'माइक्रोफ़ोन की अनुमति नहीं मिली।', voiceError: 'उसे समझ नहीं पाया। कृपया फिर कोशिश करें।',
+      s2s: 'आवाज़ में बातचीत', s2sChoose: 'इस भाषा में बोलें:', s2sEnglish: 'English', s2sHindi: 'हिंदी',
+      s2sThinking: 'सोच रहा हूँ…', s2sError: 'आवाज़ बातचीत विफल रही। कृपया फिर कोशिश करें।', s2sReplay: 'जवाब दोबारा सुनें',
+      aiNotice: 'आप एक AI असिस्टेंट से बात कर रहे हैं', poweredBy: 'KGT Orb द्वारा संचालित'
     }
   };
   function t(key) { return (STRINGS[lang] && STRINGS[lang][key]) || STRINGS.en[key] || ''; }
@@ -258,6 +282,13 @@
     '#' + ns + '-mic:hover{border-color:#0f172a;color:#0f172a;}' +
     '#' + ns + '-mic.rec{border-color:#dc2626;color:#dc2626;background:#fef2f2;animation:' + ns + '-pulse 1.1s ease-in-out infinite;}' +
     '@keyframes ' + ns + '-pulse{0%,100%{box-shadow:0 0 0 0 rgba(220,38,38,.45);}50%{box-shadow:0 0 0 5px rgba(220,38,38,0);}}' +
+    // Speech-to-Speech: same chrome as the mic, plus the inline language chooser shown in the preview bar.
+    '#' + ns + '-s2s{border:1px solid #cbd5e1;background:#fff;color:#64748b;border-radius:8px;cursor:pointer;font-size:15px;line-height:1;padding:0 10px;flex-shrink:0;}' +
+    '#' + ns + '-s2s:hover{border-color:#0f172a;color:#0f172a;}' +
+    '#' + ns + '-s2s.rec{border-color:#dc2626;color:#dc2626;background:#fef2f2;animation:' + ns + '-pulse 1.1s ease-in-out infinite;}' +
+    '#' + ns + '-preview .s2s-choose{display:flex;align-items:center;gap:6px;font-size:12px;color:#334155;}' +
+    '#' + ns + '-preview .s2s-choose button{border:1px solid #cbd5e1;background:#fff;border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer;color:#0f172a;}' +
+    '#' + ns + '-preview .s2s-choose button:hover{border-color:#0f172a;}' +
     // Header right side: the small EN/हिं language toggle beside the close button.
     '#' + ns + '-head-right{display:flex;align-items:center;gap:6px;}' +
     '#' + ns + '-lang{display:flex;gap:2px;background:var(--kgt-head-chip);border-radius:999px;padding:2px;}' +
@@ -273,7 +304,16 @@
     'padding:8px 18px;font-size:13.5px;font-weight:600;cursor:pointer;font-family:inherit;}' +
     '#' + ns + '-body .langpick button:hover{border-color:#0f172a;}' +
     '#' + ns + '-body .langpick button.active{background:var(--kgt-primary);color:var(--kgt-on-primary);border-color:var(--kgt-primary);}' +
-    '#' + ns + '-body .langpick .lp-hint{color:#94a3b8;font-size:12px;line-height:1.4;}';
+    '#' + ns + '-body .langpick .lp-hint{color:#94a3b8;font-size:12px;line-height:1.4;}' +
+    // Footer: a permanent "You are chatting with an AI assistant" notice (never
+    // hidden) and, above it, the owner's free, toggleable "Powered by KGT Orb"
+    // strip. Fixed, readable slate colours — never theme header tokens — so both
+    // stay legible on any applied design's (always light) panel background.
+    '#' + ns + '-foot{flex-shrink:0;border-top:1px solid #e2e8f0;padding:6px 10px 7px;' +
+    'display:flex;flex-direction:column;align-items:center;gap:1px;background:var(--kgt-bg);}' +
+    '#' + ns + '-powered{font-size:10px;line-height:1.3;color:#94a3b8;text-align:center;letter-spacing:.01em;}' +
+    '#' + ns + '-powered.hide{display:none;}' +
+    '#' + ns + '-ai-notice{font-size:10.5px;line-height:1.3;color:#475569;text-align:center;}';
   document.head.appendChild(style);
 
   var launcher = document.createElement('button');
@@ -309,10 +349,17 @@
     '<form id="' + ns + '-form">' +
     '<button type="button" id="' + ns + '-attach">📎</button>' +
     '<button type="button" id="' + ns + '-mic" style="display:none">🎤</button>' +
+    '<button type="button" id="' + ns + '-s2s" style="display:none">🗣️</button>' +
     '<input id="' + ns + '-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif" style="display:none" />' +
     '<input id="' + ns + '-input" type="text" autocomplete="off" />' +
     '<button id="' + ns + '-send" type="submit"></button>' +
-    '</form>';
+    '</form>' +
+    // The AI-assistant notice is always present; the "Powered by" strip above it
+    // is shown/hidden by the owner's free toggle (applyBranding, from /theme).
+    '<div id="' + ns + '-foot">' +
+    '<div id="' + ns + '-powered"></div>' +
+    '<div id="' + ns + '-ai-notice"></div>' +
+    '</div>';
 
   var byBotMessages = { support: [], sales: [] };
   // A single image staged for the next message (a base64 data URL), shared
@@ -343,6 +390,11 @@
     for (var i = 0; i < langButtons.length; i++) {
       langButtons[i].className = langButtons[i].getAttribute('data-lang') === lang ? 'active' : '';
     }
+    // textContent only — the footer copy is never interpreted as HTML.
+    var notice = panel.querySelector('#' + ns + '-ai-notice');
+    if (notice) notice.textContent = t('aiNotice');
+    var powered = panel.querySelector('#' + ns + '-powered');
+    if (powered) powered.textContent = t('poweredBy');
   }
 
   function renderMessages() {
@@ -592,6 +644,17 @@
   attachBtn.setAttribute('aria-label', t('attach'));
   attachBtn.setAttribute('title', t('attach'));
   attachBtn.addEventListener('click', function () { fileInput.click(); });
+
+  // Image uploads can be turned off per tenant (dashboard → Guardrails); the
+  // /theme response says so. When off, the attach button is removed and any
+  // staged image is dropped. Defaults to on, so a failed theme fetch still
+  // allows uploads (the server enforces the real rule either way).
+  var imagesEnabled = true;
+  function setImagesEnabled(enabled) {
+    imagesEnabled = enabled !== false;
+    if (attachBtn) attachBtn.style.display = imagesEnabled ? '' : 'none';
+    if (!imagesEnabled && pendingImage) { pendingImage = null; renderPreview(); }
+  }
   fileInput.addEventListener('change', function () {
     var file = fileInput.files && fileInput.files[0];
     fileInput.value = ''; // allow re-selecting the same file
@@ -617,12 +680,111 @@
     micBtn.addEventListener('click', function () { if (recording) stopRecording(); else startRecording(); });
   }
 
+  // ── Speech-to-Speech: pick a language, speak, and hear the DB-grounded answer
+  // back in that language. Separate recorder from the plain mic (which only fills
+  // the composer). The answer always comes from the server's grounded pipeline;
+  // the widget just records, plays and shows the text. Hidden where recording
+  // isn't supported, same as the mic.
+  var s2sBtn = panel.querySelector('#' + ns + '-s2s');
+  var s2sRecording = false, s2sBusy = false, s2sRecorder = null, s2sChunks = [], s2sStream = null;
+  var s2sLang = 'en'; // the language chosen for the in-flight S2S turn (locked at record start)
+  if (voiceSupported) {
+    s2sBtn.style.display = '';
+    s2sBtn.setAttribute('aria-label', t('s2s'));
+    s2sBtn.setAttribute('title', t('s2s'));
+    s2sBtn.addEventListener('click', function () {
+      if (s2sRecording) { stopS2s(); return; }
+      if (recording || sending || s2sBusy) return;
+      showS2sLanguageChoice();
+    });
+  }
+  // The language chooser lives in the preview bar: two buttons, EN / हिंदी. The
+  // chosen language is set as the UI language (so the answer + voice match) and
+  // recording starts immediately on that user gesture (mic permission included).
+  function showS2sLanguageChoice() {
+    var pv = panel.querySelector('#' + ns + '-preview');
+    pv.textContent = ''; pv.style.display = 'flex';
+    var wrap = document.createElement('div'); wrap.className = 's2s-choose';
+    var label = document.createElement('span'); label.textContent = t('s2sChoose'); wrap.appendChild(label);
+    [['en', 's2sEnglish'], ['hi', 's2sHindi']].forEach(function (pair) {
+      var b = document.createElement('button'); b.type = 'button'; b.textContent = t(pair[1]);
+      b.addEventListener('click', function () { s2sLang = pair[0]; setLang(pair[0]); renderPreview(); startS2s(); });
+      wrap.appendChild(b);
+    });
+    pv.appendChild(wrap);
+  }
+  function cleanupS2sStream() {
+    if (s2sStream) { s2sStream.getTracks().forEach(function (tr) { tr.stop(); }); s2sStream = null; }
+    s2sRecorder = null;
+  }
+  function startS2s() {
+    if (s2sRecording || s2sBusy) return;
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+      s2sStream = stream; s2sChunks = [];
+      try { s2sRecorder = new MediaRecorder(stream); } catch (e) { cleanupS2sStream(); renderPreview(t('s2sError')); return; }
+      s2sRecorder.addEventListener('dataavailable', function (e) { if (e.data && e.data.size) s2sChunks.push(e.data); });
+      s2sRecorder.addEventListener('stop', onS2sStop);
+      s2sRecorder.start();
+      s2sRecording = true;
+      s2sBtn.className = 'rec'; s2sBtn.textContent = '⏹';
+      setComposerBusy(true, 'listening');
+    }).catch(function () { renderPreview(t('micDenied')); });
+  }
+  function stopS2s() {
+    if (!s2sRecording || !s2sRecorder) return;
+    s2sRecording = false;
+    s2sBtn.className = ''; s2sBtn.textContent = '🗣️';
+    try { s2sRecorder.stop(); } catch (e) { cleanupS2sStream(); setComposerBusy(false); }
+  }
+  function onS2sStop() {
+    var type = (s2sRecorder && s2sRecorder.mimeType) || 'audio/webm';
+    cleanupS2sStream();
+    var blob = new Blob(s2sChunks, { type: type }); s2sChunks = [];
+    if (!blob.size) { setComposerBusy(false); return; }
+    s2sBusy = true;
+    setComposerBusy(true, 's2sThinking');
+    var sentBot = botType;
+    var ext = type.indexOf('ogg') >= 0 ? 'ogg' : type.indexOf('mp4') >= 0 ? 'mp4' : 'webm';
+    var form = new FormData();
+    form.append('audio', blob, 'voice.' + ext);
+    form.append('botType', sentBot);
+    form.append('language', s2sLang); // the language locked when this turn started, not the live toggle
+    if (sessionIds[sentBot]) form.append('sessionId', sessionIds[sentBot]);
+    fetch(apiBase + '/api/v1/tenant-chat/' + encodeURIComponent(tenantSlug) + '/voice-chat', {
+      method: 'POST', headers: { 'x-tenant-api-key': apiKey }, body: form
+    })
+      .then(function (res) { return res.json().then(function (data) { return { ok: res.ok, data: data }; }); })
+      .then(function (result) {
+        if (!result.ok) throw new Error((result.data && result.data.error) || t('s2sError'));
+        var d = result.data;
+        if (d.sessionId) sessionIds[sentBot] = d.sessionId;
+        // The visitor's recognised words, then the grounded spoken answer — shown
+        // as normal bubbles so voice turns read like the rest of the conversation.
+        if (d.text) byBotMessages[sentBot].push({ role: 'user', text: d.text });
+        byBotMessages[sentBot].push({ role: 'assistant', text: d.answer, followUps: d.followUps || [], products: d.products || [] });
+        renderMessages();
+        playBase64Audio(d.audio, d.audioMimeType);
+      })
+      .catch(function (err) { renderPreview(err.message || t('s2sError')); })
+      .finally(function () { s2sBusy = false; setComposerBusy(false); });
+  }
+  function playBase64Audio(b64, mime) {
+    if (!b64) return; // TTS was unavailable; the text answer is already shown
+    try { var a = new Audio('data:' + (mime || 'audio/mpeg') + ';base64,' + b64); a.play().catch(function () {}); } catch (e) { /* playback unsupported */ }
+  }
+
   function setComposerBusy(busy, placeholderKey) {
     var input = panel.querySelector('#' + ns + '-input');
     input.disabled = busy;
     input.setAttribute('placeholder', t(placeholderKey || 'placeholder'));
     panel.querySelector('#' + ns + '-send').disabled = busy;
     panel.querySelector('#' + ns + '-attach').disabled = busy;
+    // Keep the active recorder's own button clickable (it's the "stop" control);
+    // disable the other voice button so the two recorders can't overlap.
+    var micEl = panel.querySelector('#' + ns + '-mic');
+    var s2sEl = panel.querySelector('#' + ns + '-s2s');
+    if (micEl) micEl.disabled = busy && !recording;
+    if (s2sEl) s2sEl.disabled = busy && !s2sRecording;
   }
   function cleanupStream() {
     if (recStream) { recStream.getTracks().forEach(function (tr) { tr.stop(); }); recStream = null; }
@@ -699,7 +861,7 @@
     // language: the selected UI language — authoritative, so the bot replies in
     // it whatever language the question is typed in. The image (if any) is a
     // base64 data URL; the backend runs its guardrail before the chat LLM.
-    var payload = { botType: sentBot, sessionId: sessionIds[sentBot], language: lang };
+    var payload = { botType: sentBot, sessionId: sessionIds[sentBot], language: lang, browserId: browserId };
     if (query) payload.query = query;
     if (image) payload.image = image;
     fetch(apiBase + '/api/v1/tenant-chat/' + encodeURIComponent(tenantSlug) + '/chat', {
@@ -711,8 +873,14 @@
         return res.json().then(function (data) { return { ok: res.ok, data: data }; });
       })
       .then(function (result) {
+        // A country-blocked visitor (guardrails) gets a 403: tear the widget
+        // down so it can't be used from a blocked region.
+        if (result.data && result.data.blocked === 'country') { teardown(); return; }
         if (!result.ok) throw new Error(result.data && result.data.error ? result.data.error : t('errorGeneric'));
-        sessionIds[sentBot] = result.data.sessionId;
+        // The per-device rate limit returns a 200 whose answer IS the tenant's
+        // limitMessage; render it like any reply. Only overwrite the session id
+        // when one came back (the limited response echoes it, or omits it).
+        if (result.data.sessionId) sessionIds[sentBot] = result.data.sessionId;
         byBotMessages[sentBot].push({ role: 'assistant', text: result.data.answer, followUps: result.data.followUps || [], products: result.data.products || [] });
       })
       .catch(function (err) {
@@ -855,8 +1023,18 @@
     applyStaticStrings(); // writes the name (textContent — never HTML)
   }
 
+  // Show or hide the free "Powered by KGT Orb" strip (the owner's toggle). The
+  // permanent AI-assistant notice beside it is never touched here. Defaults to
+  // shown, so a /theme without the field (or a failed load) keeps the strip.
+  function applyBranding(show) {
+    var powered = panel.querySelector('#' + ns + '-powered');
+    if (powered) powered.className = show ? '' : 'hide';
+  }
+
   function applyTheme(data) {
     applyBotName(data && data.botName); // the name applies with or without a design
+    setImagesEnabled(!data || data.imagesEnabled !== false); // independent of whether a design is applied
+    applyBranding(!data || data.showBranding !== false); // the free "Powered by" strip; the AI notice is always shown
     var th = data && data.theme;
     if (!th || typeof th !== 'object') return; // no design applied: keep the classic look
     var primary = hexOr(th.primaryColor, '#0f172a');
@@ -892,20 +1070,34 @@
     renderBrand(data.logoUrl, data.companyName, th.logoBadge, rgba(hexOr(head.text, '#0f172a'), 0.22));
   }
 
+  // Remove the widget from the page entirely. Used when the visitor's country
+  // is blocked (guardrails): the launcher and panel are pulled from the DOM so
+  // the widget effectively does not mount for a blocked region.
+  function teardown() {
+    open = false;
+    try { if (panel && panel.parentNode) panel.parentNode.removeChild(panel); } catch (e) { /* already gone */ }
+    try { if (launcher && launcher.parentNode) launcher.parentNode.removeChild(launcher); } catch (e) { /* already gone */ }
+  }
+
   function loadTheme() {
     if (typeof fetch !== 'function') return;
     fetch(apiBase + '/api/v1/tenant-chat/' + encodeURIComponent(tenantSlug) + '/theme', {
       headers: { 'x-tenant-api-key': apiKey }
     })
       .then(function (res) {
-        if (res.status === 403) {
+        if (res.ok) return res.json().then(function (data) { return { ok: true, data: data }; });
+        return res.json().catch(function () { return null; }).then(function (data) { return { ok: false, status: res.status, data: data }; });
+      })
+      .then(function (result) {
+        if (result.ok) { applyTheme(result.data); return; }
+        // Country-blocked (guardrails): remove the widget for this region.
+        if (result.data && result.data.blocked === 'country') { teardown(); return; }
+        if (result.status === 403) {
           // The key is restricted to other websites (dashboard → API keys → Websites).
           console.warn('[kgt-chat-widget] This API key is not enabled for ' + window.location.origin +
             '. Add this website to the key\'s allowed websites in your KGT dashboard.');
         }
-        return res.ok ? res.json() : null;
       })
-      .then(function (data) { if (data) applyTheme(data); })
       .catch(function () { /* keep the classic look */ });
   }
 

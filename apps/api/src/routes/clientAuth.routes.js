@@ -1,4 +1,5 @@
 const express = require('express');
+const { logger } = require('../lib/logger');
 const prisma = require('../lib/prisma');
 const { verifyPassword } = require('../utils/password');
 const { createIpRateLimiter } = require('../utils/ipRateLimit');
@@ -35,17 +36,17 @@ router.post('/login', async (req, res) => {
     if (!user) {
       const operator = await prisma.operator.findUnique({ where: { email }, select: { passwordHash: true } });
       if (operator && verifyPassword(password, operator.passwordHash)) {
-        console.warn(`[auth] client sign-in refused for ${maskAddress(email)}: staff account — sent to the staff console`);
+        logger.warn(`[auth] client sign-in refused for ${maskAddress(email)}: staff account — sent to the staff console`);
         return res.status(401).json({
           error: 'This is a KGT staff account. Sign in on the staff console instead.', code: 'STAFF_ACCOUNT', signInPath: '/admin/login'
         });
       }
     }
-    console.warn(`[auth] client sign-in refused for ${maskAddress(email)}: ${user ? 'wrong password' : 'no account with this email'}`);
+    logger.warn(`[auth] client sign-in refused for ${maskAddress(email)}: ${user ? 'wrong password' : 'no account with this email'}`);
     return res.status(401).json({ error: 'Invalid email or password' });
   }
   if (!user.tenant.active) {
-    console.warn(`[auth] client sign-in refused for ${maskAddress(email)}: company deactivated`);
+    logger.warn(`[auth] client sign-in refused for ${maskAddress(email)}: company deactivated`);
     return res.status(403).json({ error: 'This account has been deactivated. Contact KGT support.' });
   }
   await prisma.tenantUser.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });

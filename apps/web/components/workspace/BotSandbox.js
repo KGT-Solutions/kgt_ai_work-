@@ -99,6 +99,14 @@ export default function BotSandbox({ ws, tenant }) {
   const recorderRef = useRef(null);
   const chunksRef = useRef([]);
   const streamRef = useRef(null);
+  // Speech-to-Speech: '' | 'choose' | 'listening' | 'thinking', its own recorder,
+  // and the <audio> for the spoken reply. Separate from the plain mic above.
+  const [s2sStatus, setS2sStatus] = useState('');
+  const s2sRecRef = useRef(null);
+  const s2sChunksRef = useRef([]);
+  const s2sStreamRef = useRef(null);
+  const s2sLangRef = useRef('en'); // the language chosen for the in-flight S2S turn
+  const audioRef = useRef(null);
   // Resolved after mount (never during SSR) to avoid a hydration mismatch.
   const [voiceSupported, setVoiceSupported] = useState(false);
   useEffect(() => { setVoiceSupported(!!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder)); }, []);
@@ -190,6 +198,74 @@ export default function BotSandbox({ ws, tenant }) {
     try { rec.stop(); } catch { stopTracks(); setVoiceStatus(''); }
   };
 
+  // ── Speech-to-Speech: pick a language, speak, and hear the DB-grounded answer
+  // back in that language. The answer always comes from the server's grounded
+  // pipeline (ws.voiceChat → runTenantChat, sandboxed); this only records,
+  // appends the turn to the thread, and plays the spoken reply.
+  const s2sBot = target === 'sales' ? 'sales' : 'support'; // S2S is single-bot; default to Support when comparing both
+  const stopS2sTracks = () => { if (s2sStreamRef.current) { s2sStreamRef.current.getTracks().forEach((t) => t.stop()); s2sStreamRef.current = null; } };
+  const onS2sStop = async () => {
+    const type = (s2sRecRef.current && s2sRecRef.current.mimeType) || 'audio/webm';
+    stopS2sTracks();
+    const blob = new Blob(s2sChunksRef.current, { type });
+    s2sChunksRef.current = []; s2sRecRef.current = null;
+    if (!blob.size) { setS2sStatus(''); return; }
+    setS2sStatus('thinking');
+    const bot = s2sBot;
+    // The language the visitor picked for THIS turn, captured in a ref at record
+    // start — never the `lang` state, which this stop-handler closes over from an
+    // earlier render (before setLang applied) and would send stale/flipped.
+    const language = s2sLangRef.current || lang;
+    setThreads((t) => ({ ...t, [bot]: [...t[bot], { role: 'user', text: '🎙️ …' }] })); // placeholder until the transcript returns
+    try {
+      const ext = type.includes('ogg') ? 'ogg' : type.includes('mp4') ? 'mp4' : 'webm';
+      const data = await ws.voiceChat(blob, { botType: bot, language, sessionId: sessions[bot] }, `voice.${ext}`);
+      if (data.sessionId) setSessions((s) => ({ ...s, [bot]: data.sessionId }));
+      setThreads((t) => {
+        const thread = t[bot].slice();
+        thread[thread.length - 1] = { role: 'user', text: data.text || '🎙️ (voice)' }; // replace placeholder with the transcript
+        thread.push({ role: 'bot', text: data.answer, meta: data });
+        return { ...t, [bot]: thread };
+      });
+      if (data.audio) {
+        try { const a = new Audio(`data:${data.audioMimeType || 'audio/mpeg'};base64,${data.audio}`); audioRef.current = a; a.play().catch(() => {}); } catch { /* playback unsupported */ }
+      }
+    } catch (err) {
+      setThreads((t) => {
+        const thread = t[bot].slice();
+        thread[thread.length - 1] = { role: 'bot', text: err.message || 'Voice conversation failed. Please try again.', error: true };
+        return { ...t, [bot]: thread };
+      });
+    } finally {
+      setS2sStatus('');
+    }
+  };
+  const startS2s = async (language) => {
+    if (s2sStatus === 'listening' || s2sStatus === 'thinking') return;
+    // Lock the chosen language for this turn in a ref (read by onS2sStop) and
+    // reflect it in the UI toggle.
+    s2sLangRef.current = language || lang;
+    if (language) setLang(language);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      s2sStreamRef.current = stream; s2sChunksRef.current = [];
+      const rec = new MediaRecorder(stream);
+      rec.addEventListener('dataavailable', (e) => { if (e.data && e.data.size) s2sChunksRef.current.push(e.data); });
+      rec.addEventListener('stop', onS2sStop);
+      s2sRecRef.current = rec; rec.start();
+      setS2sStatus('listening');
+    } catch {
+      stopS2sTracks();
+      setS2sStatus('');
+      setImgError('Microphone access was blocked.');
+    }
+  };
+  const stopS2s = () => {
+    const rec = s2sRecRef.current;
+    if (!rec || s2sStatus !== 'listening') return;
+    try { rec.stop(); } catch { stopS2sTracks(); setS2sStatus(''); }
+  };
+
   const busy = (target === 'both' ? pending.support || pending.sales : pending[target]);
   const reset = () => { setThreads({ support: [], sales: [] }); setSessions({}); };
   const [view, setView] = useState('chat');
@@ -231,7 +307,7 @@ export default function BotSandbox({ ws, tenant }) {
         onDragOver={(e) => { e.preventDefault(); }}
         onDrop={(e) => { e.preventDefault(); handleFile(e.dataTransfer.files?.[0]); }}>
         {/* Staged photo preview, recording/transcribing status, or an error. */}
-        {(image || imgError || voiceStatus) && (
+        {(image || imgError || voiceStatus || (s2sStatus && s2sStatus !== 'choose')) && (
           <div className="mb-2 flex items-center gap-3 rounded-lg border border-white/10 bg-panel-2/60 px-3 py-2">
             {image ? (
               <>
@@ -245,6 +321,11 @@ export default function BotSandbox({ ws, tenant }) {
               <span className="flex min-w-0 flex-1 items-center gap-2 text-xs text-fg-2">
                 <span className={cx('h-2 w-2 rounded-full', voiceStatus === 'listening' ? 'animate-pulse bg-rose-400' : 'bg-brand-400')} />
                 {voiceStatus === 'listening' ? 'Listening… tap the mic to stop' : 'Transcribing…'}
+              </span>
+            ) : s2sStatus ? (
+              <span className="flex min-w-0 flex-1 items-center gap-2 text-xs text-fg-2">
+                <span className={cx('h-2 w-2 rounded-full', s2sStatus === 'listening' ? 'animate-pulse bg-rose-400' : 'bg-brand-400')} />
+                {s2sStatus === 'listening' ? `Voice conversation (${lang === 'hi' ? 'हिंदी' : 'English'})… tap 🗣️ to stop` : 'Thinking…'}
               </span>
             ) : (
               <span className="min-w-0 flex-1 text-xs text-rose-300">{imgError}</span>
@@ -268,6 +349,23 @@ export default function BotSandbox({ ws, tenant }) {
                 className={cx('flex h-10 shrink-0 items-center rounded-lg border px-2.5 text-base transition disabled:opacity-40',
                   voiceStatus === 'listening' ? 'animate-pulse border-rose-400/60 bg-rose-500/15' : 'border-white/10 bg-panel-2/80 hover:border-brand-400/60')}>
                 {voiceStatus === 'listening' ? '⏹' : '🎤'}</button>
+            )}
+            {voiceSupported && (
+              s2sStatus === 'choose' ? (
+                <span className="flex shrink-0 items-center gap-1 rounded-lg border border-white/10 bg-panel-2/80 px-1.5 py-1 text-xs">
+                  <button type="button" onClick={() => startS2s('en')} className="rounded-md px-2 py-1 text-fg-2 transition hover:bg-white/10">English</button>
+                  <button type="button" onClick={() => startS2s('hi')} className="rounded-md px-2 py-1 text-fg-2 transition hover:bg-white/10">हिंदी</button>
+                  <button type="button" onClick={() => setS2sStatus('')} aria-label="Cancel" className="rounded-md px-1.5 py-1 text-fg-3 transition hover:text-fg">×</button>
+                </span>
+              ) : (
+                <button type="button" aria-label="Voice conversation" title="Voice conversation (speak & hear the answer)"
+                  onClick={() => (s2sStatus === 'listening' ? stopS2s() : setS2sStatus('choose'))}
+                  disabled={s2sStatus === 'thinking' || !!voiceStatus}
+                  aria-pressed={s2sStatus === 'listening'}
+                  className={cx('flex h-10 shrink-0 items-center rounded-lg border px-2.5 text-base transition disabled:opacity-40',
+                    s2sStatus === 'listening' ? 'animate-pulse border-rose-400/60 bg-rose-500/15' : 'border-white/10 bg-panel-2/80 hover:border-brand-400/60')}>
+                  {s2sStatus === 'listening' ? '⏹' : '🗣️'}</button>
+              )
             )}
             <input ref={inputRef} value={input} onChange={(e) => setInput(e.target.value)} aria-label="Message"
               placeholder={voiceStatus === 'listening' ? 'Listening…' : voiceStatus === 'transcribing' ? 'Transcribing…' : target === 'both' ? 'Ask both bots the same question…' : `Ask the ${target === 'support' ? 'Support' : 'Sales'} Bot…`}

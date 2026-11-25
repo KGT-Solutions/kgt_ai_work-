@@ -1,6 +1,7 @@
 const prisma = require('../lib/prisma');
 const { registerAction } = require('../engine/actionRegistry');
 const { fileSupportTicket, attachContact } = require('../engine/ticketing');
+const { matchTriggerKeyword } = require('../services/escalation');
 
 // Conversational handoffs for both tenant bots, answered before retrieval
 // (engine/actionRegistry.js) so they never fall into a "can't find that"
@@ -118,14 +119,27 @@ async function knownContact(ctx) {
   return ticket?.contactEmail || null;
 }
 
+// The per-tenant reply-ETA sentence for this turn (Feature 5), precomputed in
+// services/tenantChat.js and carried on ctx. Empty when the tenant hasn't set
+// business hours, so the stock "never promise a time" copy is unchanged.
+const etaFor = (ctx) => String(ctx?.escalation?.etaSentence || '').trim();
+
+// Append the reply ETA to a handoff answer, so a visitor who's just been handed
+// off is told when to expect a reply. No-op when no ETA is configured.
+function withEta(answer, ctx) {
+  const eta = etaFor(ctx);
+  return eta ? `${answer} ${eta}` : answer;
+}
+
 // A request for a person or a demo: always a ticket, then ask for an email
 // unless this conversation already has one.
 async function handleRequest(kind, query, ctx, profile) {
   const copy = profile.handoffCopy(ctx.language); // in the UI-selected language
   const email = await knownContact(ctx);
-  if (profile.ticketing) await fileSupportTicket({ profile, query, ctx, kind, contactEmail: email });
-  if (email) return { answer: copy.passedOn(email), handoff: true };
-  return { answer: kind === 'demo_request' ? copy.demo : copy.human, handoff: true, awaitingContact: true };
+  // The reply ETA shown to the visitor is also stored on the ticket (a snapshot).
+  if (profile.ticketing) await fileSupportTicket({ profile, query, ctx, kind, contactEmail: email, replyEta: etaFor(ctx) || null });
+  if (email) return { answer: withEta(copy.passedOn(email), ctx), handoff: true };
+  return { answer: withEta(kind === 'demo_request' ? copy.demo : copy.human, ctx), handoff: true, awaitingContact: true };
 }
 
 registerAction('handoff.contact', {
@@ -142,7 +156,7 @@ registerAction('handoff.contact', {
       });
     }
     // contactEmail: for the lead record (services/leads.js); never sent to the chat client.
-    return { answer: profile.handoffCopy(ctx.language).thanks(email), handoff: true, contactCaptured: true, contactEmail: email };
+    return { answer: withEta(profile.handoffCopy(ctx.language).thanks(email), ctx), handoff: true, contactCaptured: true, contactEmail: email };
   }
 });
 
@@ -154,13 +168,28 @@ registerAction('handoff.reply', {
     const copy = profile.handoffCopy(ctx.language); // in the UI-selected language
     if (NO.test(query)) return { answer: copy.declined };
     const email = await knownContact(ctx);
-    if (email) return { answer: copy.passedOn(email), handoff: true };
+    if (email) return { answer: withEta(copy.passedOn(email), ctx), handoff: true };
     return { answer: copy.askEmail, awaitingContact: true };
   }
 });
 
 registerAction('handoff.human', {
   match: (query) => isHumanRequest(query),
+  run: (query, ctx, profile) => handleRequest('human_request', query, ctx, profile)
+});
+
+// Per-tenant trigger keywords (Feature 5): a tenant can add phrases that route a
+// message to a person on top of the built-in detection above — "refund",
+// "complaint", "cancel my order". Only matches whole words (escalation.js) and
+// only when enabled, so it never hijacks a grounded answer unless the tenant
+// asked for that phrase. The keywords + enabled flag ride on ctx from
+// services/tenantChat.js; a sandbox test chat carries them too so owners can try it.
+// Unlike the built-in human/demo detectors, this is NOT gated on isShort(): a
+// tenant keyword is an explicit opt-in, so a detailed complaint that happens to
+// run long (e.g. "I've been charged twice and want a refund …") must still escalate.
+registerAction('handoff.keyword', {
+  match: (query, ctx) => !!ctx?.escalation?.keywordsEnabled
+    && !!matchTriggerKeyword(query, ctx.escalation.keywords),
   run: (query, ctx, profile) => handleRequest('human_request', query, ctx, profile)
 });
 
@@ -174,6 +203,9 @@ registerAction('handoff.demo', {
 // (domains/smallTalk.js), then a request for a person (more specific than
 // "demo": "can I talk to someone about a demo?" is a person).
 require('./smallTalk'); // registers 'smalltalk'
-const HANDOFF_ACTIONS = ['handoff.contact', 'handoff.reply', 'smalltalk', 'handoff.human', 'handoff.demo'];
+// handoff.keyword sits after the built-in human/demo detection and smalltalk, so
+// a plain greeting or an email reply is still handled first; a configured phrase
+// then routes anything else to a person before it falls through to retrieval.
+const HANDOFF_ACTIONS = ['handoff.contact', 'handoff.reply', 'smalltalk', 'handoff.human', 'handoff.demo', 'handoff.keyword'];
 
 module.exports = { HANDOFF_ACTIONS, extractBareEmail, extractContactEmail, extractStatedEmail, isHumanRequest, isDemoRequest };

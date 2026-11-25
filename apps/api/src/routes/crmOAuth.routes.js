@@ -1,4 +1,5 @@
 const express = require('express');
+const { logger } = require('../lib/logger');
 const { completeConnect } = require('../services/crm/crmSettings');
 
 // Public CRM OAuth callback. Zoho redirects the tenant's browser here after
@@ -45,10 +46,10 @@ router.get('/zoho/callback', async (req, res) => {
 
   try {
     const { tenantId } = await completeConnect({ code: String(code), state: String(state), redirectUri: redirectUri(req) });
-    console.log(`[crm] Zoho connected for tenant ${tenantId}`);
+    logger.info(`[crm] Zoho connected for tenant ${tenantId}`);
     return back('connected');
   } catch (err) {
-    console.error(`[crm] ERROR: Zoho OAuth callback failed: ${err.message}`);
+    logger.error(`[crm] ERROR: Zoho OAuth callback failed: ${err.message}`);
     return back('error', err.statusCode === 400 ? 'expired' : 'exchange_failed');
   }
 });

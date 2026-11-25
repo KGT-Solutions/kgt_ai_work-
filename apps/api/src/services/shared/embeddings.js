@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const { logger } = require('../../lib/logger');
 const { store } = require('../../lib/sharedStore');
 
 // The semantic half of hybrid retrieval: turns text into vectors via OpenAI's
@@ -96,12 +97,12 @@ async function embedBatch(texts) {
       body: JSON.stringify({ model: model(), input: inputs })
     });
   } catch (err) {
-    console.warn(`[embeddings] request failed: ${err.name === 'AbortError' ? 'timed out' : err.message}`);
+    logger.warn(`[embeddings] request failed: ${err.name === 'AbortError' ? 'timed out' : err.message}`);
     return texts.map(() => null);
   }
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    console.warn(`[embeddings] provider error ${res.status}: ${body.slice(0, 200)}`);
+    logger.warn(`[embeddings] provider error ${res.status}: ${body.slice(0, 200)}`);
     return texts.map(() => null);
   }
   let data;

@@ -1,6 +1,22 @@
 const prisma = require('../lib/prisma');
+const { logger } = require('../lib/logger');
 const { sendMail, maskAddress } = require('./mailer');
 const { store, keys } = require('../lib/sharedStore');
+const { chatImagePath } = require('./shared/chatImage');
+const { emailTypeEnabled } = require('./emailConnection');
+
+// Absolute base for image links in an email — the API's own public URL. Links
+// are only rendered when it is set; otherwise the alert notes the attachment in
+// words and the recipient opens it from the dashboard.
+const imageBase = () => String(process.env.PUBLIC_API_URL || '').replace(/\/+$/, '');
+
+// The visitor images on one transcript message, as absolute URLs. Empty when
+// there are none or no public base is configured.
+function imageLinks(tenantId, message) {
+  const base = imageBase();
+  if (!base || !message.imageKeys?.length) return [];
+  return message.imageKeys.map((key) => `${base}${chatImagePath(tenantId, key, 'image/jpeg')}`);
+}
 
 // Alert emails to the TENANT'S OWN team, so someone can follow up while the
 // visitor is still around:
@@ -112,7 +128,16 @@ function dashboardLink(view, sessionId) {
 // summary: the AI conversation summary (plain text, one item per line), when there is one.
 function alertEmail({ tenant, subject, heading, intro, rows, transcript, summary, view, sessionId }) {
   const link = dashboardLink(view, sessionId);
-  const lines = transcript.map((m) => `${m.role === 'user' ? 'Visitor' : 'Bot'}: ${clip(m.content)}`);
+  // Each message, with any images the visitor attached noted beneath it — a
+  // link when a public base is configured, otherwise a word that there's one.
+  const lines = transcript.flatMap((m) => {
+    const head = `${m.role === 'user' ? 'Visitor' : 'Bot'}: ${clip(m.content)}`;
+    const urls = imageLinks(tenant.id, m);
+    const imgs = urls.length
+      ? urls.map((u) => `  📎 ${u}`)
+      : (m.imageKeys?.length ? [`  📎 ${m.imageKeys.length} image(s) attached — open in the dashboard`] : []);
+    return [head, ...imgs];
+  });
   const text = [
     heading, '', intro, '',
     ...rows.map(([k, v]) => `${k}: ${v}`),
@@ -133,7 +158,13 @@ function alertEmail({ tenant, subject, heading, intro, rows, transcript, summary
 ${summary ? `<tr><td style="padding:8px 28px 4px;"><p style="margin:0 0 8px;font-size:12px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:#64748b;">AI summary</p>
 <p style="margin:0;padding:10px 14px;border-left:3px solid #22d3ee;border-radius:6px;background:#f8fafc;font-size:14px;line-height:1.6;color:#0f172a;">${escapeHtml(summary).replace(/\n/g, '<br>')}</p></td></tr>` : ''}
 ${lines.length ? `<tr><td style="padding:8px 28px 4px;"><p style="margin:0 0 8px;font-size:12px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:#64748b;">Latest messages</p>
-${transcript.map((m) => `<p style="margin:0 0 8px;padding:8px 12px;border-radius:8px;font-size:13px;line-height:1.5;white-space:pre-line;${m.role === 'user' ? 'background:#ecfeff;color:#0f172a;' : 'background:#f8fafc;color:#334155;'}"><strong>${m.role === 'user' ? 'Visitor' : 'Bot'}:</strong> ${escapeHtml(clip(m.content))}</p>`).join('')}</td></tr>` : ''}
+${transcript.map((m) => {
+      const urls = imageLinks(tenant.id, m);
+      const imgHtml = urls.length
+        ? `<div style="margin:2px 0 8px;">${urls.map((u) => `<a href="${escapeHtml(u)}" style="display:inline-block;margin:0 6px 6px 0;"><img src="${escapeHtml(u)}" alt="Attached by visitor" width="88" height="88" style="width:88px;height:88px;object-fit:cover;border-radius:8px;border:1px solid #e2e8f0;" /></a>`).join('')}</div>`
+        : (m.imageKeys?.length ? `<p style="margin:0 0 8px;font-size:12px;color:#64748b;">📎 ${m.imageKeys.length} image(s) attached — open in the dashboard</p>` : '');
+      return `<p style="margin:0 0 ${imgHtml ? '2px' : '8px'};padding:8px 12px;border-radius:8px;font-size:13px;line-height:1.5;white-space:pre-line;${m.role === 'user' ? 'background:#ecfeff;color:#0f172a;' : 'background:#f8fafc;color:#334155;'}"><strong>${m.role === 'user' ? 'Visitor' : 'Bot'}:</strong> ${escapeHtml(clip(m.content))}</p>${imgHtml}`;
+    }).join('')}</td></tr>` : ''}
 ${link ? `<tr><td style="padding:10px 28px 4px;"><a href="${escapeHtml(link)}" style="display:inline-block;padding:9px 16px;border-radius:8px;background:#0f172a;color:#ffffff;font-size:14px;text-decoration:none;">Open in the dashboard</a></td></tr>` : ''}
 <tr><td style="padding:16px 28px 20px;font-size:12px;color:#94a3b8;">KGT AI Hub alert for ${escapeHtml(tenant.name)}. Change who gets these on the Leads &amp; Summaries page.</td></tr>
 </table></body></html>`;
@@ -144,7 +175,7 @@ async function recentTranscript(tenantId, sessionId) {
   if (!sessionId) return [];
   const rows = await prisma.chatMessage.findMany({
     where: { sessionId, session: { tenantId } }, orderBy: [{ createdAt: 'desc' }, { role: 'asc' }], take: TRANSCRIPT_LINES,
-    select: { role: true, content: true }
+    select: { role: true, content: true, imageKeys: true }
   });
   return rows.reverse();
 }
@@ -152,12 +183,12 @@ async function recentTranscript(tenantId, sessionId) {
 async function send({ tenant, kind, mail, replyTo, now }) {
   const to = await teamRecipients(tenant);
   if (!to.length) {
-    console.warn(`[alerts] ${kind} NOT sent (tenant ${tenant.slug || tenant.id}): no team email, signup email or dashboard user to send it to`);
+    logger.warn(`[alerts] ${kind} NOT sent (tenant ${tenant.slug || tenant.id}): no team email, signup email or dashboard user to send it to`);
     return { sent: false, reason: 'no-recipient' };
   }
   await recordSend(tenant.id);
   const result = await sendMail({ to, ...mail, replyTo, tenantId: tenant.id, label: `${kind}, tenant ${tenant.slug || tenant.id}` });
-  if (result.sent) console.log(`[alerts] ${kind} sent via ${result.via} to ${to.map(maskAddress).join(', ')} (tenant ${tenant.slug || tenant.id})`);
+  if (result.sent) logger.info(`[alerts] ${kind} sent via ${result.via} to ${to.map(maskAddress).join(', ')} (tenant ${tenant.slug || tenant.id})`);
   return result;
 }
 
@@ -170,9 +201,15 @@ async function send({ tenant, kind, mail, replyTo, now }) {
 async function notifyLeadCaptured({ tenant, lead, summary = null }) {
   try {
     if (!alertsEnabled()) return { sent: false, reason: 'disabled' };
+    // Per-email toggle (dashboard → Email settings). The lead is still captured
+    // and visible in the dashboard; only the team email is suppressed.
+    if (!await emailTypeEnabled(tenant.id, 'leadAlerts')) {
+      logger.info(`[alerts] lead alert SKIPPED (lead ${lead.id}, tenant ${tenant.slug || tenant.id}): "new lead" emails are turned off for this tenant`);
+      return { sent: false, reason: 'disabled-by-tenant' };
+    }
     const now = Date.now();
     if (!await underTenantCap(tenant.id)) {
-      console.warn(`[alerts] lead alert THROTTLED (lead ${lead.id}, tenant ${tenant.slug || tenant.id}): hourly cap reached; the lead is in the dashboard`);
+      logger.warn(`[alerts] lead alert THROTTLED (lead ${lead.id}, tenant ${tenant.slug || tenant.id}): hourly cap reached; the lead is in the dashboard`);
       return { sent: false, reason: 'throttled' };
     }
     const bot = BOT_LABEL[lead.botType] || 'Support';
@@ -191,7 +228,7 @@ async function notifyLeadCaptured({ tenant, lead, summary = null }) {
     });
     return await send({ tenant, kind: 'lead alert', mail, replyTo: lead.email, now });
   } catch (err) {
-    console.error(`[alerts] ERROR: lead alert FAILED (lead ${lead.id}, tenant ${tenant.id}): ${err.stack || err.message}`);
+    logger.error(`[alerts] ERROR: lead alert FAILED (lead ${lead.id}, tenant ${tenant.id}): ${err.stack || err.message}`);
     return { sent: false, reason: 'exception' };
   }
 }
@@ -219,10 +256,16 @@ async function notifyIfNeedsAttention({ tenant, botType, sessionId, query, resul
   try {
     const reason = needsAttention(result);
     if (!reason || !alertsEnabled()) return { sent: false, reason: reason ? 'disabled' : 'not-needed' };
+    // Per-email toggle (dashboard → Email settings). The handoff is still filed
+    // as a ticket and the conversation is in Sessions; only the email is held.
+    if (!await emailTypeEnabled(tenant.id, 'attentionAlerts')) {
+      logger.info(`[alerts] needs-attention alert SKIPPED (session ${sessionId}, tenant ${tenant.slug || tenant.id}): these emails are turned off for this tenant`);
+      return { sent: false, reason: 'disabled-by-tenant' };
+    }
     const now = Date.now();
     if (await sessionOnCooldown(tenant.id, sessionId)) return { sent: false, reason: 'session-cooldown' };
     if (!await underTenantCap(tenant.id)) {
-      console.warn(`[alerts] needs-attention alert THROTTLED (session ${sessionId}, tenant ${tenant.slug || tenant.id}): hourly cap reached`);
+      logger.warn(`[alerts] needs-attention alert THROTTLED (session ${sessionId}, tenant ${tenant.slug || tenant.id}): hourly cap reached`);
       return { sent: false, reason: 'throttled' };
     }
     await markSessionAlerted(tenant.id, sessionId);
@@ -244,7 +287,7 @@ async function notifyIfNeedsAttention({ tenant, botType, sessionId, query, resul
     });
     return await send({ tenant, kind: handoff ? 'handoff alert' : 'low-confidence alert', mail, now });
   } catch (err) {
-    console.error(`[alerts] ERROR: needs-attention alert FAILED (session ${sessionId}, tenant ${tenant.id}): ${err.stack || err.message}`);
+    logger.error(`[alerts] ERROR: needs-attention alert FAILED (session ${sessionId}, tenant ${tenant.id}): ${err.stack || err.message}`);
     return { sent: false, reason: 'exception' };
   }
 }
