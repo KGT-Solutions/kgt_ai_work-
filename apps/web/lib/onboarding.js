@@ -16,10 +16,16 @@ import { DEFAULT_BOT_SCOPE } from './botScopes';
 // enum (ecommerce | saas | healthcare | real_estate | services | other). The
 // raw label is sent separately as industryLabel.
 const BUSINESS_CATEGORY_BY_INDUSTRY = {
+  ecommerce: 'ecommerce',
+  saas: 'saas',
+  healthcare: 'healthcare',
+  real_estate: 'real_estate',
+  services: 'services',
+  other: 'other',
+  // Legacy clinic values (pre-generic categories) still map to healthcare.
   fertility: 'healthcare',
   dental: 'healthcare',
-  general: 'healthcare',
-  other: 'other'
+  general: 'healthcare'
 };
 export const businessCategoryFor = (industry) => BUSINESS_CATEGORY_BY_INDUSTRY[industry] || 'other';
 

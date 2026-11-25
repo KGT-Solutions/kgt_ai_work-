@@ -14,6 +14,18 @@ const KINDS = {
   contact_request: { label: 'Follow-up', tone: 'green' }
 };
 
+// TEMP PREVIEW DATA — shown only when the API returns no tickets, so the empty
+// page can be reviewed with content. Remove this block (and the fallback use
+// below) once real tickets exist.
+const DEMO_TICKETS = [
+  { id: 'd1', query: 'Do you offer EMI or instalment plans for IVF treatment?', contactEmail: null, kind: 'unanswered', botType: 'support', confidence: 0.38, status: 'open', createdAt: '2026-11-23T10:41:00Z' },
+  { id: 'd2', query: 'I’d like to book a demo of the sales assistant for our clinic.', contactEmail: 'priya.menon@sunrisefertility.in', kind: 'demo_request', botType: 'sales', confidence: 0.92, status: 'open', createdAt: '2026-11-23T09:12:00Z' },
+  { id: 'd3', query: 'Can I speak to a real person about my appointment?', contactEmail: null, kind: 'human_request', botType: 'support', confidence: 0.81, status: 'open', createdAt: '2026-11-22T17:55:00Z' },
+  { id: 'd4', query: 'What are your success rates for women over 40?', contactEmail: null, kind: 'unanswered', botType: 'support', confidence: 0.44, status: 'closed', createdAt: '2026-11-22T14:03:00Z' },
+  { id: 'd5', query: 'Please call me back on the pricing for the annual plan.', contactEmail: 'rohit@acmehealth.com', kind: 'contact_request', botType: 'sales', confidence: 0.76, status: 'open', createdAt: '2026-11-21T11:28:00Z' },
+  { id: 'd6', query: 'Is the chatbot available right now? It said it was unavailable.', contactEmail: null, kind: 'outage', botType: 'support', confidence: 0, status: 'closed', createdAt: '2026-11-20T20:14:00Z' }
+];
+
 export default function TicketsList({ ws }) {
   const toast = useToast();
   const [tickets, setTickets] = useState(null);
@@ -24,11 +36,9 @@ export default function TicketsList({ ws }) {
       <CardHeader title="Tickets and follow-ups"
         description="Questions the bots couldn't answer, plus visitors who asked for a demo or a person. Add missing information as a document and the bots will answer it next time." />
       <div className="p-5">
-        {!tickets ? <Skeleton className="h-32" /> : tickets.length === 0 ? (
-          <EmptyState icon={<IconTicket className="h-5 w-5" />} title="No tickets">Every question so far was answered from your documents.</EmptyState>
-        ) : (
+        {!tickets ? <Skeleton className="h-32" /> : (
           <ul className="divide-y divide-white/[0.05]">
-            {tickets.map((t) => {
+            {(tickets.length === 0 ? DEMO_TICKETS : tickets).map((t) => {
               const kind = KINDS[t.kind] || KINDS.unanswered;
               return (
                 <li key={t.id} className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center sm:justify-between">

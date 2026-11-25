@@ -19,6 +19,78 @@ const FRESH_MS = 5 * 60 * 1000; // a chat this recent may get its summary any mo
 export const shortId = (id) => `#${String(id).slice(0, 8)}`;
 const when = (s) => new Date(s.lastMessageAt || s.startedAt).toLocaleString();
 
+// TEMP PREVIEW DATA — shown only when the API returns no sessions, so the empty
+// page can be reviewed with content. Each object is complete enough for both
+// the list row and the detail drawer (SessionDrawer reads these by id). The
+// low-confidence ones (a4, a6) are also referenced by the Improvements demo.
+// Remove this block (and the `usingDemo` fallback + drawer short-circuit below)
+// once real sessions exist.
+export const DEMO_SESSIONS = [
+  {
+    id: 'demo-sess-a1', botType: 'sales', startedAt: '2026-11-23T09:10:00Z', lastMessageAt: '2026-11-23T09:12:00Z',
+    messageCount: 4, summaryStatus: 'done',
+    summary: 'Intent: Wants a demo of the sales assistant for a fertility clinic.\nKey questions: Annual pricing, Hindi support.\nOutcome: Shared email, asked for a callback this week.\nFollow-up actions: Book a demo and confirm multilingual support.',
+    leads: [{ id: 'demo-lead-a1', email: 'priya.menon@sunrisefertility.in', status: 'NEW' }],
+    messages: [
+      { role: 'user', content: 'Hi, do you offer a demo of your sales chatbot?', createdAt: '2026-11-23T09:10:00Z' },
+      { role: 'assistant', content: 'Yes! I can set that up. Could you share your email so our team can reach out?', createdAt: '2026-11-23T09:11:00Z', confidence: 0.86 },
+      { role: 'user', content: 'priya.menon@sunrisefertility.in — also, does it support Hindi?', createdAt: '2026-11-23T09:11:40Z' },
+      { role: 'assistant', content: 'Thanks Priya! Yes, it supports Hindi. Someone will email you to schedule the demo.', createdAt: '2026-11-23T09:12:00Z', confidence: 0.78 }
+    ]
+  },
+  {
+    id: 'demo-sess-a2', botType: 'support', startedAt: '2026-11-22T17:38:00Z', lastMessageAt: '2026-11-22T17:40:00Z', endedAt: '2026-11-22T17:41:00Z',
+    messageCount: 3, summaryStatus: 'done',
+    summary: 'Intent: Needs help resetting a patient portal password.\nKey questions: Where to reset, how long the link lasts.\nOutcome: Guided to the reset page; visitor confirmed it worked.\nFollow-up actions: None — resolved.',
+    leads: [{ id: 'demo-lead-a2', email: 'rohit@acmehealth.com', status: 'CONTACTED' }],
+    messages: [
+      { role: 'user', content: 'I can’t log in to the patient portal.', createdAt: '2026-11-22T17:38:00Z' },
+      { role: 'assistant', content: 'You can reset your password at /portal/reset — the link is valid for 30 minutes.', createdAt: '2026-11-22T17:39:00Z', confidence: 0.41 },
+      { role: 'user', content: 'Got it, that worked. My email is rohit@acmehealth.com if you need it.', createdAt: '2026-11-22T17:40:00Z' }
+    ]
+  },
+  {
+    id: 'demo-sess-a3', botType: 'sales', startedAt: '2026-11-22T13:02:00Z', lastMessageAt: '2026-11-22T13:05:00Z',
+    messageCount: 3, summaryStatus: 'pending', summary: null, leads: [], externalUserId: 'visitor-8842',
+    messages: [
+      { role: 'user', content: 'What’s the difference between Starter and Pro?', createdAt: '2026-11-22T13:02:00Z' },
+      { role: 'assistant', content: 'Pro adds the sales bot and higher message limits. Want me to send a quote?', createdAt: '2026-11-22T13:03:00Z', confidence: 0.69 },
+      { role: 'user', content: 'Yes please', createdAt: '2026-11-22T13:05:00Z' }
+    ]
+  },
+  {
+    id: 'demo-sess-a4', botType: 'support', startedAt: '2026-11-19T08:45:00Z', lastMessageAt: '2026-11-19T08:47:00Z',
+    messageCount: 4, summaryStatus: 'done', externalUserId: 'visitor-5521', leads: [],
+    summary: 'Intent: Asking whether patient data is stored in India.\nKey questions: Data residency, HIPAA-style compliance.\nOutcome: No document covered it — handed to a person.\nFollow-up actions: Add a data-residency / compliance overview.',
+    messages: [
+      { role: 'user', content: 'Where is our patient data stored?', createdAt: '2026-11-19T08:45:00Z' },
+      { role: 'assistant', content: 'I don’t have that detail documented yet — I’ll pass this to our team.', createdAt: '2026-11-19T08:46:00Z', confidence: 0.18 },
+      { role: 'user', content: 'Are you HIPAA compliant?', createdAt: '2026-11-19T08:46:30Z' },
+      { role: 'assistant', content: 'I’m not certain from the documents I have.', createdAt: '2026-11-19T08:47:00Z', confidence: 0.24 }
+    ]
+  },
+  {
+    id: 'demo-sess-a5', botType: 'sales', startedAt: '2026-11-20T11:00:00Z', lastMessageAt: '2026-11-20T11:02:00Z',
+    messageCount: 3, summaryStatus: 'done',
+    summary: 'Intent: Interested in adding Orb to a dental chain (4 branches).\nKey questions: Per-branch pricing, onboarding time.\nOutcome: Asked sales to call; preferred mornings.\nFollow-up actions: Call Meera in the morning with branch pricing.',
+    leads: [{ id: 'demo-lead-a5', email: 'meera@brightsmiles.in', status: 'CONTACTED' }],
+    messages: [
+      { role: 'user', content: 'We have 4 branches — how does pricing work?', createdAt: '2026-11-20T11:00:00Z' },
+      { role: 'assistant', content: 'Pricing is per branch with a discount at 3+. I can have sales call you — best time?', createdAt: '2026-11-20T11:01:00Z', confidence: 0.72 },
+      { role: 'user', content: 'Mornings. meera@brightsmiles.in', createdAt: '2026-11-20T11:02:00Z' }
+    ]
+  },
+  {
+    id: 'demo-sess-a6', botType: 'support', startedAt: '2026-11-22T14:00:00Z', lastMessageAt: '2026-11-22T14:03:00Z',
+    messageCount: 2, summaryStatus: 'done', externalUserId: 'visitor-3310', leads: [],
+    summary: 'Intent: Asking about IVF success rates for women over 40.\nKey questions: Age-specific success rate.\nOutcome: No document covered it — answered with low confidence.\nFollow-up actions: Add an age-wise success-rate FAQ.',
+    messages: [
+      { role: 'user', content: 'What are your success rates for women over 40?', createdAt: '2026-11-22T14:01:00Z' },
+      { role: 'assistant', content: 'I don’t have age-specific figures in the documents — please check with the clinic.', createdAt: '2026-11-22T14:03:00Z', confidence: 0.22 }
+    ]
+  }
+];
+
 export function visitorLabel(session) {
   if (session.leads?.length) return session.leads[0].email;
   if (session.externalUserId) return session.externalUserId;
@@ -76,7 +148,12 @@ export function SessionDrawer({ ws, sessionId, onClose, onChanged }) {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(null); // lead id or 'summary'
 
-  const load = useCallback(() => ws.getSession(sessionId).then(setSession), [ws, sessionId]);
+  const load = useCallback(() => {
+    // TEMP PREVIEW: demo sessions aren't on the server — serve them locally.
+    const demo = DEMO_SESSIONS.find((s) => s.id === sessionId);
+    if (demo) { setSession(demo); return Promise.resolve(); }
+    return ws.getSession(sessionId).then(setSession);
+  }, [ws, sessionId]);
 
   useEffect(() => {
     setSession(null);
@@ -248,14 +325,20 @@ export default function SessionsPanel({ ws, openId = null, onOpenChange }) {
           <Segmented label="Filter by bot" options={BOT_FILTERS} value={botFilter} onChange={setBotFilter} />
         </div>
         <div className="p-5">
-          {!sessions ? <Skeleton className="h-32" /> : sessions.length === 0 ? (
+          {/* TEMP PREVIEW: show demo sessions (filtered client-side) when there are none. */}
+          {(() => {
+          const usingDemo = !!sessions && sessions.length === 0;
+          const viewSessions = usingDemo
+            ? DEMO_SESSIONS.filter((s) => botFilter === 'all' || s.botType === botFilter)
+            : sessions;
+          return !sessions ? <Skeleton className="h-32" /> : viewSessions.length === 0 ? (
             <EmptyState icon={<IconLayers className="h-5 w-5" />} title={botFilter === 'all' ? 'No conversations yet' : 'No conversations with this bot yet'}>
               Once visitors chat with your Sales or Support bot, each conversation shows up here with a summary.
             </EmptyState>
           ) : (
             <>
               <ul className="space-y-3">
-                {sessions.map((s) => <SessionRow key={s.id} session={s} onOpen={open} />)}
+                {viewSessions.map((s) => <SessionRow key={s.id} session={s} onOpen={open} />)}
               </ul>
               {nextCursor && (
                 <div className={cx('mt-4 flex justify-center')}>
@@ -263,7 +346,8 @@ export default function SessionsPanel({ ws, openId = null, onOpenChange }) {
                 </div>
               )}
             </>
-          )}
+          );
+          })()}
         </div>
       </Card>
       {openId && <SessionDrawer ws={ws} sessionId={openId} onClose={close} onChanged={() => load().catch(() => {})} />}

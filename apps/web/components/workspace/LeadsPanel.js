@@ -18,6 +18,76 @@ const BOT_FILTERS = [{ value: 'all', label: 'All bots' }, { value: 'sales', labe
 const STATUS_FILTERS = [{ value: 'all', label: 'All' }, { value: 'NEW', label: 'New' }, { value: 'CONTACTED', label: 'Contacted' }];
 const POLL_MS = 8000;
 
+// TEMP PREVIEW DATA — shown only when the API returns no leads, so the empty
+// page can be reviewed with content. Bot/status filters are applied client-side
+// to this set. Remove this block (and the `usingDemo` fallback below) once real
+// leads exist.
+const DEMO_LEADS = [
+  {
+    id: 'demo-1', email: 'priya.menon@sunrisefertility.in', botType: 'sales', status: 'NEW',
+    summaryStatus: 'done', createdAt: '2026-11-23T09:12:00Z', sessionId: 'demo1sessabc12345',
+    chatSummary: 'Intent: Wants a demo of the sales assistant for their fertility clinic.\nKey questions: Pricing for the annual plan, whether it supports Hindi.\nOutcome: Shared email, asked for a callback this week.\nFollow-up actions: Book a demo and confirm multilingual support.',
+    fullTranscript: [
+      { role: 'user', content: 'Hi, do you offer a demo of your sales chatbot?', createdAt: '2026-11-23T09:10:00Z' },
+      { role: 'assistant', content: 'Yes! I can set that up. Could you share your email so our team can reach out?', createdAt: '2026-11-23T09:11:00Z', confidence: 0.86 },
+      { role: 'user', content: 'priya.menon@sunrisefertility.in — also, does it support Hindi?', createdAt: '2026-11-23T09:11:40Z' },
+      { role: 'assistant', content: 'Thanks Priya! Yes, it supports Hindi. Someone will email you to schedule the demo.', createdAt: '2026-11-23T09:12:00Z', confidence: 0.78 }
+    ]
+  },
+  {
+    id: 'demo-2', email: 'rohit@acmehealth.com', botType: 'support', status: 'CONTACTED',
+    summaryStatus: 'done', createdAt: '2026-11-22T17:40:00Z', sessionId: 'demo2sessdef67890',
+    confirmationSentAt: '2026-11-22T17:41:00Z',
+    chatSummary: 'Intent: Needs help resetting a patient portal password.\nKey questions: Where to reset, how long the link lasts.\nOutcome: Guided to the reset page; visitor confirmed it worked.\nFollow-up actions: None — resolved.',
+    fullTranscript: [
+      { role: 'user', content: 'I can’t log in to the patient portal.', createdAt: '2026-11-22T17:38:00Z' },
+      { role: 'assistant', content: 'You can reset your password at /portal/reset — the link is valid for 30 minutes.', createdAt: '2026-11-22T17:39:00Z', confidence: 0.41 },
+      { role: 'user', content: 'Got it, that worked. My email is rohit@acmehealth.com if you need it.', createdAt: '2026-11-22T17:40:00Z' }
+    ]
+  },
+  {
+    id: 'demo-3', email: 'ananya.k@gmail.com', botType: 'sales', status: 'NEW',
+    summaryStatus: 'done', createdAt: '2026-11-22T13:05:00Z', sessionId: 'demo3sessghi13579',
+    chatSummary: 'Intent: Comparing plans for a small clinic (2 doctors).\nKey questions: Difference between Starter and Pro, overage charges.\nOutcome: Leaning towards Pro, wants a written quote.\nFollow-up actions: Send a quote for the Pro plan.',
+    fullTranscript: [
+      { role: 'user', content: 'What’s the difference between Starter and Pro?', createdAt: '2026-11-22T13:02:00Z' },
+      { role: 'assistant', content: 'Pro adds the sales bot and higher message limits. Want me to send a quote?', createdAt: '2026-11-22T13:03:00Z', confidence: 0.69 },
+      { role: 'user', content: 'Yes please, ananya.k@gmail.com', createdAt: '2026-11-22T13:05:00Z' }
+    ]
+  },
+  {
+    id: 'demo-4', email: 'david.ops@northclinic.co', botType: 'support', status: 'NEW',
+    summaryStatus: 'pending', createdAt: '2026-11-21T19:20:00Z', sessionId: 'demo4sessjkl24680',
+    chatSummary: null,
+    fullTranscript: [
+      { role: 'user', content: 'Do you integrate with our existing CRM?', createdAt: '2026-11-21T19:18:00Z' },
+      { role: 'assistant', content: 'We support webhooks and a REST API. Share your email and I’ll have someone confirm specifics.', createdAt: '2026-11-21T19:19:00Z', confidence: 0.2 },
+      { role: 'user', content: 'david.ops@northclinic.co', createdAt: '2026-11-21T19:20:00Z' }
+    ]
+  },
+  {
+    id: 'demo-5', email: 'meera@brightsmiles.in', botType: 'sales', status: 'CONTACTED',
+    summaryStatus: 'done', createdAt: '2026-11-20T11:02:00Z', sessionId: 'demo5sessmno11223',
+    chatSummary: 'Intent: Interested in adding Orb to a dental chain (4 branches).\nKey questions: Per-branch pricing, onboarding time.\nOutcome: Asked sales to call; preferred time mornings.\nFollow-up actions: Call Meera in the morning with branch pricing.',
+    fullTranscript: [
+      { role: 'user', content: 'We have 4 branches — how does pricing work?', createdAt: '2026-11-20T11:00:00Z' },
+      { role: 'assistant', content: 'Pricing is per branch with a discount at 3+. I can have sales call you — best time?', createdAt: '2026-11-20T11:01:00Z', confidence: 0.72 },
+      { role: 'user', content: 'Mornings. meera@brightsmiles.in', createdAt: '2026-11-20T11:02:00Z' }
+    ]
+  },
+  {
+    id: 'demo-6', email: 'sam.lee@healthfirst.org', botType: 'support', status: 'NEW',
+    summaryStatus: 'done', createdAt: '2026-11-19T08:47:00Z', sessionId: 'demo6disesspqr33445',
+    chatSummary: 'Intent: Asking whether data is stored in India.\nKey questions: Data residency, HIPAA-style compliance.\nOutcome: Wanted a document; none was available, handed to a person.\nFollow-up actions: Send the data-residency / compliance overview.',
+    fullTranscript: [
+      { role: 'user', content: 'Where is our patient data stored?', createdAt: '2026-11-19T08:45:00Z' },
+      { role: 'assistant', content: 'I don’t have that detail documented yet — I’ll pass this to our team. What’s your email?', createdAt: '2026-11-19T08:46:00Z', confidence: 0.18 },
+      { role: 'user', content: 'sam.lee@healthfirst.org', createdAt: '2026-11-19T08:47:00Z' }
+    ]
+  }
+];
+const DEMO_COUNTS = { total: 6, NEW: 4, CONTACTED: 2, sales: 3, support: 3 };
+
 function SummaryPreview({ lead }) {
   if (lead.summaryStatus === 'pending') {
     return <p className="flex items-center gap-2 text-[13px] text-fg-3"><Spinner className="h-3.5 w-3.5" /> Writing the summary…</p>;
@@ -124,11 +194,16 @@ export default function LeadsPanel({ ws, onOpenSession }) {
     }
   };
 
-  const counts = data?.counts;
+  // TEMP PREVIEW: when the API has no leads, show DEMO_LEADS (filtered client-side).
+  const usingDemo = !!data && data.counts?.total === 0 && data.leads != null;
+  const counts = usingDemo ? DEMO_COUNTS : data?.counts;
+  const leads = usingDemo
+    ? DEMO_LEADS.filter((l) => (botFilter === 'all' || l.botType === botFilter) && (statusFilter === 'all' || l.status === statusFilter))
+    : data?.leads;
+
   const label = (opt, n) => (counts ? `${opt.label} (${n})` : opt.label);
   const botOptions = BOT_FILTERS.map((o) => ({ ...o, label: label(o, o.value === 'all' ? counts?.total : counts?.[o.value]) }));
   const statusOptions = STATUS_FILTERS.map((o) => ({ ...o, label: label(o, o.value === 'all' ? counts?.total : counts?.[o.value]) }));
-  const leads = data?.leads;
 
   return (
     <Card>

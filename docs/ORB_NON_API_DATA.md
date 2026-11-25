@@ -61,6 +61,48 @@ In both `components/orb/knowledge/KnowledgeReadinessCard.js` and
   **tone** (tint vs yellow) is derived on the frontend from the score bands
   (>= 80 ready/tint, else needs-attention/yellow). No tone field exists in the API.
 
+## 5. Conversations page (Real mode) — fields with no backing data  (NOT from API)
+
+The Orb **Conversations** page (`pages/conversations/index.js`,
+`components/orb/conversations/*`) has a **Dummy / Real** toggle. In **Real** mode
+the list + detail are wired to the **Sessions** API (`ws.listSessions` →
+`GET /sessions`, and `ws.getSession` → `GET /sessions/:id`). The following parts
+of the Orb mock design have **no equivalent in that API**, so they stay
+**Dummy-only** and are omitted (or simplified) in Real mode:
+
+- **Per-message `source`** (e.g. *"From Fees and packages · Policies & pricing"*
+  under an Orb answer) — `GET /sessions/:id` messages return
+  `id, role, content, confidence, answered, createdAt` only; there is **no
+  per-message document source**.
+- **Per-message annotation boxes** (the Ticket / Action / Lead chips under an Orb
+  reply, `ConversationDetail` `boxes`) — not returned by the API.
+- **"Correct this answer"** action (`correct` flag + `onCorrect`) — there is **no
+  session-message correction endpoint**; sessions are read-only.
+- **Booked / Ticket / Person pills** — only **lead status** is available
+  (`leads[].status` → *Lead · New/Contacted*); the other pill types have no data.
+- **Meta extras** — the mock meta carries **language, page path and chat cost**
+  (*"Hinglish · /ivf-cost · cost ₹5.10"*); the API gives only
+  `botType, messageCount, startedAt, lastMessageAt, endedAt`, so Real meta is
+  e.g. *"Tue 3 Nov, 10:42 pm · 4 messages · Support bot"*.
+- **Date-range + Branch selects**, and the **filter tabs** (All / After hours /
+  Left details / Became a ticket / Asked for a person) — **no API** backs these;
+  `GET /sessions` supports only a **bot filter** (`botType=all|sales|support`)
+  and cursor paging. They are hidden/inert in Real mode (full tab wiring is a
+  later task).
+
+- **List `text` preview** — the mock shows the visitor's opening line;
+  `GET /sessions` returns **no messages**, only `summary`, so Real mode shows the
+  summary's **intent line** (or "Summary being written…" when
+  `summaryStatus` is pending).
+
+> **Implementation note (React Query):** Real mode uses **React Query**
+> (`@tanstack/react-query`, already in the app) for the optimized version —
+> `useQuery(['orb-sessions', botType])` for the list (cursor paging via the
+> `nextCursor` the API returns) and `useQuery(['orb-session', id])` for the
+> selected conversation. This gives caching, dedupe and background refetch (e.g.
+> polling while `summaryStatus === 'pending'`), matching how the existing
+> Leads & Summaries Sessions tab behaves.
+
 ---
 
 ## Quick reference
@@ -74,3 +116,10 @@ In both `components/orb/knowledge/KnowledgeReadinessCard.js` and
 | Readiness **"what to add" title** | knowledge/testorb readiness | Static label — **no API** (list items from `getReadiness`) |
 | Readiness **Add knowledge** action | knowledge/testorb readiness | Navigation — **no API** |
 | Status pill **tone** | readiness cards | Derived from score — **not in API** |
+| Conversation **per-message source** | `conversations` · `ConversationDetail` | **No API** (messages have no source) |
+| Conversation **annotation boxes** (Ticket/Action/Lead) | `conversations` · `ConversationDetail` | **No API** |
+| Conversation **"Correct this answer"** | `conversations` · `ConversationDetail` | **No API** (sessions read-only) |
+| Conversation **Booked/Ticket/Person pills** | `conversations` list + detail | Only lead status — **not in API** |
+| Conversation **meta** (language / path / cost) | `conversations` list + detail | **Not in API** (botType/messageCount/dates only) |
+| Conversation **date-range / branch / tabs** | `conversations` page | **No API** (only `botType` + cursor) |
+| Conversation list **text preview** | `conversations` · `ConversationList` | Summary intent line — **no messages in list API** |

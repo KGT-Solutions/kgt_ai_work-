@@ -14,6 +14,38 @@ import { SessionDrawer, shortId, visitorLabel } from './SessionsPanel';
 // don't cover yet and add them. Click an entry for the full session.
 
 const BOT_FILTERS = [{ value: 'all', label: 'All bots' }, { value: 'sales', label: 'Sales' }, { value: 'support', label: 'Support' }];
+
+// TEMP PREVIEW DATA — shown only when the API returns no improvements, so the
+// empty page can be reviewed with content. Session ids match SessionsPanel's
+// DEMO_SESSIONS, so "Open session" opens the working demo drawer. Remove this
+// block (and the `usingDemo` fallback below) once real data exists.
+const DEMO_IMPROVEMENT_SESSIONS = [
+  {
+    id: 'demo-sess-a4', botType: 'support', externalUserId: 'visitor-5521', leads: [],
+    lastWeakAt: '2026-11-19T08:47:00Z', lowest: 0.18, weakAnswers: 2,
+    weak: [
+      { id: 'w-a4-1', question: 'Where is our patient data stored?', answer: 'I don’t have that detail documented yet — I’ll pass this to our team.', answered: false, confidence: 0.18, botType: 'support', at: '2026-11-19T08:46:00Z' },
+      { id: 'w-a4-2', question: 'Are you HIPAA compliant?', answer: 'I’m not certain from the documents I have.', answered: true, confidence: 0.24, botType: 'support', at: '2026-11-19T08:47:00Z' }
+    ]
+  },
+  {
+    id: 'demo-sess-a6', botType: 'support', externalUserId: 'visitor-3310', leads: [],
+    lastWeakAt: '2026-11-22T14:03:00Z', lowest: 0.22, weakAnswers: 1,
+    weak: [
+      { id: 'w-a6-1', question: 'What are your success rates for women over 40?', answer: 'I don’t have age-specific figures in the documents — please check with the clinic.', answered: true, confidence: 0.22, botType: 'support', at: '2026-11-22T14:03:00Z' }
+    ]
+  },
+  {
+    id: 'demo-sess-a3', botType: 'sales', externalUserId: 'visitor-8842', leads: [],
+    lastWeakAt: '2026-11-22T13:05:00Z', lowest: 0.26, weakAnswers: 2,
+    weak: [
+      { id: 'w-a3-1', question: 'Do you offer EMI or instalment plans?', answer: 'I couldn’t find pricing-plan details in the documents.', answered: false, confidence: 0.26, botType: 'sales', at: '2026-11-22T13:04:00Z' },
+      { id: 'w-a3-2', question: 'Is there a free trial?', answer: 'I’m not sure that’s documented.', answered: true, confidence: 0.29, botType: 'sales', at: '2026-11-22T13:05:00Z' }
+    ]
+  }
+];
+const DEMO_IMPROVEMENTS = { below: 0.25, totalSessions: 3, totalWeakAnswers: 5, sessions: DEMO_IMPROVEMENT_SESSIONS, nextPage: null };
+
 const pct = (c) => `${Math.round(c * 100)}%`;
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 // Under the support gate (30%) the bot refused to answer at all.
@@ -95,7 +127,12 @@ export default function ImprovementsPanel({ ws, openId = null, onOpenChange }) {
     }
   };
 
-  const below = data?.below ?? 0.25;
+  // TEMP PREVIEW: when the API has no improvements, show DEMO data (filtered client-side).
+  const usingDemo = !!data && data.sessions?.length === 0;
+  const view = usingDemo
+    ? { ...DEMO_IMPROVEMENTS, sessions: DEMO_IMPROVEMENTS.sessions.filter((s) => botFilter === 'all' || s.botType === botFilter) }
+    : data;
+  const below = view?.below ?? 0.25;
   const close = useCallback(() => onOpenChange?.(null), [onOpenChange]);
 
   return (
@@ -103,14 +140,14 @@ export default function ImprovementsPanel({ ws, openId = null, onOpenChange }) {
       <Card>
         <CardHeader icon={<IconAlert className="h-4 w-4" />} title="Answers to improve"
           description={data
-            ? `${plural(data.totalSessions, 'conversation')} · ${plural(data.totalWeakAnswers, 'missed answer')} (no answer from your documents, or under ${pct(below)} confidence)`
+            ? `${plural(view.totalSessions, 'conversation')} · ${plural(view.totalWeakAnswers, 'missed answer')} (no answer from your documents, or under ${pct(below)} confidence)`
             : 'Loading…'} />
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.06] px-5 py-3">
           <Segmented label="Filter by bot" options={BOT_FILTERS} value={botFilter} onChange={setBotFilter} />
           <p className="text-xs text-fg-3">These questions point to topics your documents don't cover well yet.</p>
         </div>
         <div className="p-5">
-          {!data ? <Skeleton className="h-32" /> : data.sessions.length === 0 ? (
+          {!data ? <Skeleton className="h-32" /> : view.sessions.length === 0 ? (
             <EmptyState icon={<IconAlert className="h-5 w-5" />} title="Nothing to improve right now">
               When your Sales or Support bot can't answer from your documents, or answers with less than {pct(below)} confidence,
               the conversation shows up here with the question it struggled with.
@@ -118,9 +155,9 @@ export default function ImprovementsPanel({ ws, openId = null, onOpenChange }) {
           ) : (
             <>
               <ul className="space-y-3">
-                {data.sessions.map((s) => <ImprovementCard key={s.id} session={s} below={below} onOpen={(id) => onOpenChange?.(id)} />)}
+                {view.sessions.map((s) => <ImprovementCard key={s.id} session={s} below={below} onOpen={(id) => onOpenChange?.(id)} />)}
               </ul>
-              {data.nextPage != null && (
+              {view.nextPage != null && (
                 <div className="mt-4 flex justify-center">
                   <Button variant="ghost" size="sm" loading={loadingMore} onClick={loadMore}>Load older conversations</Button>
                 </div>

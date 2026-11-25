@@ -79,7 +79,7 @@ export default function TestChatCard({
       </div>
 
       {messages.length === 0 && (
-        <div className="mt-6">
+        <div className="mt-6 mb-[120px]">
           <div className="mb-2 flex items-center justify-between gap-3">
             <p className="orb-small text-orb-secondary">{generating ? 'Writing suggested questions from your content…' : 'Suggested from your knowledge'}</p>
             <button type="button" onClick={onRefresh} disabled={generating}

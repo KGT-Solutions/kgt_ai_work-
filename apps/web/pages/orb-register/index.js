@@ -21,7 +21,7 @@ export default function OrbRegister() {
   // ── Lifted onboarding state ───────────────────────────────────────────────
   const [account, setAccount] = useState({ email: '', password: '' });
   const [verification, setVerification] = useState(null); // { email, token } after OTP
-  const [company, setCompany] = useState({ companyName: '', contactName: '', industry: 'fertility', industryLabel: 'Fertility & IVF clinic' });
+  const [company, setCompany] = useState({ companyName: '', contactName: '', industry: 'healthcare', industryLabel: 'Healthcare' });
   const [bots, setBots] = useState({ support: true, sales: true });
   const [entries, setEntries] = useState([]);
 

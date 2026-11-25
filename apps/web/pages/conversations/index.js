@@ -1,8 +1,10 @@
 import { useState } from 'react';
 import Head from 'next/head';
 import OrbShell from '../../components/shell/OrbShell';
-import { Chip, Select } from '../../components/orb';
-import { ConversationList, ConversationDetail } from '../../components/orb/conversations';
+import { Chip, Select, Segmented } from '../../components/orb';
+import { ConversationList, ConversationDetail, RealConversations } from '../../components/orb/conversations';
+
+const BOT_OPTIONS = [{ value: 'all', label: 'All bots' }, { value: 'support', label: 'Support' }, { value: 'sales', label: 'Sales' }];
 
 // Conversations page. DATA CONTAINER: owns the list/detail data + UI state
 // (filter tab, selected conversation). Swap DATA for an API/state source later.
@@ -48,9 +50,11 @@ const DATA = {
 };
 
 export default function ConversationsPage() {
+  const [mode, setMode] = useState('dummy'); // 'dummy' = mock design · 'real' = Sessions API
   const [tab, setTab] = useState('all');
   const [range, setRange] = useState('7d');
   const [branch, setBranch] = useState('all');
+  const [botFilter, setBotFilter] = useState('all'); // real mode — the one API-backed filter
   const [selected, setSelected] = useState(DATA.list[0].id);
 
   return (
@@ -60,10 +64,17 @@ export default function ConversationsPage() {
         <div className="mx-auto flex w-full max-w-[1200px] flex-col gap-6">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div>
-              <h1 className="orb-page-title text-orb-ink">Conversations</h1>
+              <div className="flex items-center gap-3">
+                <h1 className="orb-page-title text-orb-ink">Conversations</h1>
+                <Segmented ariaLabel="Data source" value={mode} onChange={setMode}
+                  options={[{ value: 'dummy', label: 'Dummy' }, { value: 'real', label: 'Real' }]} />
+              </div>
               <p className="mt-1 orb-body text-orb-secondary">Every chat visitors had with Orb. Read the transcript, see where each answer came from, fix a wrong one.</p>
             </div>
             <div className="flex flex-wrap items-center gap-3">
+              {mode === 'real' && (
+                <Select ariaLabel="Bot" value={botFilter} options={BOT_OPTIONS} onChange={(e) => setBotFilter(e.target.value)} />
+              )}
               <Select ariaLabel="Date range" value={range} options={DATA.rangeOptions} onChange={(e) => setRange(e.target.value)} />
               <Select ariaLabel="Branch" value={branch} options={DATA.branchOptions} onChange={(e) => setBranch(e.target.value)} />
             </div>
@@ -75,17 +86,21 @@ export default function ConversationsPage() {
             ))}
           </div>
 
-          <div className="grid min-h-[560px] grid-cols-1 overflow-hidden rounded-2xl border border-orb-hairline bg-orb-white lg:h-[calc(100vh-232px)] lg:grid-cols-[380px_1fr]">
-            <ConversationList
-              header={DATA.listHeader}
-              items={DATA.list}
-              selectedId={selected}
-              onSelect={setSelected}
-              footerNote={DATA.listFooter}
-              className="border-b border-orb-hairline lg:border-b-0 lg:border-r"
-            />
-            <ConversationDetail convo={DATA.detail} />
-          </div>
+          {mode === 'real' ? (
+            <RealConversations botType={botFilter} />
+          ) : (
+            <div className="grid min-h-[560px] grid-cols-1 overflow-hidden rounded-2xl border border-orb-hairline bg-orb-white lg:h-[calc(100vh-232px)] lg:grid-cols-[380px_1fr]">
+              <ConversationList
+                header={DATA.listHeader}
+                items={DATA.list}
+                selectedId={selected}
+                onSelect={setSelected}
+                footerNote={DATA.listFooter}
+                className="border-b border-orb-hairline lg:border-b-0 lg:border-r"
+              />
+              <ConversationDetail convo={DATA.detail} />
+            </div>
+          )}
         </div>
       </OrbShell>
     </>
