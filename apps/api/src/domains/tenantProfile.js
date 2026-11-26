@@ -1,4 +1,5 @@
 const prisma = require('../lib/prisma');
+const { logger } = require('../lib/logger');
 const { parseIntoChunks } = require('../engine/knowledgeLoader');
 const { conversationalStyleRules } = require('../engine/promptBuilder');
 const { languageDirective } = require('../engine/language');
@@ -57,7 +58,7 @@ async function invalidateTenantKnowledge(tenantId) {
 function syncTenantChunksInBackground(tenantId, chunks) {
   require('../services/shared/chunkStore')
     .syncTenantChunks(tenantId, chunks)
-    .catch((err) => console.warn(`[tenantProfile] chunk sync failed for tenant ${tenantId}: ${err.message}`));
+    .catch((err) => logger.warn(`[tenantProfile] chunk sync failed for tenant ${tenantId}: ${err.message}`));
 }
 
 async function loadTenantKnowledge(tenantId) {
@@ -432,7 +433,7 @@ const SOURCE_PRIORITY_RULE = `Each excerpt is labelled with its source type. If 
 // specifically so a support answer never ships on a weak/uncertain match.
 // ---------------------------------------------------------------------
 
-function supportSystemPrompt({ tenant }) {
+function supportSystemPrompt({ tenant, clientInstructions }) {
   const { persona, toneHint } = baseRules(tenant);
   return `You are the support assistant for ${tenant.name} (${tenant.industryLabel}), helping a customer
 over chat.
@@ -479,7 +480,7 @@ GROUNDING RULES (follow all of these, no exceptions):
     links. NEVER write any Markdown links, image URLs, or raw text links/URLs in your message — rely
     entirely on the cards for every image and link, and don't restate a price-and-link list in prose.
 
-${conversationalStyleRules({ sentinel: SUPPORT_SENTINEL, allowSteps: true })}${toneHint}${persona}`;
+${conversationalStyleRules({ sentinel: SUPPORT_SENTINEL, allowSteps: true })}${toneHint}${persona}${clientInstructions || ''}`;
 }
 
 /** @returns {import('../engine/domainProfile').DomainProfile} */
@@ -550,7 +551,7 @@ function createTenantSupportProfile(tenant) {
 // request for the same tenant to leak through.
 // ---------------------------------------------------------------------
 
-function salesSystemPrompt({ tenant }) {
+function salesSystemPrompt({ tenant, clientInstructions }) {
   const { persona, toneHint } = baseRules(tenant);
   return `You are a persuasive but strictly honest sales assistant for ${tenant.name} (${tenant.industryLabel}),
 chatting with a prospective customer. Bring genuine enthusiasm and charm: you clearly believe in the
@@ -604,7 +605,7 @@ GROUNDING RULES (follow all of these, no exceptions):
     URLs, or raw text links/URLs in your message — rely entirely on the cards for every image and
     link, and don't restate a price-and-link list in prose.
 
-${conversationalStyleRules({ sentinel: SALES_SENTINEL })}${toneHint}${persona}`;
+${conversationalStyleRules({ sentinel: SALES_SENTINEL })}${toneHint}${persona}${clientInstructions || ''}`;
 }
 
 /** @returns {import('../engine/domainProfile').DomainProfile} */

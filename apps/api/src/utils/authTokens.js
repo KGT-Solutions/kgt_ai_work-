@@ -14,7 +14,16 @@ const DEV_JWT_SECRET = 'dev-secret-change-me'; // assertProdSafety refuses to bo
 //          /register/complete (services/verificationService.js)  { email, verificationId }
 // crm_oauth — short-lived state carried through a CRM OAuth redirect so the
 //          public callback can trust which tenant/region it's for (routes/crmOAuth.routes.js) { tenantId, region }
-const TOKEN_TTL = { operator: '12h', client: '7d', signup: '2h', crm_oauth: '15m' };
+// email_oauth — short-lived state carried through a Google/Microsoft email OAuth
+//          redirect, so the public callback trusts the tenant/provider it's for
+//          (routes/emailOAuth.routes.js) { tenantId, provider, actor }
+// sheets_oauth — short-lived state carried through a Google Sheets OAuth redirect,
+//          so the public callback trusts which tenant it's for (Feature 8,
+//          routes/sheetsOAuth.routes.js) { tenantId, actor }
+// hubspot_oauth — short-lived state carried through a HubSpot CRM OAuth redirect,
+//          so the public callback trusts which tenant it's for (Feature 9,
+//          routes/hubspotOAuth.routes.js) { tenantId }
+const TOKEN_TTL = { operator: '12h', client: '7d', signup: '2h', crm_oauth: '15m', email_oauth: '15m', sheets_oauth: '15m', hubspot_oauth: '15m' };
 
 function jwtSecret() {
   return process.env.JWT_SECRET || DEV_JWT_SECRET;

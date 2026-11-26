@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Badge, Button, ButtonLink, Card, CardHeader, EmptyState, Segmented, Skeleton, Spinner, cx } from '../ui';
+import { Badge, Button, ButtonLink, Card, CardHeader, EmptyState, Input, Segmented, Skeleton, Spinner, cx } from '../ui';
 import { useToast } from '../ui/toast';
-import { IconLayers, IconMail, IconSpark, IconX } from '../ui/icons';
+import { IconDocs, IconLayers, IconMail, IconSearch, IconSpark, IconX } from '../ui/icons';
 import { BOTS, SummaryText, TranscriptToggle, intentLine, outcomeLine } from './ConversationParts';
+import RetentionSettings from './RetentionSettings';
 
 // Session-wise history: every conversation with the tenant's bots, newest
 // activity first, each with its AI summary (services/chatSessions.js on the
@@ -13,6 +14,8 @@ import { BOTS, SummaryText, TranscriptToggle, intentLine, outcomeLine } from './
 // written (or a chat is still fresh), the list refreshes itself.
 
 const BOT_FILTERS = [{ value: 'all', label: 'All bots' }, { value: 'sales', label: 'Sales' }, { value: 'support', label: 'Support' }];
+const STATUS_FILTERS = [{ value: 'all', label: 'All' }, { value: 'active', label: 'Active' }, { value: 'paused', label: 'Paused' }];
+const ESCALATED_FILTERS = [{ value: 'all', label: 'All' }, { value: 'yes', label: 'Escalated' }, { value: 'no', label: 'Not escalated' }];
 const POLL_MS = 15000;
 const FRESH_MS = 5 * 60 * 1000; // a chat this recent may get its summary any moment
 
@@ -50,6 +53,26 @@ function LeadBadges({ leads }) {
   return <Badge tone={waiting ? 'warning' : 'success'} dot={waiting}>{waiting ? 'Lead · New' : 'Lead · Contacted'}</Badge>;
 }
 
+// A paused conversation gets no bot replies. 'spam' = auto-paused by the spam
+// guardrail; 'manual' = a human paused it from here.
+function PausedBadge({ session }) {
+  if (!session?.pausedAt) return null;
+  return <Badge tone="danger" dot>{session.pauseReason === 'spam' ? 'Paused · spam' : 'Paused'}</Badge>;
+}
+
+// This conversation raised a ticket (was handed off to a person). helpdeskSynced
+// = it also opened a ticket in the connected helpdesk (Feature 5).
+function EscalatedBadge({ session }) {
+  if (!session?.escalated) return null;
+  return <Badge tone="warning">{session.helpdeskSynced ? 'Escalated · helpdesk' : 'Escalated'}</Badge>;
+}
+
+// This conversation has at least one spoken (Speech-to-Speech) turn (Feature 4).
+function VoiceBadge({ session }) {
+  if (!session?.hasVoice) return null;
+  return <Badge tone="violet">Voice</Badge>;
+}
+
 function SessionRow({ session, onOpen }) {
   const bot = BOTS[session.botType];
   return (
@@ -61,6 +84,9 @@ function SessionRow({ session, onOpen }) {
           <span className="truncate text-sm font-medium text-fg">{visitorLabel(session)}</span>
           {bot && <Badge tone={bot.tone}>{bot.label}</Badge>}
           <LeadBadges leads={session.leads} />
+          <EscalatedBadge session={session} />
+          <VoiceBadge session={session} />
+          <PausedBadge session={session} />
           <span className="ml-auto text-xs text-fg-3">{when(session)} · {session.messageCount} messages</span>
         </div>
         <div className="mt-2"><SummaryState session={session} compact /></div>
@@ -123,6 +149,32 @@ export function SessionDrawer({ ws, sessionId, onClose, onChanged }) {
     }
   };
 
+  // Pause a conversation (no more bot replies) or resume it. The endpoints
+  // return the session's own fields, so merge them in and keep messages/leads.
+  const togglePause = async () => {
+    setBusy('pause');
+    try {
+      const next = session.pausedAt ? await ws.resumeSession(sessionId) : await ws.pauseSession(sessionId);
+      setSession((s) => ({ ...s, ...next }));
+      onChanged();
+    } catch (e) {
+      toast.error(e.message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const exportCsv = async () => {
+    setBusy('export');
+    try {
+      await ws.exportSessionCsv(sessionId);
+    } catch (e) {
+      toast.error(e.message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const bot = BOTS[session?.botType];
   return (
     <div className="fixed inset-0 z-50 flex justify-end" role="dialog" aria-modal="true" aria-label="Conversation">
@@ -134,6 +186,8 @@ export function SessionDrawer({ ws, sessionId, onClose, onChanged }) {
               <h3 className="text-sm font-semibold text-fg">Session <span className="font-mono">{shortId(sessionId)}</span></h3>
               {bot && <Badge tone={bot.tone}>{bot.label}</Badge>}
               {session?.endedAt && <Badge>Ended</Badge>}
+              <VoiceBadge session={session} />
+              <PausedBadge session={session} />
             </div>
             {session && (
               <p className="text-xs text-fg-3">
@@ -141,12 +195,28 @@ export function SessionDrawer({ ws, sessionId, onClose, onChanged }) {
               </p>
             )}
           </div>
-          <Button size="sm" variant="ghost" onClick={onClose} aria-label="Close"><IconX className="h-4 w-4" /></Button>
+          <div className="flex items-center gap-1.5">
+            {session && <Button size="sm" variant="ghost" loading={busy === 'export'} onClick={exportCsv}><IconDocs className="h-4 w-4" /> CSV</Button>}
+            <Button size="sm" variant="ghost" onClick={onClose} aria-label="Close"><IconX className="h-4 w-4" /></Button>
+          </div>
         </header>
 
         <div className="flex-1 space-y-6 overflow-y-auto px-5 py-5">
           {error ? <p className="text-[13px] text-rose-300">{error}</p> : !session ? <Skeleton className="h-64" /> : (
             <>
+              <section className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2.5">
+                <p className="text-[13px] text-fg-2">
+                  {session.pausedAt
+                    ? (session.pauseReason === 'spam'
+                      ? 'Auto-paused as spam — the bot has stopped replying.'
+                      : 'Paused — the bot has stopped replying.')
+                    : 'The bot is replying to this visitor.'}
+                </p>
+                <Button size="sm" variant={session.pausedAt ? 'primary' : 'secondary'} loading={busy === 'pause'} onClick={togglePause}>
+                  {session.pausedAt ? 'Resume bot' : 'Pause conversation'}
+                </Button>
+              </section>
+
               <section>
                 <div className="mb-2 flex items-center justify-between gap-2">
                   <h4 className="text-[11px] font-medium uppercase tracking-[0.1em] text-fg-3">AI summary</h4>
@@ -179,7 +249,7 @@ export function SessionDrawer({ ws, sessionId, onClose, onChanged }) {
                 </section>
               )}
 
-              <TranscriptToggle messages={session.messages} />
+              <TranscriptToggle messages={session.messages} tenantId={session.tenantId} />
             </>
           )}
         </div>
@@ -195,20 +265,36 @@ export function SessionDrawer({ ws, sessionId, onClose, onChanged }) {
 export default function SessionsPanel({ ws, openId = null, onOpenChange }) {
   const toast = useToast();
   const [botFilter, setBotFilter] = useState('all');
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [escalatedFilter, setEscalatedFilter] = useState('all');
+  const [searchInput, setSearchInput] = useState('');
+  const [search, setSearch] = useState(''); // debounced
+  const [from, setFrom] = useState('');
+  const [to, setTo] = useState('');
   const [sessions, setSessions] = useState(null);
   const [nextCursor, setNextCursor] = useState(null);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const latest = useRef(0);
 
-  // The first page, for the current filter; only the newest request's answer is kept.
+  // Debounce the search box so typing doesn't fire a request per keystroke.
+  useEffect(() => {
+    const t = setTimeout(() => setSearch(searchInput.trim()), 350);
+    return () => clearTimeout(t);
+  }, [searchInput]);
+
+  // The current filter set, shared by the list, pagination and CSV export.
+  const filters = { botType: botFilter, status: statusFilter, escalated: escalatedFilter, q: search, from, to };
+
+  // The first page, for the current filters; only the newest request's answer is kept.
   const load = useCallback(() => {
     const id = ++latest.current;
-    return ws.listSessions({ botType: botFilter }).then((res) => {
+    return ws.listSessions({ botType: botFilter, status: statusFilter, escalated: escalatedFilter, q: search, from, to }).then((res) => {
       if (id !== latest.current) return;
       setSessions(res.sessions);
       setNextCursor(res.nextCursor);
     });
-  }, [ws, botFilter]);
+  }, [ws, botFilter, statusFilter, escalatedFilter, search, from, to]);
 
   useEffect(() => {
     setSessions(null);
@@ -226,7 +312,7 @@ export default function SessionsPanel({ ws, openId = null, onOpenChange }) {
   const loadMore = async () => {
     setLoadingMore(true);
     try {
-      const res = await ws.listSessions({ botType: botFilter, cursor: nextCursor });
+      const res = await ws.listSessions({ ...filters, cursor: nextCursor });
       setSessions((list) => [...list, ...res.sessions.filter((s) => !list.some((x) => x.id === s.id))]);
       setNextCursor(res.nextCursor);
     } catch (e) {
@@ -236,21 +322,52 @@ export default function SessionsPanel({ ws, openId = null, onOpenChange }) {
     }
   };
 
+  const exportCsv = async () => {
+    setExporting(true);
+    try {
+      await ws.exportSessionsCsv(filters);
+    } catch (e) {
+      toast.error(e.message);
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const filtered = botFilter !== 'all' || statusFilter !== 'all' || escalatedFilter !== 'all' || !!search || !!from || !!to;
   const open = (id) => onOpenChange?.(id);
   const close = useCallback(() => onOpenChange?.(null), [onOpenChange]);
 
   return (
     <>
       <Card>
-        <CardHeader icon={<IconLayers className="h-4 w-4" />} title="Session history"
-          description="Every conversation with your bots, with an AI summary of what the visitor wanted and how it ended." />
-        <div className="flex flex-wrap gap-2 border-b border-white/[0.06] px-5 py-3">
-          <Segmented label="Filter by bot" options={BOT_FILTERS} value={botFilter} onChange={setBotFilter} />
+        <CardHeader icon={<IconLayers className="h-4 w-4" />} title="Chat logs"
+          description="Every conversation with your bots, with an AI summary of what the visitor wanted and how it ended."
+          action={<Button size="sm" variant="secondary" loading={exporting} onClick={exportCsv}><IconDocs className="h-4 w-4" /> Export CSV</Button>} />
+        <div className="space-y-3 border-b border-white/[0.06] px-5 py-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <Segmented label="Filter by bot" options={BOT_FILTERS} value={botFilter} onChange={setBotFilter} />
+            <Segmented label="Filter by status" options={STATUS_FILTERS} value={statusFilter} onChange={setStatusFilter} />
+            <Segmented label="Filter by escalation" options={ESCALATED_FILTERS} value={escalatedFilter} onChange={setEscalatedFilter} />
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative min-w-[14rem] flex-1">
+              <IconSearch className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-fg-3" />
+              <Input value={searchInput} onChange={(e) => setSearchInput(e.target.value)} placeholder="Search transcripts, summaries, visitor…" className="pl-9" aria-label="Search conversations" />
+            </div>
+            <label className="flex items-center gap-1.5 text-[12.5px] text-fg-3">From
+              <Input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className="h-9 w-[9.5rem]" aria-label="From date" />
+            </label>
+            <label className="flex items-center gap-1.5 text-[12.5px] text-fg-3">To
+              <Input type="date" value={to} onChange={(e) => setTo(e.target.value)} className="h-9 w-[9.5rem]" aria-label="To date" />
+            </label>
+          </div>
         </div>
         <div className="p-5">
           {!sessions ? <Skeleton className="h-32" /> : sessions.length === 0 ? (
-            <EmptyState icon={<IconLayers className="h-5 w-5" />} title={botFilter === 'all' ? 'No conversations yet' : 'No conversations with this bot yet'}>
-              Once visitors chat with your Sales or Support bot, each conversation shows up here with a summary.
+            <EmptyState icon={<IconLayers className="h-5 w-5" />} title={filtered ? 'No conversations match these filters' : 'No conversations yet'}>
+              {filtered
+                ? 'Try widening the date range, clearing the search, or switching the filters back to “All”.'
+                : 'Once visitors chat with your Sales or Support bot, each conversation shows up here with a summary.'}
             </EmptyState>
           ) : (
             <>
@@ -266,6 +383,7 @@ export default function SessionsPanel({ ws, openId = null, onOpenChange }) {
           )}
         </div>
       </Card>
+      <RetentionSettings ws={ws} onPurged={() => load().catch(() => {})} />
       {openId && <SessionDrawer ws={ws} sessionId={openId} onClose={close} onChanged={() => load().catch(() => {})} />}
     </>
   );

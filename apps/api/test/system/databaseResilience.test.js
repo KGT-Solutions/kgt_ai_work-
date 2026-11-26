@@ -48,8 +48,14 @@ describe('system: database unavailable', () => {
     });
     assert.equal(r.status, 500);
     const body = await r.json();
-    assert.deepEqual(body, { error: 'Internal server error' });
+    // Generic message plus the request's correlation id (middleware/requestId.js),
+    // and nothing else — no stack trace, no connection string.
+    assert.equal(body.error, 'Internal server error');
+    assert.ok(typeof body.requestId === 'string' && body.requestId.length > 0, 'a requestId is returned');
+    assert.deepEqual(Object.keys(body).sort(), ['error', 'requestId']);
     assert.ok(!JSON.stringify(body).includes('secret-db-password'));
+    // The id the client was handed is also echoed in the response header.
+    assert.equal(r.headers.get('x-request-id'), body.requestId);
   });
 
   test('the process survives repeated failures and keeps serving', async () => {

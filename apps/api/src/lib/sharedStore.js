@@ -70,7 +70,11 @@ const keys = {
   productContext: (tenantId, sessionId) => `pc:${tenantId}:${sessionId}`,
   // Bumped by every Theme Studio write, so each replica's cached widget theme
   // (services/branding.js publicTheme) is dropped on the next request.
-  brandingGeneration: (tenantId) => `bg:${tenantId}`
+  brandingGeneration: (tenantId) => `bg:${tenantId}`,
+  // Operator error-alert throttles (services/errorAlerts.js): one dedup slot per
+  // distinct error signature, and one global sliding window as the hourly cap.
+  errorAlertDedup: (sig) => `ea:d:${sig}`,
+  errorAlert: () => 'ea:g'
 };
 
 /**

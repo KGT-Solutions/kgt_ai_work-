@@ -1,4 +1,5 @@
 const nodemailer = require('nodemailer');
+const { logger } = require('../lib/logger');
 
 // Transactional email: password-reset codes, the visitor's lead
 // confirmation, and alerts to a tenant's own team (services/teamAlerts.js:
@@ -163,7 +164,7 @@ function classifyMailError(err) {
 }
 
 function logFailure({ label, recipients, via, failure }) {
-  console.error(
+  logger.error(
     `[mailer] ERROR: email NOT sent${label ? ` (${label})` : ''} to ${recipients.map(maskAddress).join(', ')} via ${via}: ` +
     `${failure.reason}${failure.detail ? ` - ${failure.detail}` : ''}\n[mailer]   fix: ${failure.hint}`
   );
@@ -192,6 +193,25 @@ async function sendMail({ to, subject, text, html, replyTo, label, devSummary, t
   // NOT silently retried via the platform, so a tenant's mail never goes out
   // from the platform identity behind their back.
   if (tenantId) {
+    // A tenant's Google/Microsoft OAuth connection takes precedence over their
+    // SMTP and the platform (services/emailConnection.js, sent via the Gmail
+    // API / Microsoft Graph). As with tenant SMTP, a failure here is reported
+    // and NOT silently retried via the platform, so a tenant's mail never goes
+    // out from the platform identity behind their back. Resolution never throws
+    // (a broken/removed connection returns null and falls through to SMTP).
+    let oauth = null;
+    try { oauth = await require('./emailConnection').resolveOAuthSender(tenantId); } catch { oauth = null; }
+    if (oauth) {
+      try {
+        await oauth.send({ from: oauth.from, to: recipients, subject, text, ...(html ? { html } : {}), ...(replyTo ? { replyTo } : {}) });
+        return { sent: true, via: `oauth-${oauth.provider}` };
+      } catch (err) {
+        const failure = classifyMailError(err);
+        logFailure({ label, recipients, via: `oauth-${oauth.provider}`, failure });
+        return { sent: false, via: `oauth-${oauth.provider}`, reason: failure.reason, transient: failure.transient, error: failure.detail };
+      }
+    }
+
     let override = null;
     try { override = await require('./tenantSmtp').resolveTenantTransport(tenantId); } catch { override = null; }
     if (override) {
@@ -252,7 +272,7 @@ async function sendMail({ to, subject, text, html, replyTo, label, devSummary, t
     logFailure({ label, recipients, via: 'none', failure: { reason: 'not-configured', detail: 'no mail transport is configured', hint: NOT_CONFIGURED_HINT } });
     return { sent: false, via: 'none', reason: 'not-configured', transient: false, error: 'Email is not configured' };
   }
-  console.warn(`[mailer:dev] NOT delivered (no mail transport, printed instead) to=${recipients.join(',')} subject="${subject}" ${devSummary || text}`);
+  logger.warn(`[mailer:dev] NOT delivered (no mail transport, printed instead) to=${recipients.join(',')} subject="${subject}" ${devSummary || text}`);
   return { sent: true, via: 'dev-log', simulated: true };
 }
 

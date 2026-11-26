@@ -1,3 +1,4 @@
+const { logger } = require('../lib/logger');
 // Thin LLM orchestration layer. Uses Node's built-in `fetch` (Node >= 18) so
 // no SDK dependency is required. Supports Groq, OpenAI, and Anthropic
 // (Claude). generateAnswer() tries LLM_PRIMARY first, then each provider in
@@ -336,7 +337,7 @@ async function generateAnswer({ systemPrompt, userPrompt, maxTokens }) {
       if (attempts.length) {
         // Answered, but not by the primary — worth knowing (a dead primary
         // key otherwise hides behind a working fallback indefinitely).
-        console.warn(`[llm] answered by fallback "${provider}" after: ${formatAttempts(attempts)}`);
+        logger.warn(`[llm] answered by fallback "${provider}" after: ${formatAttempts(attempts)}`);
       }
       return result;
     } catch (err) {

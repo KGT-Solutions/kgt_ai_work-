@@ -5,6 +5,8 @@ const helmet = require('helmet');
 const { corsPolicy } = require('./utils/corsPolicy');
 const { wrapRouterAsync } = require('./utils/wrapAsync');
 const { errorHandler } = require('./middleware/errorHandler');
+const { requestId } = require('./middleware/requestId');
+const { accessLog } = require('./middleware/accessLog');
 const { requireOperator } = require('./middleware/operatorAuth');
 const { requireClient } = require('./middleware/clientAuth');
 
@@ -17,7 +19,11 @@ const publicRegisterRoutes = require('./routes/publicRegister.routes');
 const publicAuthRoutes = require('./routes/publicAuth.routes');
 const crmWebhookRoutes = require('./routes/crmWebhook.routes');
 const crmOAuthRoutes = require('./routes/crmOAuth.routes');
+const emailOAuthRoutes = require('./routes/emailOAuth.routes');
+const sheetsOAuthRoutes = require('./routes/sheetsOAuth.routes');
+const hubspotOAuthRoutes = require('./routes/hubspotOAuth.routes');
 const brandAssetRoutes = require('./routes/brandAssets.routes');
+const chatImageRoutes = require('./routes/chatImages.routes');
 
 const app = express();
 // The API sits behind one proxy hop (Docker / the reverse proxy), so req.ip
@@ -26,6 +32,15 @@ const app = express();
 // match the real number of proxies: set it to 0 if the API is ever exposed
 // directly, or visitors could spoof X-Forwarded-For to dodge rate limits.
 app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS ?? 1));
+// FIRST middleware: tag the request with a correlation id (X-Request-Id, echoed
+// back) and open the async-context scope that lib/logger.js reads, so every log
+// line for this request — including body-parser errors handled below — carries
+// the same id. Registered before helmet so the header is on every response.
+app.use(requestId);
+// One structured access-log line per request on finish (method/path/status/
+// duration + reqId). Right after requestId so req.id exists and the timer spans
+// the whole request, including the body parsers and routes below.
+app.use(accessLog);
 // Standard security headers (HSTS, X-Content-Type-Options, X-Frame-Options,
 // a default CSP, referrer policy, etc.). Registered before the routes so every
 // response carries them, including the embeddable widget script and the chat API.
@@ -45,7 +60,16 @@ app.use(helmet({
 app.use(corsPolicy());
 // Default 100kb is too small for /public/register/complete, which carries up to
 // 25 reviewed pages (see MAX_PAGES_ON_COMPLETE / MAX_CONTENT_LEN there).
-app.use(express.json({ limit: '10mb' }));
+// Inbound CRM webhooks (HubSpot, Feature 9) are signed over the EXACT request
+// bytes, so stash the raw body for those paths only — the signature can't be
+// re-derived from the parsed object. Scoped to /api/v1/webhooks/ to avoid holding
+// a second copy of every request body in memory.
+app.use(express.json({
+  limit: '10mb',
+  verify: (req, _res, buf) => {
+    if (req.originalUrl && req.originalUrl.startsWith('/api/v1/webhooks/')) req.rawBody = buf;
+  }
+}));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 // Tenant chat widget: customers embed it with one
 // <script src="{API_BASE}/widgets/tenant-chat-widget.js" data-tenant-id data-api-key> tag.
@@ -78,8 +102,19 @@ app.use('/api/v1/public/auth', wrapRouterAsync(publicAuthRoutes)); // signup ema
 // CRM OAuth consent callback — public (the browser lands here from Zoho),
 // authenticated by the signed state it carries (routes/crmOAuth.routes.js).
 app.use('/api/v1/public/crm', wrapRouterAsync(crmOAuthRoutes));
+// Email send OAuth consent callback — public, authenticated by the signed state
+// it carries (routes/emailOAuth.routes.js). Google / Microsoft land here.
+app.use('/api/v1/public/email', wrapRouterAsync(emailOAuthRoutes));
+// Google Sheets sync OAuth consent callback — public, authenticated by the signed
+// state it carries (Feature 8, routes/sheetsOAuth.routes.js).
+app.use('/api/v1/public/sheets', wrapRouterAsync(sheetsOAuthRoutes));
+// HubSpot CRM OAuth consent callback — public, authenticated by the signed state
+// it carries (Feature 9, routes/hubspotOAuth.routes.js).
+app.use('/api/v1/public/hubspot', wrapRouterAsync(hubspotOAuthRoutes));
 // Uploaded logos for the widget's <img> — public, content-addressed (brandAssets.routes.js).
 app.use('/api/v1/public/brand-assets', wrapRouterAsync(brandAssetRoutes));
+// Visitor-uploaded chat images for Chat Logs and lead alerts — content-addressed (chatImages.routes.js).
+app.use('/api/v1/public/chat-images', wrapRouterAsync(chatImageRoutes));
 // Inbound CRM status webhooks — public, authenticated by a shared secret
 // (routes/crmWebhook.routes.js), never a client/operator token.
 app.use('/api/v1/webhooks', wrapRouterAsync(crmWebhookRoutes));

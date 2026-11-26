@@ -1,4 +1,5 @@
 const express = require('express');
+const { logger } = require('../lib/logger');
 const { createIpRateLimiter } = require('../utils/ipRateLimit');
 const { sendSignupOtp, verifySignupOtp, VerificationError } = require('../services/verificationService');
 const { requestPasswordReset, resetPassword, PasswordResetError } = require('../services/passwordResetService');
@@ -60,7 +61,7 @@ router.post('/forgot-password', async (req, res) => {
   try {
     res.json(await requestPasswordReset(email));
   } catch (err) {
-    if (err instanceof PasswordResetError) console.warn(`[auth] password reset refused for ${maskAddress(email)}: ${err.extra.code || err.message}`);
+    if (err instanceof PasswordResetError) logger.warn(`[auth] password reset refused for ${maskAddress(email)}: ${err.extra.code || err.message}`);
     sendError(res, err);
   }
 });
@@ -70,7 +71,7 @@ router.post('/reset-password', async (req, res) => {
   const email = String(req.body?.email || '').trim().toLowerCase();
   try {
     res.json(await resetPassword(email, req.body?.otp, req.body?.newPassword));
-    console.log(`[auth] password reset for ${maskAddress(email)}`);
+    logger.info(`[auth] password reset for ${maskAddress(email)}`);
   } catch (err) {
     sendError(res, err);
   }

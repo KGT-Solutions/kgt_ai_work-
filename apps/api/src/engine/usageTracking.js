@@ -1,4 +1,5 @@
 const prisma = require('../lib/prisma');
+const { logger } = require('../lib/logger');
 const { store } = require('../lib/sharedStore');
 
 // Pillar 2, tracking half only (no LiteLLM, no live Stripe calls — see the
@@ -37,7 +38,7 @@ async function writeUsage(data) {
   try {
     return await prisma.usageLog.create({ data });
   } catch (err) {
-    console.error('[usageTracking] logUsage failed:', err.message);
+    logger.error('[usageTracking] logUsage failed:', err.message);
     return null; // never let logging failure break the chat response
   }
 }
@@ -133,7 +134,7 @@ async function isTenantOverBudget(tenantId) {
       over = used >= budget;
     }
   } catch (err) {
-    console.error('[usageTracking] budget check failed (failing open):', err.message);
+    logger.error('[usageTracking] budget check failed (failing open):', err.message);
     return false;
   }
   store().set(cacheKey, over, BUDGET_CACHE_TTL_MS).catch(() => {}); // best-effort

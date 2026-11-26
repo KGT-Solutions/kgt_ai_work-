@@ -25,6 +25,7 @@
 // authority before any DB write, and SKUs are backfilled there from the name.
 
 const { distillMarkdown } = require('../llm-distillation/llmDistillation');
+const { logger } = require('../../lib/logger');
 
 const MAX_PRODUCTS = 200;   // abuse/noise ceiling for one ingest
 const MAX_NAME = 255;       // keep in step with catalogIngest MAX
@@ -355,7 +356,7 @@ async function extractProducts(text, { title = '', useLlm = false, generate, dis
     const r = await distill(String(text || ''), { title, ...(generate ? { generate } : {}) });
     llm = Array.isArray(r && r.products) ? r.products : [];
   } catch (err) {
-    console.warn(`[productExtractor] LLM extraction skipped: ${err.message}`);
+    logger.warn(`[productExtractor] LLM extraction skipped: ${err.message}`);
   }
   return mergeProducts(heuristic, llm);
 }

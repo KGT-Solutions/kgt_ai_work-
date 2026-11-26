@@ -20,6 +20,7 @@
 // a visitor — except a security hit, which is a deliberate hard stop.
 
 const { parseImageDataUrl, parseClassification, guardrailFallbackMessage } = require('./imageGuardrail');
+const { logger } = require('../../lib/logger');
 
 let sharpLib = null;
 try { sharpLib = require('sharp'); } catch { sharpLib = null; } // optional; Tier 1 degrades if absent
@@ -189,11 +190,11 @@ async function runImageGuardrailPipeline({ dataUrl, userText = '', tenant = null
       if (t1.reject) return { outcome: 'rejected', reason: t1.reason, security: false, text: '', productText: '' };
       const metaScan = scanForInjection(t1.metaText);
       if (metaScan.hit) {
-        console.warn(`[imageGuardrail][security] injection signature in image metadata (tenant=${tenant?.id || '-'}): ${metaScan.pattern}`);
+        logger.warn(`[imageGuardrail][security] injection signature in image metadata (tenant=${tenant?.id || '-'}): ${metaScan.pattern}`);
         return { outcome: 'rejected', reason: 'security', security: true, text: '', productText: '' };
       }
     } catch (err) {
-      console.warn(`[imageGuardrail] Tier 1 (sharp) degraded: ${err.message}`); // couldn't decode → let Tier 3 judge
+      logger.warn(`[imageGuardrail] Tier 1 (sharp) degraded: ${err.message}`); // couldn't decode → let Tier 3 judge
     }
   }
 
@@ -205,7 +206,7 @@ async function runImageGuardrailPipeline({ dataUrl, userText = '', tenant = null
   try {
     cls = parseClassification(await visionClassify({ dataUrl, sys: VISION_SYSTEM(tenant), user: visionUserPrompt(userText) }));
   } catch (err) {
-    console.warn(`[imageGuardrail] Tier 3 (groq vision) degraded: ${err.message}`);
+    logger.warn(`[imageGuardrail] Tier 3 (groq vision) degraded: ${err.message}`);
     return { outcome: 'degraded', reason: 'vision unavailable', text: '', productText: '' };
   }
   if (!cls) return { outcome: 'degraded', reason: 'unparseable vision reply', text: '', productText: '' };
@@ -213,7 +214,7 @@ async function runImageGuardrailPipeline({ dataUrl, userText = '', tenant = null
   // Security-scan the text the model read out of the image (rendered prompt injection).
   const textScan = scanForInjection(`${cls.productText} ${cls.text}`);
   if (textScan.hit) {
-    console.warn(`[imageGuardrail][security] injection signature in image text (tenant=${tenant?.id || '-'}): ${textScan.pattern}`);
+    logger.warn(`[imageGuardrail][security] injection signature in image text (tenant=${tenant?.id || '-'}): ${textScan.pattern}`);
     return { outcome: 'rejected', reason: 'security', security: true, text: '', productText: '' };
   }
   if (cls.relevant === false) return { outcome: 'rejected', reason: 'irrelevant', security: false, text: '', productText: '' };

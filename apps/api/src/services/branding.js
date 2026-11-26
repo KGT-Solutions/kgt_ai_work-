@@ -1,4 +1,5 @@
 const defaultPrisma = require('../lib/prisma');
+const { logger } = require('../lib/logger');
 const { store, keys } = require('../lib/sharedStore');
 const { scanBrand, analyzeLogoUrl, fetchLogoImage } = require('./shared/crawler');
 const { normalizeHex } = require('./shared/color');
@@ -174,7 +175,7 @@ async function refreshActiveLogo(tenant, row, prisma, { cleanLogo = cleanLinkedL
     const cleaned = await cleanLogo(url);
     return cleaned ? { customLogo: hostedLogo(cleaned, 'link') } : { linkedLogoChecked: checkedMarker(url) };
   } catch (err) {
-    console.warn(`[branding] logo refresh failed for tenant ${tenant.id}: ${err.message}`);
+    logger.warn(`[branding] logo refresh failed for tenant ${tenant.id}: ${err.message}`);
     return {};
   }
 }
@@ -216,6 +217,9 @@ function toView(row, suggestedUrl = null) {
     siteName: kit.siteName,
     themes,
     selectedThemeId: selected,
+    // The free "Powered by KGT Orb" footer strip (default shown). The permanent
+    // AI-assistant notice is not governed by this and is always shown.
+    showBranding: row?.showBranding !== false,
     source: row?.source || 'fallback',
     sourceUrl: row?.sourceUrl || suggestedUrl || null,
     scannedAt: row?.scannedAt || null
@@ -406,9 +410,12 @@ const blank = (v) => v === null || v === '';
  *   cleanLogo?: (url: string) => Promise<object|null> }} [deps]
  * @throws {BrandingError} for a malformed logo URL, colour or name, or an empty request
  */
-async function updateBrandKit(tenant, { logoUrl, primaryColor, botName } = {}, { prisma = defaultPrisma, analyzeLogo = analyzeLogoUrl, cleanLogo = cleanLinkedLogo } = {}) {
-  if (logoUrl === undefined && primaryColor === undefined && botName === undefined) {
-    throw new BrandingError('Send a logoUrl, a primaryColor and/or a botName');
+async function updateBrandKit(tenant, { logoUrl, primaryColor, botName, showBranding } = {}, { prisma = defaultPrisma, analyzeLogo = analyzeLogoUrl, cleanLogo = cleanLinkedLogo } = {}) {
+  if (logoUrl === undefined && primaryColor === undefined && botName === undefined && showBranding === undefined) {
+    throw new BrandingError('Send a logoUrl, a primaryColor, a botName and/or showBranding');
+  }
+  if (showBranding !== undefined && typeof showBranding !== 'boolean') {
+    throw new BrandingError('showBranding must be true or false');
   }
 
   let nextLogo;
@@ -465,6 +472,12 @@ async function updateBrandKit(tenant, { logoUrl, primaryColor, botName } = {}, {
   }
   if (botName !== undefined) {
     row = await prisma.tenantBranding.update({ where: { tenantId: tenant.id }, data: { botName: nextName || null } });
+    await bumpBrandingGeneration(tenant.id);
+  }
+  // Showing/hiding the free "Powered by KGT Orb" strip is a flag flip — it never
+  // regenerates the designs, like a name change.
+  if (showBranding !== undefined) {
+    row = await prisma.tenantBranding.update({ where: { tenantId: tenant.id }, data: { showBranding } });
     await bumpBrandingGeneration(tenant.id);
   }
   return toView(row, await suggestedWebsite(tenant.id, prisma));
@@ -577,15 +590,18 @@ function clearThemeCache() {
 }
 
 async function loadPublicTheme(tenant, prisma) {
-  const classic = { companyName: tenant.name, botName: null, logoUrl: null, theme: null };
+  // showBranding defaults to true, so a DB failure (classic fallback) still
+  // shows the strip; the permanent AI notice is always shown by the widget.
+  const classic = { companyName: tenant.name, botName: null, logoUrl: null, theme: null, showBranding: true };
   try {
     const row = await prisma.tenantBranding.findUnique({ where: { tenantId: tenant.id } });
     const botName = row?.botName ? cleanBotName(row.botName).slice(0, MAX_BOT_NAME) || null : null;
+    const showBranding = row?.showBranding !== false;
     const theme = row?.selectedThemeId ? themesOf(row).find((t) => t.id === row.selectedThemeId) : null;
-    if (!theme) return { ok: true, value: { ...classic, botName } };
-    return { ok: true, value: { companyName: tenant.name, botName, logoUrl: logoUrlFor(theme, effectiveLogo(row)), theme } };
+    if (!theme) return { ok: true, value: { ...classic, botName, showBranding } };
+    return { ok: true, value: { companyName: tenant.name, botName, logoUrl: logoUrlFor(theme, effectiveLogo(row)), theme, showBranding } };
   } catch (err) {
-    console.warn(`[branding] theme lookup failed for tenant ${tenant.id}: ${err.message}`);
+    logger.warn(`[branding] theme lookup failed for tenant ${tenant.id}: ${err.message}`);
     return { ok: false, value: classic };
   }
 }

@@ -6,9 +6,12 @@ const { ipBucket } = require('../services/shared/netGuard');
 const { handleChat } = require('../services/tenantChat');
 const { endSession } = require('../services/chatSessions');
 const { transcribeAudio, isSttConfigured, MAX_AUDIO_BYTES } = require('../services/shared/speechToText');
+const { isS2sConfigured } = require('../services/shared/speechToSpeech');
+const { runVoiceChat } = require('../services/voiceChat');
 const { detectLanguage } = require('../engine/language');
 const { createIpRateLimiter } = require('../utils/ipRateLimit');
 const { publicTheme } = require('../services/branding');
+const { getGuardrails, defaults: guardrailDefaults, blockedCountry, deviceKey, isDeviceRateLimited, DEFAULT_LIMIT_MESSAGE } = require('../services/guardrails');
 
 // The widget pings once per page load; this only bounds the key lookup per
 // address (the row write is throttled separately). Generous, because an office
@@ -50,6 +53,20 @@ router.use('/:slug', async (req, res, next) => {
 
     req.tenant = tenant;
     req.apiKey = key; // the validated key row, so /ping can stamp install telemetry on it
+
+    // Guardrails config, loaded once for every route under :slug. Country
+    // blocking is enforced here so a blocked visitor gets a 403 on EVERY route
+    // — including /theme, which the widget fetches at mount — and the widget
+    // tears itself down rather than chatting. Fail-open when no country header
+    // is present (services/guardrails.js). The config is also carried on the
+    // request so /chat's per-device limit and the engine's spam check reuse it
+    // without a second read. Fail-open: a guardrails read that errors falls back
+    // to platform defaults (no blocking, no per-device cap) rather than breaking
+    // the widget over a config lookup.
+    req.guardrails = await getGuardrails(tenant.id).catch(() => guardrailDefaults());
+    const blocked = blockedCountry(req.headers, req.guardrails.blockedCountries);
+    if (blocked) return res.status(403).json({ error: 'This chat is not available in your region.', blocked: 'country' });
+
     next();
   } catch (err) {
     next(err);
@@ -73,7 +90,30 @@ async function limitVisitor(req, res, next) {
   next();
 }
 
-router.post('/:slug/chat', limitVisitor, handleChat);
+// The tenant's own per-device rate limit (dashboard → Guardrails), on top of
+// the platform limits above. Unlike those, hitting it is NOT an error: the
+// visitor gets a 200 carrying the configured limitMessage in place of a bot
+// reply, so the widget shows it as a normal message and the conversation
+// continues once the window resets. The device is the WhatsApp phone, else the
+// widget browserId + IP, else the IP (services/guardrails.js deviceKey). A
+// tenant that set no maxMessages/windowSeconds has no per-device cap.
+async function limitDevice(req, res, next) {
+  const g = req.guardrails;
+  if (!g?.maxMessages || !g?.windowSeconds) return next();
+  const device = deviceKey({ body: req.body, ip: req.ip });
+  const over = await isDeviceRateLimited({
+    tenantId: req.tenant.id, device, maxMessages: g.maxMessages, windowSeconds: g.windowSeconds
+  });
+  if (!over) return next();
+  // Echo the incoming sessionId so the widget keeps the same conversation.
+  const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId : null;
+  return res.json({
+    answer: g.limitMessage || DEFAULT_LIMIT_MESSAGE,
+    rateLimited: true, followUps: [], products: [], sessionId
+  });
+}
+
+router.post('/:slug/chat', limitVisitor, limitDevice, handleChat);
 
 // The widget's look: the design applied in the Theme Studio and the company
 // logo, fetched once when the widget starts. { theme: null } = the classic
@@ -81,7 +121,10 @@ router.post('/:slug/chat', limitVisitor, handleChat);
 // private: the answer is gated on the API key, so shared caches must not keep it.
 router.get('/:slug/theme', async (req, res) => {
   res.set('Cache-Control', 'private, max-age=60');
-  res.json(await publicTheme(req.tenant));
+  const theme = await publicTheme(req.tenant);
+  // Whether this tenant accepts visitor image uploads (dashboard → Guardrails).
+  // The widget hides its attach button when false; runTenantChat enforces it too.
+  res.json({ ...theme, imagesEnabled: req.guardrails?.imagesEnabled !== false });
 });
 
 // ── Voice input: transcribe an audio blob to text (Groq Whisper), then let the
@@ -129,6 +172,49 @@ router.post('/:slug/transcribe', limitVisitor, admitTranscription, (req, res, ne
   } catch (err) {
     if (err.statusCode === 503) return res.status(503).json({ error: 'Voice input is not available right now.' });
     if (err.statusCode) return res.status(502).json({ error: 'Could not transcribe the audio. Please try again.' });
+    next(err);
+  }
+});
+
+// ── Speech-to-Speech: the visitor speaks (in the language they picked), gets a
+// DB-grounded spoken + text answer back in that same language. The answer is
+// produced ONLY by runTenantChat (services/voiceChat.js), so every locked rule
+// — knowledge-base-only, the price rule, spam pause, rate limits, lead capture —
+// applies exactly as in /chat. OpenAI does recognition + voice; the audio comes
+// back as base64 so the widget can play it without a second request. Billable,
+// so gated on the same per-tenant transcribe limiter as /transcribe.
+async function admitVoiceChat(req, res, next) {
+  if (!isS2sConfigured()) return res.status(503).json({ error: 'Voice conversations are not available right now.' });
+  if (await isTranscribeLimited(req.tenant.id)) {
+    return res.status(429).json({ error: 'Too many voice messages. Please wait a few minutes and try again.' });
+  }
+  next();
+}
+
+router.post('/:slug/voice-chat', limitVisitor, admitVoiceChat, (req, res, next) => audioUpload.single('audio')(req, res, (err) => {
+  if (!err) return next();
+  if (err instanceof multer.MulterError) {
+    return res.status(err.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({
+      error: err.code === 'LIMIT_FILE_SIZE'
+        ? `Audio must be ${Math.round(MAX_AUDIO_BYTES / (1024 * 1024))}MB or smaller`
+        : 'Upload one audio file in a field named "audio"'
+    });
+  }
+  return next(err);
+}), async (req, res, next) => {
+  if (!req.file?.buffer?.length) return res.status(400).json({ error: 'Attach an audio file in a field named "audio"' });
+  try {
+    // req.actor is unset on the public widget route → a real visitor (not sandbox).
+    const out = await runVoiceChat({
+      tenant: req.tenant,
+      audio: { buffer: req.file.buffer, filename: req.file.originalname || 'voice.webm', mimeType: req.file.mimetype || 'audio/webm' },
+      body: req.body, // multer has parsed the text fields (botType, language, sessionId)
+      sandbox: !!req.actor,
+      guardrails: req.guardrails || null
+    });
+    res.json(out);
+  } catch (err) {
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
     next(err);
   }
 });

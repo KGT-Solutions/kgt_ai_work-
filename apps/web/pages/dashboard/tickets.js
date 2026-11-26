@@ -1,5 +1,6 @@
 import { clientLayout, useSession } from '../../components/shell/DashboardShell';
 import TicketsList from '../../components/workspace/TicketsList';
+import EscalationSettings from '../../components/workspace/EscalationSettings';
 import { PageHeader } from '../../components/ui';
 
 export default function TicketsPage() {
@@ -7,7 +8,10 @@ export default function TicketsPage() {
   return (
     <>
       <PageHeader title="Tickets" description="Questions your bots handed off instead of guessing." />
-      <TicketsList ws={ws} />
+      <div className="space-y-5">
+        <EscalationSettings ws={ws} />
+        <TicketsList ws={ws} />
+      </div>
     </>
   );
 }

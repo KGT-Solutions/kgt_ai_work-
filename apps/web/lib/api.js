@@ -85,6 +85,46 @@ function requestMultipart(path, formData, auth) {
 
 const enc = encodeURIComponent;
 
+// Chat Logs filters (Feature 16) → query string. 'all'/empty values are omitted
+// so the URL only carries the filters actually set.
+function sessionQuery({ botType = 'all', status = 'all', escalated = 'all', q = '', from = '', to = '', cursor } = {}) {
+  const p = new URLSearchParams();
+  if (botType && botType !== 'all') p.set('botType', botType);
+  if (status && status !== 'all') p.set('status', status);
+  if (escalated && escalated !== 'all') p.set('escalated', escalated);
+  if (q) p.set('q', q);
+  if (from) p.set('from', from);
+  if (to) p.set('to', to);
+  if (cursor) p.set('cursor', cursor);
+  return p.toString();
+}
+
+// Fetch a CSV with the session's auth header and trigger a browser download. CSV
+// can't go through send() (which parses JSON); on an error the API's JSON { error }
+// is still surfaced. Returns the filename used.
+async function downloadCsv(path, auth) {
+  const res = await fetch(`${BASE_URL}${path}`, { headers: authHeaders(auth) });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    const err = new Error(data.error || fallbackMessage(res.status));
+    err.status = res.status;
+    throw err;
+  }
+  const blob = await res.blob();
+  const cd = res.headers.get('Content-Disposition') || '';
+  const match = /filename="?([^"]+)"?/.exec(cd);
+  const filename = match ? match[1] : 'export.csv';
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  return { filename };
+}
+
 export const api = {
   // ── KGT staff
   staffLogin: (email, password) => request('/api/v1/operator/login', { method: 'POST', body: { email, password } }),
@@ -154,12 +194,51 @@ function workspace(base, auth) {
       return requestMultipart(`${base}/documents/file`, formData, auth);
     },
     importWebsite: (url, { authorized } = {}) => r('/scrape', { method: 'POST', body: { url, authorized: authorized === true } }),
+    // Full-site sitemap sync + weekly auto-refresh + change reports (Feature 2).
+    // getCrawlSource → { url, weeklyEnabled, lastRunAt, lastRunId, lastStatus }.
+    getCrawlSource: () => r('/crawl-source'),
+    saveCrawlSource: (payload) => r('/crawl-source', { method: 'PUT', body: payload }),
+    // "Sync now": run a sitemap sync immediately → the finished run (counts + report).
+    syncCrawlSource: ({ url, authorized } = {}) => r('/crawl-source/sync', { method: 'POST', body: { url, authorized: authorized === true } }),
+    // Change-report history, and one run's full per-page detail.
+    listCrawlRuns: () => r('/crawl-runs'),
+    getCrawlRun: (id) => r(`/crawl-runs/${enc(id)}`),
+    // Generic outbound webhooks (Feature 8). list → { webhooks, events, max }.
+    // createWebhook/rotateWebhookSecret return the plaintext `secret` ONCE.
+    listWebhooks: () => r('/webhooks'),
+    createWebhook: (payload) => r('/webhooks', { method: 'POST', body: payload }),
+    updateWebhook: (id, patch) => r(`/webhooks/${enc(id)}`, { method: 'PATCH', body: patch }),
+    deleteWebhook: (id) => r(`/webhooks/${enc(id)}`, { method: 'DELETE' }),
+    rotateWebhookSecret: (id) => r(`/webhooks/${enc(id)}/rotate-secret`, { method: 'POST' }),
+    testWebhook: (id) => r(`/webhooks/${enc(id)}/test`, { method: 'POST' }),
+    listWebhookDeliveries: (webhookId) => r(`/webhooks/deliveries${webhookId ? `?webhookId=${enc(webhookId)}` : ''}`),
+    // Google Sheets sync (Feature 8). Status never includes tokens. connectSheets
+    // returns { authUrl } — the page sends the browser there to grant consent.
+    getSheetsSync: () => r('/sheets-sync'),
+    connectSheets: () => r('/sheets-sync/connect', { method: 'POST' }),
+    disconnectSheets: () => r('/sheets-sync/disconnect', { method: 'POST' }),
+    saveSheetsSettings: (patch) => r('/sheets-sync/settings', { method: 'PUT', body: patch }),
     // Product catalog: structured rows + counts. Upload is multipart CSV.
     getCatalog: () => r('/catalog'),
     uploadCatalog: (file) => {
       const formData = new FormData();
       formData.append('file', file);
       return requestMultipart(`${base}/catalog`, formData, auth);
+    },
+    // Spreadsheet (.xlsx) catalog import (Feature 1): preview the workbook's
+    // sheets/columns/sample rows, then import the chosen sheet + column→field
+    // mapping. The file is re-uploaded with the mapping; nothing is stored between.
+    previewCatalogXlsx: (file) => {
+      const formData = new FormData();
+      formData.append('file', file);
+      return requestMultipart(`${base}/catalog/xlsx/preview`, formData, auth);
+    },
+    // selections: { sheets: [{ index, headerRow?, mapping: { name, sku?, price?, description?, category?, imageUrl?, productUrl? } }] }
+    importCatalogXlsx: (file, selections) => {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('selections', JSON.stringify(selections));
+      return requestMultipart(`${base}/catalog/xlsx/import`, formData, auth);
     },
     // Per-item catalog CRUD (name, sku, price, description, category, imageUrl).
     listProducts: () => r('/catalog/products'),
@@ -181,17 +260,42 @@ function workspace(base, auth) {
       formData.append('audio', blob, filename);
       return requestMultipart(`${base}/transcribe`, formData, auth);
     },
+    // Speech-to-Speech: POST the visitor's spoken audio + chosen language and get
+    // back the DB-grounded answer as text AND spoken audio (base64), in that
+    // same language: { text, answer, audio, audioMimeType, language, sessionId, ... }.
+    voiceChat: (blob, { botType = 'support', language = 'en', sessionId } = {}, filename = 'voice.webm') => {
+      const formData = new FormData();
+      formData.append('audio', blob, filename);
+      formData.append('botType', botType);
+      formData.append('language', language);
+      if (sessionId) formData.append('sessionId', sessionId);
+      return requestMultipart(`${base}/voice-chat`, formData, auth);
+    },
     // Custom outbound SMTP. The password is write-only: getSmtpConfig returns
     // it masked, and saving/testing with the mask reuses the stored one.
     getSmtpConfig: () => r('/smtp-config'),
     saveSmtpConfig: (payload) => r('/smtp-config', { method: 'PUT', body: payload }),
     testSmtpConfig: (payload) => r('/smtp-config/test', { method: 'POST', body: payload }),
+    // Email Connection (Feature 10): Google/Microsoft send-only OAuth + per-email
+    // toggles, alongside custom SMTP. Status never includes tokens. connectEmail
+    // returns { authUrl } — the page sends the browser there to grant consent;
+    // the backend callback finishes the link and redirects back here.
+    getEmailConnection: () => r('/email-connection'),
+    connectEmail: (provider) => r('/email-connection/connect', { method: 'POST', body: { provider } }),
+    disconnectEmail: () => r('/email-connection/disconnect', { method: 'POST' }),
+    saveEmailToggles: (patch) => r('/email-connection/toggles', { method: 'PUT', body: patch }),
     // CRM integrations (Zoho). Status never includes tokens. connectCrm returns
     // { authUrl } — the page sends the browser there to grant consent; the
     // backend callback finishes the link and redirects back here.
     getCrmStatus: () => r('/crm'),
     connectCrm: (region) => r('/crm/connect', { method: 'POST', body: { region } }),
     disconnectCrm: () => r('/crm/disconnect', { method: 'POST' }),
+    // HubSpot CRM (Feature 9). Same contract as Zoho above — status never includes
+    // tokens, connectHubspot returns { authUrl } for the consent redirect. One CRM
+    // per tenant: connect is refused (409) while Zoho is connected.
+    getHubspotStatus: () => r('/crm/hubspot'),
+    connectHubspot: () => r('/crm/hubspot/connect', { method: 'POST' }),
+    disconnectHubspot: () => r('/crm/hubspot/disconnect', { method: 'POST' }),
     // Bot Branding & Theme Studio: brand kit + three generated widget designs.
     // selectTheme(null) puts the widget back on its classic look.
     getBranding: () => r('/branding'),
@@ -205,6 +309,14 @@ function workspace(base, auth) {
       return requestMultipart(`${base}/branding/logo`, formData, auth);
     },
     removeBrandLogo: () => r('/branding/logo', { method: 'DELETE' }),
+    // Client-facing Instructions Editor (Feature 11): per-assistant tone/style/
+    // length + guidance. The locked grounding/safety rules stay server-side and
+    // can't be overridden. getInstructions returns the current settings plus the
+    // preset catalog; every save is versioned and can be restored.
+    getInstructions: (botType = 'support') => r(`/instructions?botType=${enc(botType)}`),
+    saveInstructions: (payload) => r('/instructions', { method: 'PUT', body: payload }),
+    listInstructionVersions: (botType = 'support') => r(`/instructions/versions?botType=${enc(botType)}`),
+    restoreInstructionVersion: (botType, versionId) => r('/instructions/restore', { method: 'POST', body: { botType, versionId } }),
     // Starter questions written from this tenant's documents: { status, supportFaqs, salesFaqs, generatedAt }
     getFaqs: () => r('/faqs'),
     regenerateFaqs: () => r('/faqs/regenerate', { method: 'POST' }),
@@ -217,12 +329,40 @@ function workspace(base, auth) {
     // botType: 'all' | 'sales' | 'support'; status: 'all' | 'NEW' | 'CONTACTED' — filtered by the API.
     listLeads: ({ botType = 'all', status = 'all' } = {}) => r(`/leads?botType=${enc(botType)}&status=${enc(status)}`),
     updateLeadStatus: (id, status) => r(`/leads/${enc(id)}`, { method: 'PATCH', body: { status } }),
-    // Every conversation with its AI summary and leads: { sessions, nextCursor }, 30 per page.
-    listSessions: ({ botType = 'all', cursor } = {}) =>
-      r(`/sessions?botType=${enc(botType)}${cursor ? `&cursor=${enc(cursor)}` : ''}`),
+    // Every conversation with its AI summary, leads and escalation flag:
+    // { filters, sessions, nextCursor }, 30 per page. Chat Logs filters (Feature
+    // 16): botType, status ('active'|'paused'), escalated ('yes'|'no'), q (search
+    // text), from/to (ISO dates) — all optional, applied by the API.
+    listSessions: (filters = {}) => {
+      const qs = sessionQuery(filters);
+      return r(`/sessions${qs ? `?${qs}` : ''}`);
+    },
+    // CSV export of the filtered chat logs (Feature 16), and of one transcript.
+    // Each triggers a browser download; returns { filename }.
+    exportSessionsCsv: (filters = {}) => {
+      const qs = sessionQuery(filters);
+      return downloadCsv(`${base}/sessions/export.csv${qs ? `?${qs}` : ''}`, auth);
+    },
+    exportSessionCsv: (id) => downloadCsv(`${base}/sessions/${enc(id)}/export.csv`, auth),
     // One conversation: its summary, leads and every message, oldest first.
     getSession: (id) => r(`/sessions/${enc(id)}`),
     summarizeSession: (id) => r(`/sessions/${enc(id)}/summarize`, { method: 'POST' }),
+    // Pause / resume a conversation: a paused one gets no bot replies until resumed.
+    pauseSession: (id) => r(`/sessions/${enc(id)}/pause`, { method: 'PATCH' }),
+    resumeSession: (id) => r(`/sessions/${enc(id)}/resume`, { method: 'PATCH' }),
+    // Human Escalation (Feature 5): trigger keywords + business hours + reply ETA.
+    getEscalation: () => r('/escalation'),
+    saveEscalation: (payload) => r('/escalation', { method: 'PUT', body: payload }),
+    // Helpdesk (Feature 5): connect Zoho Desk / Freshdesk. Status never includes
+    // secrets. connect verifies the credentials before storing them (encrypted).
+    getHelpdesk: () => r('/helpdesk'),
+    connectHelpdesk: (payload) => r('/helpdesk/connect', { method: 'POST', body: payload }),
+    setHelpdeskEnabled: (isEnabled) => r('/helpdesk', { method: 'PATCH', body: { isEnabled } }),
+    disconnectHelpdesk: () => r('/helpdesk/disconnect', { method: 'POST' }),
+    // Chat-log retention (Feature 16): fixed 30-day server policy (read-only) +
+    // a guarded purge (dry-run by default). No setter — the period isn't tenant-configurable.
+    getRetention: () => r('/retention'),
+    purgeSessions: ({ dryRun = true } = {}) => r('/retention/purge', { method: 'POST', body: { dryRun } }),
     // Conversations where a bot missed (under 25% confidence, or no knowledge-base answer), each with its question:
     // { below, totalSessions, totalWeakAnswers, sessions, nextPage }
     listImprovements: ({ botType = 'all', page = 0 } = {}) => r(`/improvements?botType=${enc(botType)}&page=${page}`),
@@ -240,7 +380,11 @@ function workspace(base, auth) {
     // How the documents split between the bots: { totals, documents: [{ id, title, botScope, sections, counts }] }
     getKnowledgeDistribution: () => r('/knowledge/distribution'),
     // Which bots the company deploys: 'support' | 'sales' | 'both'
-    setBotPreference: (botPreference) => r('/bot-preference', { method: 'PATCH', body: { botPreference } })
+    setBotPreference: (botPreference) => r('/bot-preference', { method: 'PATCH', body: { botPreference } }),
+    // Guardrails config (scaffold): { maxMessages, windowSeconds, limitMessage,
+    // spamCheckEnabled, blockedCountries, imagesEnabled }.
+    getGuardrails: () => r('/guardrails'),
+    updateGuardrails: (patch) => r('/guardrails', { method: 'PATCH', body: patch })
   };
 }
 
@@ -249,6 +393,11 @@ export const staffWorkspace = (tenantId) => workspace(`/api/v1/tenants/${enc(ten
 
 // Stand-in for the key in snippets shown after the real key is gone (keys
 // are stored hashed and can't be read back).
+// Absolute URL for a visitor's uploaded chat image, served by the content-
+// addressed public route (routes/chatImages.routes.js). The extension is
+// cosmetic — the server sets the real type — so a key alone resolves.
+export const chatImageUrl = (tenantId, key) => `${BASE_URL}/api/v1/public/chat-images/${enc(tenantId)}/${enc(key)}`;
+
 export const API_KEY_PLACEHOLDER = 'YOUR_API_KEY';
 
 // bot: 'sales' | 'support' — the widget sends it as botType on every message

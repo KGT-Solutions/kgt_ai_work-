@@ -344,7 +344,8 @@ Before pointing real traffic at a deployment:
 - [ ] `SMTP_*` configured and the startup log says `SMTP login OK`
 - [ ] `HUB_ADMIN_PASSWORD` changed from any example value
 - [ ] `LEAD_CONFIRMATION_COOLDOWN_HOURS` not left at `0`
-- [ ] Postgres backups scheduled and a restore tested
+- [ ] `backup` sidecar running (`docker logs kgt-ai-hub-backup`), dumps going
+      offsite (`BACKUP_OFFSITE_CMD` or a mapped volume), and a restore tested
 - [ ] Both release-gate test commands green on the release commit
 
 Details for each in §5 and §6 of [DOCUMENTATION.md](../DOCUMENTATION.md) and in

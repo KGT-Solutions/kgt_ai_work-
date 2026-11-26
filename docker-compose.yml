@@ -41,6 +41,47 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  # Scheduled database backups (infra/backup/backup.sh). Same pgvector/pg16
+  # image as postgres, so the pg_dump client version matches the server exactly.
+  # It takes one compressed custom-format dump a day (plus one on start), prunes
+  # dumps past the retention window, and can push each dump offsite. Dumps land
+  # in a dedicated volume — map it to a host path or add BACKUP_OFFSITE_CMD to
+  # keep copies off this host (a dump on the same disk as the DB is not a backup
+  # against disk loss). Set BACKUP_ENABLED=false to turn the sidecar off.
+  backup:
+    image: pgvector/pgvector:pg16
+    container_name: kgt-ai-hub-backup
+    # Same credentials file as postgres, so POSTGRES_USER/DB/PASSWORD stay in sync.
+    env_file: ${HUB_ENV_FILE:-.env.docker}
+    environment:
+      PGHOST: postgres
+      BACKUP_ENABLED: ${BACKUP_ENABLED:-true}
+      BACKUP_HOUR_UTC: ${BACKUP_HOUR_UTC:-2}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+      BACKUP_ON_START: ${BACKUP_ON_START:-true}
+      BACKUP_DIR: /backups
+      BACKUP_OFFSITE_CMD: ${BACKUP_OFFSITE_CMD:-}
+      BACKUP_ALERT_CMD: ${BACKUP_ALERT_CMD:-}
+      BACKUP_HEALTH_MAX_AGE_HOURS: ${BACKUP_HEALTH_MAX_AGE_HOURS:-26}
+    entrypoint: ["sh", "/backup.sh"]
+    volumes:
+      - ./infra/backup/backup.sh:/backup.sh:ro
+      - ./infra/backup/healthcheck.sh:/healthcheck.sh:ro
+      - kgt_ai_hub_pg_backups:/backups
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    # Makes a stalled/failing backup visible in `docker ps`: unhealthy when no
+    # dump is newer than BACKUP_HEALTH_MAX_AGE_HOURS. start_period is generous so
+    # the first on-start dump of a large DB has time to land before it counts.
+    healthcheck:
+      test: ["CMD", "sh", "/healthcheck.sh"]
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 10m
+
   # The state every API replica has to agree on. Small and mostly ephemeral:
   # rate-limit windows, alert throttles and job locks all expire on their own.
   # The one thing worth keeping across a restart is the per-tenant knowledge
@@ -164,3 +205,4 @@ services:
 volumes:
   kgt_ai_hub_pg_data:
   kgt_ai_hub_redis_data:
+  kgt_ai_hub_pg_backups:

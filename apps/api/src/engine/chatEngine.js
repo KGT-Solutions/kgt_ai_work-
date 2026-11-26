@@ -10,6 +10,7 @@
 // before. The tenant profiles (domains/tenantProfile.js) opt in to all three.
 
 const { loadKnowledgeBase } = require('./knowledgeLoader');
+const { logger } = require('../lib/logger');
 const { retrieve } = require('./retriever');
 const { retrieveHybrid } = require('./hybridRetriever');
 const { translateQueryForRetrieval } = require('./queryTranslation');
@@ -141,7 +142,7 @@ async function getEngineAnswer({ profile, query, ctx = {} }) {
       // provider-outage path below. Checked here (not before the cache) so a free
       // cache hit is always served, even once a tenant is over budget.
       if (profile.usageTracking && ctx.tenantId && (await isTenantOverBudget(ctx.tenantId))) {
-        console.warn(`[chatEngine] ${profile.id}: tenant ${ctx.tenantId} is over its monthly token budget — serving a handoff instead of calling the model`);
+        logger.warn(`[chatEngine] ${profile.id}: tenant ${ctx.tenantId} is over its monthly token budget — serving a handoff instead of calling the model`);
         const result = profile.formatFallback(ctx, confidence);
         result.handoff = true;
         if (profile.ticketing) result.awaitingContact = true;
@@ -215,7 +216,7 @@ async function getEngineAnswer({ profile, query, ctx = {} }) {
       // Previously silent — a missing/invalid key looked identical to a
       // working bot with a bad knowledge base. One line per degraded answer,
       // naming every provider tried (never key values).
-      console.error(
+      logger.error(
         `[chatEngine] ${profile.id}: LLM unavailable, served degraded answer — ` +
         (err.attempts?.length ? formatAttempts(err.attempts) : `${err.name}: ${err.message}`)
       );

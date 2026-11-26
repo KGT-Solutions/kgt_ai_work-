@@ -20,6 +20,7 @@
 //     them through catalogIngest's strict validateProduct before any DB write.
 
 const { generateAnswer, isLlmConfigured } = require('../../engine/llmClient');
+const { logger } = require('../../lib/logger');
 
 const envInt = (name, def) => {
   const v = parseInt(process.env[name], 10);
@@ -137,7 +138,7 @@ async function distillMarkdown(raw, { title = '', generate = generateAnswer } = 
     }
     return { markdown, products: cleanProducts(products), distilled: true };
   } catch (err) {
-    console.warn(`[llmDistillation] falling back to raw text: ${err.message}`);
+    logger.warn(`[llmDistillation] falling back to raw text: ${err.message}`);
     return { markdown: source, products: [], distilled: false };
   }
 }
